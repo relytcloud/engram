@@ -34,14 +34,16 @@ var _ mcp.MemoryBackend = (*memorylake.MemoryLakeBackend)(nil)
 //     resolved here, the entry is backfilled, and the enablement file is
 //     saved (best-effort — a save failure does not block the request).
 //  4. Any failure resolving or constructing the MemoryLake backend (server
-//     unreachable, bad API key, ...) falls back to sqlite rather than
-//     failing the mem_* call outright. The fallback (like a success) is
-//     cached per project so a broken MemoryLake config does not retry the
-//     failing network calls on every single tool invocation.
+//     unreachable, bad API key, ...) falls back to sqlite for *this* call
+//     rather than failing the mem_* call outright. Unlike a success, a
+//     fallback is deliberately NOT cached: a single transient failure (a
+//     network blip, a briefly-down MemoryLake) must not pin the project to
+//     sqlite for the rest of the process lifetime and silently diverge from
+//     the shared backend. The next call retries the resolution.
 //
-// MemoryLake backends (and fallback decisions) are constructed lazily and
-// cached per project behind a mutex, since BackendSelector is called
-// concurrently by mem_* tool handlers.
+// MemoryLake backends are constructed lazily and cached per project behind a
+// mutex, since BackendSelector is called concurrently by mem_* tool handlers.
+// Only successfully-constructed MemoryLake backends are cached.
 func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *memorylake.Enablement) mcp.BackendSelector {
 	var mu sync.Mutex
 	cache := map[string]mcp.MemoryBackend{}
@@ -73,18 +75,25 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 			return cached
 		}
 
-		backend := resolveMemoryLakeBackend(project, entry, cfg, enab, sqlite)
-		cache[project] = backend
+		backend, ok := resolveMemoryLakeBackend(project, entry, cfg, enab, sqlite)
+		if ok {
+			// Only cache a genuine MemoryLake backend. A fallback to sqlite is
+			// left uncached so a transient failure is retried on the next call.
+			cache[project] = backend
+		}
 		return backend
 	}
 }
 
 // resolveMemoryLakeBackend does the actual (possibly network-calling)
 // resolution for one enabled project: filling in a missing MemoryLake
-// project id when necessary, then constructing the backend. Any failure
-// along the way falls back to sqlite with a stderr warning instead of
-// propagating the error to the caller.
-func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, sqlite mcp.MemoryBackend) mcp.MemoryBackend {
+// project id when necessary, then constructing the backend. It returns
+// (backend, true) on success and (sqlite, false) on any failure along the
+// way (with a stderr warning) instead of propagating the error to the
+// caller. The bool lets the caller distinguish a real MemoryLake backend
+// (safe to cache) from a transient fallback (must not be cached, so the next
+// call retries).
+func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, sqlite mcp.MemoryBackend) (mcp.MemoryBackend, bool) {
 	ws := cfg.Workspace
 	projID := entry.ProjID
 
@@ -94,13 +103,13 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 		resolvedWS, err := client.ResolveWorkspaceID(cfg.Workspace)
 		if err != nil {
 			warnMemoryLakeFallback(project, "resolving workspace", err)
-			return sqlite
+			return sqlite, false
 		}
 
 		newProjID, err := client.EnsureProject(resolvedWS, project)
 		if err != nil {
 			warnMemoryLakeFallback(project, "ensuring project", err)
-			return sqlite
+			return sqlite, false
 		}
 
 		ws = resolvedWS
@@ -122,9 +131,9 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 	backend, err := memorylake.NewBackend(cfg, ws, projID)
 	if err != nil {
 		warnMemoryLakeFallback(project, "constructing backend", err)
-		return sqlite
+		return sqlite, false
 	}
-	return backend
+	return backend, true
 }
 
 func warnMemoryLakeFallback(project, step string, err error) {

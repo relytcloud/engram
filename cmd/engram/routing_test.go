@@ -152,12 +152,70 @@ func TestNewRoutingSelector_ResolutionFailureFallsBackToSQLite(t *testing.T) {
 	if got != mcp.MemoryBackend(sqlite) {
 		t.Fatalf("expected sqlite fallback on resolution failure, got %T", got)
 	}
+}
 
-	// Repeated calls should reuse the cached fallback rather than retrying
-	// the failing HTTP calls every time (fast-fail caching).
-	got2 := sel("myproj")
-	if got2 != mcp.MemoryBackend(sqlite) {
-		t.Fatalf("expected cached sqlite fallback on second call, got %T", got2)
+// TestNewRoutingSelector_TransientFailureIsNotCachedAndRetries is the FIX #5
+// regression: a fallback to sqlite must NOT be cached. A single transient
+// failure (network blip / MemoryLake briefly down) must not pin the project to
+// sqlite for the process lifetime and silently diverge from the shared
+// backend. The first call fails and falls back to sqlite; once the server
+// recovers, the next call must retry the resolution and route to MemoryLake
+// (not return a cached sqlite fallback).
+func TestNewRoutingSelector_TransientFailureIsNotCachedAndRetries(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var mu sync.Mutex
+	healthy := false // starts down; flip to healthy between the two selector calls
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		ok := healthy
+		mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "boom", "error_code": "INTERNAL"})
+			return
+		}
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"items": []map[string]any{{"id": "ws-1", "name": "engram", "custom_id": "engram"}},
+			}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{}}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "proj-new"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	sqlite := &stubBackend{name: "sqlite"}
+	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
+		"myproj": {ProjID: ""},
+	}}
+
+	sel := NewRoutingSelector(sqlite, cfg, enab)
+
+	// First call: server is down → transient failure → sqlite fallback.
+	if got := sel("myproj"); got != mcp.MemoryBackend(sqlite) {
+		t.Fatalf("first call: expected sqlite fallback while server down, got %T", got)
+	}
+
+	// Server recovers.
+	mu.Lock()
+	healthy = true
+	mu.Unlock()
+
+	// Second call must RETRY (the failure was not cached) and route to MemoryLake.
+	got := sel("myproj")
+	if _, ok := got.(*memorylake.MemoryLakeBackend); !ok {
+		t.Fatalf("second call: expected retry to construct *memorylake.MemoryLakeBackend after recovery, got %T", got)
 	}
 }
 
