@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -225,6 +226,157 @@ func TestBackend_AddObservation_DoesNotClaimPreExistingUnmarkedFact(t *testing.T
 	}
 	if len(patchedIDs) != 1 || patchedIDs[0] != "new-fact" {
 		t.Fatalf("patchedIDs=%v, want exactly [new-fact] (stale-fact must not be claimed)", patchedIDs)
+	}
+}
+
+// TestBackend_AddObservation_ConcurrentSavesNoCrossClaim is the FIX B
+// regression: two concurrent AddObservation calls on the SAME backend must not
+// let one save claim (and stamp its engram_raw onto) the fact extracted from
+// the other save's message. The window exists because AddObservation is a
+// snapshot→append→backfill sequence: unserialized, both calls can snapshot
+// before either appends, so each sees the other's freshly-extracted fact as
+// "new and unmarked" and races to PATCH it. A per-backend write mutex
+// serializes the whole sequence, closing the window.
+//
+// The mock is stateful: appending a message synchronously "extracts" exactly
+// one fact whose text equals that message's content and whose metadata starts
+// empty; backfill then PATCHes engram metadata onto it. The invariant checked
+// at the end is that every fact's engram_raw equals its own fact text — i.e. no
+// fact carries another save's verbatim content. Runs under `-race`.
+func TestBackend_AddObservation_ConcurrentSavesNoCrossClaim(t *testing.T) {
+	type mockFact struct {
+		id       string
+		fact     string
+		metadata map[string]any
+	}
+
+	var mu sync.Mutex
+	facts := map[string]*mockFact{} // fact id → fact
+
+	factsSnapshot := func() []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]map[string]any, 0, len(facts))
+		for _, f := range facts {
+			md := map[string]any{}
+			for k, v := range f.metadata {
+				md[k] = v
+			}
+			out = append(out, map[string]any{"id": f.id, "fact": f.fact, "metadata": md})
+		}
+		return out
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			// Parse the appended content and synchronously extract one fact
+			// keyed by (and carrying) that content, unmarked.
+			var body struct {
+				CustomID string `json:"custom_id"`
+				Content  []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			text := ""
+			if len(body.Content) > 0 {
+				text = body.Content[0].Text
+			}
+			factID := "fact-" + contentHash(text)
+			mu.Lock()
+			if _, exists := facts[factID]; !exists {
+				facts[factID] = &mockFact{id: factID, fact: text, metadata: map[string]any{}}
+			}
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-" + body.CustomID}})
+
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": factsSnapshot()}})
+
+		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/"):
+			id := strings.TrimPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/")
+			var body struct {
+				Metadata map[string]any `json:"metadata"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			f, ok := facts[id]
+			if ok {
+				for k, v := range body.Metadata {
+					f.metadata[k] = v
+				}
+			}
+			var echoFact string
+			var echoMD map[string]any
+			if ok {
+				echoFact = f.fact
+				echoMD = map[string]any{}
+				for k, v := range f.metadata {
+					echoMD[k] = v
+				}
+			}
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": id, "fact": echoFact, "metadata": echoMD,
+			}})
+
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	b.poll = 1 * time.Millisecond
+	b.maxWait = 2 * time.Second
+
+	contents := []string{
+		"observation ALPHA, verbatim and distinct",
+		"observation BRAVO, verbatim and distinct",
+		"observation CHARLIE, verbatim and distinct",
+		"observation DELTA, verbatim and distinct",
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, len(contents))
+	for i, c := range contents {
+		wg.Add(1)
+		go func(i int, c string) {
+			defer wg.Done()
+			_, errs[i] = b.AddObservation(store.AddObservationParams{
+				SessionID: "sess-1", Type: "note", Title: "t", Content: c, Scope: "global",
+			})
+		}(i, c)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("AddObservation[%d]: %v", i, err)
+		}
+	}
+
+	// Invariant: every fact's engram_raw must equal its own fact text. A
+	// cross-claim would stamp one save's content onto another save's fact,
+	// breaking this.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(facts) != len(contents) {
+		t.Fatalf("expected %d distinct facts, got %d", len(contents), len(facts))
+	}
+	for id, f := range facts {
+		raw, _ := f.metadata[metaRaw].(string)
+		if raw == "" {
+			t.Fatalf("fact %s (%q) was never backfilled with engram_raw", id, f.fact)
+		}
+		if raw != f.fact {
+			t.Fatalf("fact %s cross-claimed: engram_raw=%q but fact text=%q (a concurrent save hijacked this fact)", id, raw, f.fact)
+		}
 	}
 }
 

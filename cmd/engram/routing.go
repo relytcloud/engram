@@ -41,12 +41,34 @@ var _ mcp.MemoryBackend = (*memorylake.MemoryLakeBackend)(nil)
 //     sqlite for the rest of the process lifetime and silently diverge from
 //     the shared backend. The next call retries the resolution.
 //
-// MemoryLake backends are constructed lazily and cached per project behind a
-// mutex, since BackendSelector is called concurrently by mem_* tool handlers.
-// Only successfully-constructed MemoryLake backends are cached.
+// MemoryLake backends are constructed lazily and cached per project. Crucially,
+// the (possibly slow / failing) network resolution for one project must never
+// block routing for any other project. A single process-wide mutex held across
+// resolveMemoryLakeBackend would do exactly that: with MemoryLake down, every
+// enabled project retries the full network sequence (each HTTP call bounded by
+// ENGRAM_MEMORYLAKE_TIMEOUT_MS, default 30s) under that lock, serializing even
+// unrelated healthy/sqlite projects behind a ~30-60s stall. Instead:
+//
+//   - A short-lived global mutex (gmu) guards only the shared, mutable state:
+//     the per-project entry map and access to enab.EnabledProjects (read via
+//     IsEnabled, backfilled + persisted during resolution). gmu is NEVER held
+//     across a network call.
+//   - Each project gets its own *projEntry with its own mutex. All network I/O
+//     for a project happens under that per-project lock, so a hung/failing
+//     project blocks only itself. Concurrent first-resolves of the SAME project
+//     coalesce behind that lock (singleflight — no construction stampede).
+//   - Only a successfully-constructed MemoryLake backend is cached (backend !=
+//     nil). A fallback to sqlite is left uncached so a transient failure is
+//     retried on the next call for that project — and the retry, too, is
+//     confined to that project's lock and never blocks others.
 func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *memorylake.Enablement) mcp.BackendSelector {
-	var mu sync.Mutex
-	cache := map[string]mcp.MemoryBackend{}
+	type projEntry struct {
+		mu      sync.Mutex        // serializes resolution for THIS project only
+		backend mcp.MemoryBackend // cached genuine MemoryLake backend; nil until resolved
+	}
+
+	var gmu sync.Mutex
+	entries := map[string]*projEntry{}
 
 	return func(project string) mcp.MemoryBackend {
 		if os.Getenv("ENGRAM_BACKEND") == "sqlite" {
@@ -56,30 +78,40 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 			return sqlite
 		}
 
-		// enab.EnabledProjects is a plain map, mutated (backfilled with a
-		// resolved MemoryLake project id) inside resolveMemoryLakeBackend
-		// below while mu is held. Reading it via IsEnabled must happen under
-		// the same mu — not before acquiring it — or a concurrent read here
-		// can race with that write (mem-go's stdio server dispatches mem_*
-		// calls to multiple worker goroutines, so two different projects can
-		// call this selector at the same time).
-		mu.Lock()
-		defer mu.Unlock()
-
+		// Short global critical section: read enablement state and fetch (or
+		// create) this project's entry. enab.EnabledProjects is a shared map
+		// that resolveMemoryLakeBackend backfills, so every read/write of it is
+		// serialized by gmu — but gmu is released before any network I/O.
+		gmu.Lock()
 		entry, ok := enab.IsEnabled(project)
 		if !ok {
+			gmu.Unlock()
 			return sqlite
 		}
+		pe := entries[project]
+		if pe == nil {
+			pe = &projEntry{}
+			entries[project] = pe
+		}
+		gmu.Unlock()
 
-		if cached, hit := cache[project]; hit {
-			return cached
+		// Per-project critical section. Different projects hold different
+		// pe.mu, so slow/failing resolution here cannot block another project
+		// (or a sqlite/non-enabled project, which returned above without ever
+		// reaching this lock). Concurrent first calls for the same project
+		// coalesce here: the first resolves, the rest see the cached backend.
+		pe.mu.Lock()
+		defer pe.mu.Unlock()
+
+		if pe.backend != nil {
+			return pe.backend
 		}
 
-		backend, ok := resolveMemoryLakeBackend(project, entry, cfg, enab, sqlite)
+		backend, ok := resolveMemoryLakeBackend(project, entry, cfg, enab, &gmu, sqlite)
 		if ok {
 			// Only cache a genuine MemoryLake backend. A fallback to sqlite is
 			// left uncached so a transient failure is retried on the next call.
-			cache[project] = backend
+			pe.backend = backend
 		}
 		return backend
 	}
@@ -93,13 +125,21 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 // caller. The bool lets the caller distinguish a real MemoryLake backend
 // (safe to cache) from a transient fallback (must not be cached, so the next
 // call retries).
-func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, sqlite mcp.MemoryBackend) (mcp.MemoryBackend, bool) {
+//
+// The caller holds this project's per-project lock (never the global lock),
+// so the network calls below (each bounded by ENGRAM_MEMORYLAKE_TIMEOUT_MS)
+// serialize only this project. gmu is acquired for the single short critical
+// section that mutates and persists the shared enab.EnabledProjects map — and
+// released again — so backfilling one project's resolved id can never race
+// with, or stall, another project's routing.
+func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, gmu *sync.Mutex, sqlite mcp.MemoryBackend) (mcp.MemoryBackend, bool) {
 	ws := cfg.Workspace
 	projID := entry.ProjID
 
 	if projID == "" {
 		client := memorylake.NewClient(cfg)
 
+		// Network I/O — deliberately NOT under gmu.
 		resolvedWS, err := client.ResolveWorkspaceID(cfg.Workspace)
 		if err != nil {
 			warnMemoryLakeFallback(project, "resolving workspace", err)
@@ -115,7 +155,13 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 		ws = resolvedWS
 		projID = newProjID
 
+		// Backfill the resolved id into the shared enablement map and persist
+		// it. This touches enab.EnabledProjects (shared across all projects)
+		// and enab.Save, so it must be serialized by gmu — but the network
+		// calls above were not, and gmu is released again immediately (the
+		// enclosing per-project lock still guards this project's resolution).
 		entry.ProjID = projID
+		gmu.Lock()
 		if enab.EnabledProjects == nil {
 			enab.EnabledProjects = map[string]memorylake.ProjectEntry{}
 		}
@@ -123,11 +169,14 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 		// Best-effort: a failed save must not block the current request —
 		// resolution will simply be retried (and the file re-saved) next
 		// time this project's cache entry is evicted (e.g. process restart).
-		if err := enab.Save(memorylake.DefaultEnablementPath()); err != nil {
-			fmt.Fprintf(os.Stderr, "[engram] memorylake: failed to persist resolved project id for %q (continuing): %v\n", project, err)
+		saveErr := enab.Save(memorylake.DefaultEnablementPath())
+		gmu.Unlock()
+		if saveErr != nil {
+			fmt.Fprintf(os.Stderr, "[engram] memorylake: failed to persist resolved project id for %q (continuing): %v\n", project, saveErr)
 		}
 	}
 
+	// Network I/O — deliberately NOT under gmu.
 	backend, err := memorylake.NewBackend(cfg, ws, projID)
 	if err != nil {
 		warnMemoryLakeFallback(project, "constructing backend", err)

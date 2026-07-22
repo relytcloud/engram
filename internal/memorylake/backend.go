@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -39,6 +40,21 @@ type MemoryLakeBackend struct {
 	idmap   *IDMap
 	poll    time.Duration
 	maxWait time.Duration
+
+	// writeMu serializes the write path (AddObservation) for this backend
+	// instance. AddObservation is a snapshot→append→backfill sequence:
+	// BackfillFacts claims any fact that is both absent from the pre-append
+	// snapshot and not yet stamped with engram metadata. Two concurrent
+	// AddObservation calls on the same project could each snapshot before the
+	// other appends, so each would see the other's freshly-extracted fact as
+	// "new and unmarked" and race to claim it — one save stamping its own
+	// engram_raw onto the fact that belongs to the other (data corruption on
+	// read-back). Serializing the whole sequence per backend closes that
+	// window. Because routing caches a single backend instance per project,
+	// this mutex is naturally per-project: distinct projects hold distinct
+	// instances and never contend. Read paths (Get/Search/Timeline/...) are
+	// deliberately NOT guarded — only the write path needs ordering.
+	writeMu sync.Mutex
 }
 
 // NewBackend constructs a MemoryLakeBackend for the given workspace reference
@@ -112,6 +128,14 @@ func idmapPath(projID string) string {
 // content is idempotent on the message custom_id). Callers treat this as a
 // successful, pending save.
 func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64, error) {
+	// Serialize the snapshot→append→backfill sequence against concurrent
+	// AddObservation calls on this same project (see writeMu's doc comment):
+	// without it, two concurrent saves can each claim the other's extracted
+	// fact and overwrite its engram_raw. Only the write path is locked; reads
+	// stay concurrent.
+	b.writeMu.Lock()
+	defer b.writeMu.Unlock()
+
 	convCustomID := p.SessionID
 	if convCustomID == "" {
 		convCustomID = defaultConversationCustomID

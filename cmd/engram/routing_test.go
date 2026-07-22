@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/memorylake"
@@ -282,6 +284,167 @@ func TestNewRoutingSelector_ConcurrentEnabledUnresolvedProjectsNoDataRace(t *tes
 	for i, got := range results {
 		if _, ok := got.(*memorylake.MemoryLakeBackend); !ok {
 			t.Fatalf("project %d: expected *memorylake.MemoryLakeBackend, got %T", i, got)
+		}
+	}
+}
+
+// TestNewRoutingSelector_SlowProjectDoesNotBlockOthers is the FIX A regression:
+// a project whose MemoryLake resolution is stuck in a slow/failing network call
+// must NOT block routing for any other project. Before the fix, the selector
+// held one process-wide mutex across the whole resolution (including the
+// bounded-but-slow HTTP calls), so an in-flight resolve for one project
+// serialized every other project — including unrelated healthy or sqlite
+// projects — behind it. This test wedges "slow-proj" mid-network (its POST to
+// create the project blocks on a channel) and asserts that both an unrelated
+// enabled project ("fast-proj") and a non-enabled sqlite project resolve
+// promptly while slow-proj is still stuck.
+func TestNewRoutingSelector_SlowProjectDoesNotBlockOthers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAll()
+	slowReached := make(chan struct{})
+	var slowOnce sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/workspaces":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"items": []map[string]any{{"id": "ws-1", "name": "engram", "custom_id": "engram"}},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			var body struct {
+				CustomID string `json:"custom_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.CustomID == "slow-proj" {
+				// Signal we're mid-network for slow-proj (its per-project lock
+				// held, but NOT the global lock), then block indefinitely.
+				slowOnce.Do(func() { close(slowReached) })
+				<-release
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "resolved-" + body.CustomID}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	sqlite := &stubBackend{name: "sqlite"}
+	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
+		"slow-proj": {ProjID: ""},
+		"fast-proj": {ProjID: ""},
+	}}
+
+	sel := NewRoutingSelector(sqlite, cfg, enab)
+
+	// Wedge slow-proj mid-resolution in the background.
+	go sel("slow-proj")
+	select {
+	case <-slowReached:
+	case <-time.After(3 * time.Second):
+		t.Fatal("slow-proj never reached its blocking network call")
+	}
+
+	// While slow-proj is stuck, an unrelated enabled project must still resolve.
+	fastDone := make(chan mcp.MemoryBackend, 1)
+	go func() { fastDone <- sel("fast-proj") }()
+	select {
+	case got := <-fastDone:
+		if _, ok := got.(*memorylake.MemoryLakeBackend); !ok {
+			t.Fatalf("fast-proj: expected *memorylake.MemoryLakeBackend while slow-proj blocked, got %T", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("fast-proj routing was blocked by slow-proj's in-flight network I/O (global-lock regression)")
+	}
+
+	// A non-enabled (sqlite) project must also be unaffected.
+	sqliteDone := make(chan mcp.MemoryBackend, 1)
+	go func() { sqliteDone <- sel("not-enabled") }()
+	select {
+	case got := <-sqliteDone:
+		if got != mcp.MemoryBackend(sqlite) {
+			t.Fatalf("not-enabled: expected sqlite while slow-proj blocked, got %T", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("sqlite routing was blocked by slow-proj's in-flight network I/O (global-lock regression)")
+	}
+
+	releaseAll()
+}
+
+// TestNewRoutingSelector_SameProjectConcurrentFirstCallsResolveOnce is the FIX A
+// singleflight guarantee: many concurrent first calls for the SAME project must
+// coalesce into a single resolution/construction rather than each firing its
+// own network sequence (a construction stampede). The mock counts how many
+// times the project is created; it must be exactly one, and every caller must
+// receive the identical cached backend instance.
+func TestNewRoutingSelector_SameProjectConcurrentFirstCallsResolveOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var createCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/workspaces":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"items": []map[string]any{{"id": "ws-1", "name": "engram", "custom_id": "engram"}},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			atomic.AddInt32(&createCount, 1)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "proj-solo"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	sqlite := &stubBackend{name: "sqlite"}
+	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
+		"solo": {ProjID: ""},
+	}}
+
+	sel := NewRoutingSelector(sqlite, cfg, enab)
+
+	const n = 16
+	results := make([]mcp.MemoryBackend, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = sel("solo")
+		}(i)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&createCount); got != 1 {
+		t.Fatalf("project created %d times, want exactly 1 (singleflight coalescing)", got)
+	}
+	first, ok := results[0].(*memorylake.MemoryLakeBackend)
+	if !ok {
+		t.Fatalf("result 0: expected *memorylake.MemoryLakeBackend, got %T", results[0])
+	}
+	for i := 1; i < n; i++ {
+		if results[i] != mcp.MemoryBackend(first) {
+			t.Fatalf("result %d: expected the identical cached backend instance, got %T (%p vs %p)", i, results[i], results[i], first)
 		}
 	}
 }
