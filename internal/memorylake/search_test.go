@@ -185,6 +185,48 @@ func TestSearchFacts_TopicKeySlashPinsFuzzyHits(t *testing.T) {
 	}
 }
 
+// TestSearchFacts_FuzzyFailureDegradesToSemanticOnly is the FIX #7 regression:
+// the fact_fuzzy lookup is only a fast-path that pins topic_key hits ahead of
+// the semantic results. When it fails, SearchFacts must NOT discard the
+// already-successful semantic results by returning an error — it degrades to
+// semantic-only (logging to stderr) and returns them.
+func TestSearchFacts_FuzzyFailureDegradesToSemanticOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/search":
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"facts": []map[string]any{
+						{"id": "fact-semantic", "fact": "semantic hit", "score": 0.9, "metadata": map[string]any{metaRaw: "semantic content"}},
+					},
+				},
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			// Fuzzy lookup fails hard.
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": map[string]any{"code": "BOOM", "message": "fuzzy exploded"}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
+
+	// query contains "/" so the fuzzy fast-path is attempted (and fails).
+	results, err := c.SearchFacts("ws-1", "proj-1", "actor-1", "architecture/auth-model", store.SearchOptions{})
+	if err != nil {
+		t.Fatalf("SearchFacts: %v, want nil (fuzzy failure must degrade to semantic-only, not error)", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1 (the semantic hit must survive the fuzzy failure)", len(results))
+	}
+	if results[0].Content != "semantic content" {
+		t.Fatalf("Content=%q, want 'semantic content'", results[0].Content)
+	}
+}
+
 // TestSearchFacts_DedupesOverlapBetweenFuzzyAndSemantic verifies that when
 // the same fact id appears in both the fact_fuzzy substring hits and the
 // semantic search results, it is kept exactly once — pinned at its fuzzy

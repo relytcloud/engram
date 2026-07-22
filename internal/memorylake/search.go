@@ -1,7 +1,9 @@
 package memorylake
 
 import (
+	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 
@@ -64,7 +66,13 @@ func (c *Client) SearchFacts(ws, projID, actorID, query string, opts store.Searc
 	if strings.Contains(query, "/") {
 		pinnedFacts, err = c.fuzzyFacts(ws, projID, query)
 		if err != nil {
-			return nil, err
+			// The fuzzy lookup is only a fast-path that pins topic_key hits
+			// ahead of the semantic results; the semantic search above has
+			// already succeeded. Discarding those results just because the
+			// (best-effort) fuzzy request failed would turn a partial-quality
+			// search into a hard error. Log and degrade to semantic-only.
+			fmt.Fprintf(os.Stderr, "[engram] memorylake: fuzzy fact lookup for %q failed, using semantic results only: %v\n", query, err)
+			pinnedFacts = nil
 		}
 	}
 
