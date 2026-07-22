@@ -21,6 +21,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Features](#features)                                     | FTS5 search, timeline, privacy, git sync, compression        |
 | [TUI](#terminal-ui-tui)                                   | Screens, navigation, architecture                            |
 | [Running as a Service](#running-as-a-service)             | systemd setup                                                |
+| [MemoryLake Backend](#memorylake-backend)                 | Optional per-project cloud backend, config, known limitations |
 | [Design Decisions](#design-decisions)                     | Why Go, why SQLite, why no raw auto-capture                  |
 
 For other docs:
@@ -471,6 +472,14 @@ Response:
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
+| `ENGRAM_BACKEND`                | Global safety valve for the [MemoryLake backend](#memorylake-backend). Set to `sqlite` to force every project onto local SQLite regardless of per-project enablement. Any other value (or unset) defers to the per-project enablement list.             | (unset — per-project) |
+| `ENGRAM_MEMORYLAKE_BASE_URL`    | MemoryLake V3 API base URL. Required to enable the MemoryLake backend for any project.                                                                                                                                                                   | (unset)              |
+| `ENGRAM_MEMORYLAKE_API_KEY`     | MemoryLake API key (`Authorization: Bearer <key>`). Required to enable the MemoryLake backend for any project.                                                                                                                                            | (unset)              |
+| `ENGRAM_MEMORYLAKE_WORKSPACE`   | MemoryLake workspace custom_id or `ws-...` id that MemoryLake-backed memories are stored under.                                                                                                                                                           | `engram`             |
+| `ENGRAM_MEMORYLAKE_ACTOR`       | MemoryLake actor custom_id used for writes/reads from this machine. Falls back to hostname when unset.                                                                                                                                                   | (unset — hostname)   |
+| `ENGRAM_MEMORYLAKE_TIMEOUT_MS`  | Per-request HTTP timeout for the MemoryLake client.                                                                                                                                                                                                       | `30000`              |
+| `ENGRAM_MEMORYLAKE_EXTRACT_POLL_MS` | Poll interval while waiting for MemoryLake to extract a fact from a newly written message.                                                                                                                                                            | `2000`               |
+| `ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS` | Max total time to wait for fact extraction before returning a provisional (pending) result.                                                                                                                                                       | `30000`              |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
 | `ENGRAM_CLOUD_SERVER`           | Cloud server URL used by the autosync manager and `engram sync --cloud`.                                                                                                                                                                                  | (unset)              |
 | `ENGRAM_DATABASE_URL`           | Postgres DSN for `engram cloud serve`.                                                                                                                                                                                                                    | (unset)              |
@@ -1532,6 +1541,56 @@ WHERE id IN (
 );
 COMMIT;
 ```
+
+---
+
+## MemoryLake Backend
+
+Engram's default and source-of-truth storage is local SQLite (`internal/store`). **MemoryLake** is an optional, per-project alternate backend: memories for an *enabled* project are stored as MemoryLake V3 facts (under the `engram` workspace at your configured MemoryLake API) instead of the local database. Projects that are not explicitly enabled are completely unaffected — they keep today's SQLite behavior (FTS5/BM25 search, exact 1:1 int ids, verbatim content) with zero changes.
+
+Both backends can be active at once on the same machine: project A can stay on SQLite while project B is enabled for MemoryLake. Routing is decided per `mem_*` call by resolving the calling project and checking the enablement list below.
+
+### Environment Variables
+
+| Variable                                | Required to enable | Description                                                                                          | Default            |
+| ---------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `ENGRAM_MEMORYLAKE_BASE_URL`              | yes                  | MemoryLake V3 API base URL.                                                                                          | (unset)             |
+| `ENGRAM_MEMORYLAKE_API_KEY`               | yes                  | MemoryLake API key, sent as `Authorization: Bearer <key>`.                                                          | (unset)             |
+| `ENGRAM_MEMORYLAKE_WORKSPACE`             | no                   | Workspace custom_id or `ws-...` id memories are stored under.                                                       | `engram`            |
+| `ENGRAM_MEMORYLAKE_ACTOR`                 | no                   | Actor custom_id for writes/reads from this machine; distinguishes contributors when a project is shared.            | (unset — hostname)  |
+| `ENGRAM_MEMORYLAKE_TIMEOUT_MS`            | no                   | Per-request HTTP timeout for the MemoryLake client.                                                                 | `30000`             |
+| `ENGRAM_MEMORYLAKE_EXTRACT_POLL_MS`       | no                   | Poll interval while waiting for MemoryLake's LLM extraction to produce a fact from a newly written message.         | `2000`              |
+| `ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS`   | no                   | Max total time to wait for extraction before returning a provisional (pending) result instead of erroring.          | `30000`             |
+| `ENGRAM_BACKEND`                          | no                   | Global safety valve. Set to `sqlite` to force **every** project onto local SQLite, even projects present in the enablement list below. Any other value (or unset) defers to per-project enablement. | (unset — per-project) |
+
+### `engram memorylake` CLI
+
+```
+engram memorylake enable  --project <name> [--migrate]   # opt this project into the MemoryLake backend
+engram memorylake disable --project <name>                # move this project back to local SQLite
+engram memorylake status                                  # list every known project and its current backend
+```
+
+- `enable` records the project in `~/.engram/memorylake.json` (`enabled_projects`). The first `mem_*` call for that project afterward resolves (and caches) the MemoryLake workspace/project id, auto-creating the MemoryLake project under the `engram` workspace if it doesn't already exist.
+- `disable` removes the project from that list; the project's `mem_*` calls immediately go back to SQLite. Any memories already written to MemoryLake are left in place (not deleted).
+- `status` prints every project engram knows about (from local SQLite plus the enablement list) and which backend each currently uses.
+- `--migrate` is accepted by `enable` but is not yet implemented — it currently only prints a note that no data was migrated; existing SQLite observations for that project stay in SQLite until a real migration path lands.
+
+### Per-project semantics
+
+- **Default: SQLite, for every project.** MemoryLake is strictly opt-in — a project must be explicitly enabled before any of its `mem_*` calls touch the MemoryLake API.
+- **Enabled projects only:** once a project is in the enablement list (and `ENGRAM_BACKEND` is not forced to `sqlite`), that project's `mem_*` calls route to MemoryLake. All other projects on the same machine are unaffected.
+- **`ENGRAM_BACKEND=sqlite` is a global override**, not a per-project one — it forces SQLite for all projects regardless of the enablement list, useful for a full local/cloud comparison or an emergency rollback.
+- Memories for enabled projects are stored under the `engram` workspace at your MemoryLake tenant (configurable via `ENGRAM_MEMORYLAKE_WORKSPACE`), which is how multiple people can share the same project's memories without each running their own local SQLite copy.
+
+### Known limitations
+
+- **Writes are asynchronous, with a real delay.** MemoryLake extracts a fact from written content via an LLM; this typically takes on the order of ~12 seconds. `mem_save` on an enabled project does not fail on this — it waits (bounded by `ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS`) for the fact to materialize, but a save immediately followed by a search/get on the same content may not find it yet if extraction is still pending.
+- **Content is rewritten and can be split by MemoryLake's extraction.** MemoryLake's LLM extraction paraphrases and can split one observation into multiple facts — this is the underlying MemoryLake fact model, not something Engram controls. To preserve exact recall, Engram stamps the verbatim original text onto `metadata.engram_raw` when it backfills a fact, and **`mem_get_observation` / search results return `engram_raw` (the exact original text you saved), not the paraphrased extraction text.**
+- **No hard delete.** MemoryLake only supports "forget" (soft delete, expiring a fact); `mem_delete`'s `hard_delete` flag is accepted but ignored on MemoryLake-backed projects — every delete degrades to a soft delete.
+- **`mem_merge_projects` is not supported** on a MemoryLake-backed project. Calling it against an enabled project returns an explicit unsupported error rather than attempting a cross-project migration; SQLite projects are unaffected and merge normally.
+- **Several tools are a first cut on MemoryLake**, favoring "returns something reasonable" over full parity with SQLite: sessions (`mem_session_start`/`mem_session_end`/recent-session lookups), `mem_review`, prompt tracking (`mem_save_prompt`), passive capture (`mem_capture_passive`), and relation/conflict tooling (`mem_judge`, `mem_compare`, `FindCandidates`) either have reduced fidelity or are no-ops on the MemoryLake backend today. These gaps are tracked as follow-up work; see `internal/memorylake/backend.go` for the per-method TODOs and `docs/superpowers/specs/2026-07-22-memorylake-sqlite-parity-testing.md` for the full differential test matrix used to evaluate them against SQLite.
+- **Object ids are backend-local, not portable.** MemoryLake-backed observations use a locally persisted int64 ↔ MemoryLake-fact-id mapping (`~/.engram/memorylake-idmap-<project>.json`) so `mem_*` responses keep the same int64 id shape callers already expect; the mapping is per-machine and is not itself synced.
 
 ---
 
