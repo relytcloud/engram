@@ -207,7 +207,8 @@ func TestBackend_GetObservation_UnknownID(t *testing.T) {
 	}
 }
 
-// TestBackend_UpdateObservation merges metadata and sends content on PATCH.
+// TestBackend_UpdateObservation merges metadata and sends the new text via
+// the V3 `fact` field on PATCH (not `content`).
 func TestBackend_UpdateObservation(t *testing.T) {
 	var patchBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -242,8 +243,11 @@ func TestBackend_UpdateObservation(t *testing.T) {
 	if obs.Content != "new content" {
 		t.Fatalf("Content=%q, want new content", obs.Content)
 	}
-	if patchBody["content"] != "new content" {
-		t.Fatalf("PATCH content=%v, want new content", patchBody["content"])
+	if patchBody["fact"] != "new content" {
+		t.Fatalf("PATCH fact=%v, want new content", patchBody["fact"])
+	}
+	if _, hasContent := patchBody["content"]; hasContent {
+		t.Fatalf("PATCH body must not send a `content` field (V3 uses `fact`): %v", patchBody)
 	}
 	md, _ := patchBody["metadata"].(map[string]any)
 	if md[metaRaw] != "new content" || md[metaTitle] != "new title" {

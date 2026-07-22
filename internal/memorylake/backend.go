@@ -207,9 +207,9 @@ func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservatio
 	fields := map[string]any{"metadata": md}
 	if p.Content != nil {
 		md[metaRaw] = *p.Content
-		// V3 fact update body field is `content` (asymmetric with the `fact`
-		// read field); send it so MemoryLake's extracted text updates too.
-		fields["content"] = *p.Content
+		// V3 fact update body field is `fact` (same field name used on read;
+		// FactUpdateRequest has only `fact` + `metadata`, no `content`).
+		fields["fact"] = *p.Content
 	}
 
 	updated, err := b.patchFact(factID, fields)
@@ -534,7 +534,7 @@ func (b *MemoryLakeBackend) getFact(factID string) (Fact, error) {
 	return f, nil
 }
 
-// patchFact PATCHes arbitrary fields (metadata and/or content) onto a fact and
+// patchFact PATCHes arbitrary fields (metadata and/or fact) onto a fact and
 // returns the updated fact MemoryLake echoes back.
 func (b *MemoryLakeBackend) patchFact(factID string, fields map[string]any) (Fact, error) {
 	var f Fact
