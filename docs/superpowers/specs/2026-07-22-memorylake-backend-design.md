@@ -1,4 +1,4 @@
-# 设计:将 Engram 后端替换为 MemoryLake API(纯 V3 方案)
+# 设计:Engram 接入 MemoryLake API 作为逐 project 可选后端(V3 facts)
 
 - 日期:2026-07-22
 - 状态:待评审(brainstorming 产出的设计规格)
@@ -36,18 +36,22 @@
 | 抽取延迟 ~12s | 消息 04:52:50 → fact 04:53:02 | 需异步 read-after-write 处理 |
 | V3 fact 有 update/forget/trace/conflicts | 各 controller 已确认 | 大部分工具可映射 |
 
-### 1.3 决策:纯 V3-facts,删除 SQLite
+### 1.3 决策:按 project 选择后端,MemoryLake 逐 project opt-in(V3-facts)
 在**已知上述权衡**的前提下,用户明确选择:
-- 架构:**纯 MemoryLake,删除本地 SQLite**(不保留本地薄层)。
-- 存储模型:**V3 facts,挂 `engram` workspace 下**(满足 #4、多人 conflict)。
-- **接受抽取语义,重定义"准确"**:"准确" = MemoryLake 语义召回质量,而非逐字保真。
 
-**被明确接受的代价(必须在实现与文档中如实呈现):**
+- **默认不启用 MemoryLake**。`internal/store`(SQLite)**保留**为默认后端;只有用户对某个 project **显式 enable** 后,该 project 的 `mem_*` 才路由到 MemoryLake。未 enable 的 project 行为完全不变(逐字保真、FTS5/BM25、1:1 int id 全保留)。
+- MemoryLake 后端的存储模型:**V3 facts,挂 `engram` workspace 下**(满足 #4、多人 conflict)。
+- 对 **已 enable 的 project**,**接受抽取语义,重定义"准确"**:"准确" = MemoryLake 语义召回质量,而非逐字保真。
+
+**已 enable project 上被明确接受的代价(仅作用于这些 project):**
 - 记忆内容会被 LLM 改写/拆分,非逐字原文。
-- 一条 `mem_save` 可能产生**多条** fact,Engram 对外的"一条记忆"不再是严格 1:1。
+- 一条 `mem_save` 可能产生**多条** fact,对外"一条记忆"不再严格 1:1。
 - `mem_save` 从同步返回改为**异步**(先返回 pending)。
 - `pinned` 从"仅本地设备状态"变为**共享**状态(存 fact metadata)。
-- 少数本地专有工具(`mem_doctor`、`mem_merge_projects`)语义被重定义或降级。
+- 对外 id 从自增 int 变为 fact-id 字符串(见 §4.3)。
+- `mem_doctor` 语义重定义;`mem_merge_projects` 在 MemoryLake project 上**不支持**(见 §6)。
+
+> 这一"逐 project opt-in"决策同时消解了 §1.2 的核心张力:需要逐字保真的 project 留在 SQLite,需要多人共享/云端语义的 project 才切 MemoryLake。#5(准确不降)与 #6(能力全保留)对**未 enable 的 project 天然成立**;对已 enable 的 project 按上述重定义执行。
 
 ---
 
@@ -56,11 +60,14 @@
 ```
 agent → cmd/engram (CLI + MCP dispatch, 契约不变)
           → internal/mcp (mem_* handlers, 契约不变)
-              → internal/memorylake (新增:MemoryLake V3 client + 映射层)  ← 取代 internal/store
-                  → HTTPS → app.memorylake.ai/openapi/memorylake (V3 API)
+              → MemoryBackend 接口(按 project 选择,§3.3)
+                  ├─ 未 enable(默认)→ internal/store (SQLite, 不变)
+                  └─ 已 enable       → internal/memorylake (新增:V3 client + 映射层)
+                                          → HTTPS → app.memorylake.ai/openapi/memorylake (V3 API)
 ```
 
-- **删除**:`internal/store`(SQLite/FTS5/relations/sync)对 mem_* 的支撑;`internal/sync`、`internal/cloud/autosync` 等本地同步基础设施在纯云端模型下不再需要(见 §9 迁移)。
+- **保留**:`internal/store`(SQLite/FTS5/relations)作为**默认后端**,一字不改地服务所有未 enable 的 project。`internal/sync`、`internal/cloud/autosync` 仅对 SQLite project 有意义,保留。
+- **抽象**:定义 `MemoryBackend` 接口(方法签名与现有 `store` 对 mem_* 的调用等价)。`SQLiteBackend` = 现有 store 封装;`MemoryLakeBackend` = 新实现。handler 依 §3.3 逐 project 选择实现。
 - **新增**:`internal/memorylake` 包,承担:
   - `client.go` — V3 REST client(鉴权、重试、错误映射、分页/cursor)。
   - `identity.go` — workspace / project / actor 解析与自动 provision(带本地缓存)。
@@ -70,8 +77,9 @@ agent → cmd/engram (CLI + MCP dispatch, 契约不变)
 - **不动**:`internal/mcp` 的工具定义(`mcp.NewTool(...)`)与入参 schema;`internal/project`(cwd 项目探测);`internal/tui`/`internal/server` 对 store 的调用改为走 `internal/memorylake`(接口保持等价方法签名,最小改动)。
 
 ### 2.1 设计原则
-- `internal/mcp` 的 handler **不感知** MemoryLake 细节;通过一个与旧 `store` 等价的 Go 接口 `MemoryBackend` 交互,便于测试(mock)与未来替换。
+- `internal/mcp` 的 handler **不感知**具体后端;通过 `MemoryBackend` 接口交互,按 project 注入 SQLite 或 MemoryLake 实现,便于测试(mock)。
 - 所有对外 tool 响应字段名保持不变;语义变化(异步、N facts)通过**新增**字段(如 `status:"pending"`)表达,不删旧字段。
+- 两种后端可**并存**:同一台机器上,project A 走 SQLite、project B 走 MemoryLake;`id` 参数放宽为字符串,SQLite project 内仍是数字串、MemoryLake project 是 `fact-...`,由 project 后端决定解析方式。
 
 ---
 
@@ -93,8 +101,8 @@ agent → cmd/engram (CLI + MCP dispatch, 契约不变)
 新增环境变量(或 `~/.engram/config` 段):
 
 ```
-ENGRAM_MEMORYLAKE_BASE_URL   = https://app.memorylake.ai/openapi/memorylake   # 必填
-ENGRAM_MEMORYLAKE_API_KEY    = sk-...                                          # 必填
+ENGRAM_MEMORYLAKE_BASE_URL   = https://app.memorylake.ai/openapi/memorylake   # 必填(启用时)
+ENGRAM_MEMORYLAKE_API_KEY    = sk-...                                          # 必填(启用时)
 ENGRAM_MEMORYLAKE_WORKSPACE  = engram         # workspace custom_id 或 ws-id,默认 "engram"
 ENGRAM_MEMORYLAKE_ACTOR      = <machine-id>   # 可选,默认取 hostname/用户;缺省自动 provision
 ENGRAM_MEMORYLAKE_TIMEOUT_MS = 30000          # 可选
@@ -103,7 +111,26 @@ ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS = 30000 # 抽取轮询上限
 ```
 
 - 鉴权:仅 `Authorization: Bearer <key>`。**不需要也不接受** workspace/tenant header(网关会剥离伪造头);workspace/project 只走 URL path。
-- 启动时做一次 `mem_doctor` 式连通性校验(见 §6 表)。
+
+### 3.3 逐 project 后端选择(核心:默认不启用 MemoryLake)
+
+**默认关闭。** 一个 project 只有被**显式 enable** 后才路由到 MemoryLake;否则一律走 SQLite(`internal/store`,行为不变)。
+
+- 启用清单持久化在本地 `~/.engram/memorylake.json`:
+  ```json
+  { "enabled_projects": { "acme-api": { "proj_id": "proj-...", "enabled_at": "..." } } }
+  ```
+- 新增 CLI:
+  ```
+  engram memorylake enable  --project <name>   # 首次会自动在 engram workspace 建 project 并写入清单
+  engram memorylake disable --project <name>   # 移出清单,回退 SQLite
+  engram memorylake status                     # 列出各 project 当前后端
+  ```
+- **后端选择(每次 mem_* 调用)**:handler 先解析 project(cwd 或入参)→ 查启用清单:
+  - 命中 → `MemoryLakeBackend`;
+  - 未命中 → `SQLiteBackend`(默认)。
+- `ENGRAM_BACKEND=sqlite|memorylake`(§9)是**全局回退开关**,用于整机对比/回滚;不设或设 `sqlite` 时,即使 project 在清单里也强制走 SQLite(安全阀)。正常运行下由**逐 project 清单**决定。
+- 全局默认(无清单、无环境覆盖)= **SQLite**。启用某 project 时对该 project 做一次连通性校验(见 §6 `mem_doctor`)。
 
 ---
 
@@ -115,7 +142,7 @@ ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS = 30000 # 抽取轮询上限
 
 | Engram 字段 | 落点 | 说明 |
 |---|---|---|
-| `content` | fact.`fact`(抽取后文本) | **非逐字**;原文另存 metadata.`engram_raw` 作为审计/回填 |
+| `content` | fact.`fact`(抽取后文本,仅作语义索引) + **metadata.`engram_raw`(逐字原文)** | 见 §4.2:读回默认返回 `engram_raw` 原文,保住 #5 保真 |
 | `title` | metadata.`engram_title` | |
 | `type` | metadata.`engram_type` | decision/bugfix/... |
 | `scope` | metadata.`engram_scope` | project/personal |
@@ -131,7 +158,17 @@ ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS = 30000 # 抽取轮询上限
 
 metadata 是 `Map<String,Object>`,读/搜/list 均返回(已实测)。
 
-### 4.2 对外 id 模型(重要变更)
+### 4.2 逐字原文保真(缓解抽取改写)
+
+因 V3 fact 必经 LLM 抽取(改写+拆分),**在记忆内容里保存原始文本**以保住保真:
+
+- **写入**:PATCH 回填时始终写 `metadata.engram_raw = <观测原文逐字>`(单条 observation 的完整原文;拆成 N 条 fact 时,每条 fact 的 `engram_raw` 都指向同一份原文,并用 `engram_obs_id` 归组)。
+- **读回(mem_get_observation / mem_search / mem_context)**:Engram 重建 Observation 时,`content` **优先取 `engram_raw`(逐字原文)**,`fact.fact`(抽取文本)仅用于:① 语义搜索的召回索引,② 无 `engram_raw` 时(如控制台直接产生、非 Engram 写入的 fact)的回退显示。
+- **可选**:同时把原文以 `\n\n---原文---\n<raw>` 形式 append 进 `fact.fact`,让 MemoryLake 控制台与 `fact_fuzzy` 子串搜也能命中逐字内容(代价:fact 文本变长、语义向量略被稀释;默认关闭,置于配置 `ENGRAM_MEMORYLAKE_EMBED_RAW_IN_FACT=false`)。
+
+> 效果:即便语义索引是抽取后的改写文本,**agent 拿到的仍是逐字原文**,把 #5 的保真损失压到最小;"重定义为语义召回"仅体现在检索命中率层面,不体现在返回内容上。
+
+### 4.3 对外 id 模型(重要变更)
 - 旧:自增 int `id`。新:**fact id 字符串 `fact-...`**。
 - `mem_*` 工具入参里凡是 `id`/`observation_id`/`memory_id_a`(旧为 int),改为**接受字符串 fact id**;handler 内部不再做 int 解析。这是对外可见的**类型放宽**(int→string),需在工具描述里注明,但不改参数名。
 - 一条 `mem_save` 产生多条 fact 时,响应返回 `fact_ids: []`;后续 update/delete/get 针对单条 fact id。
@@ -205,7 +242,7 @@ MemoryLake 无原生 upsert。实现:
 | **mem_suggest_topic_key** | **本地纯函数,不变** | 无网络 |
 | **mem_current_project** | **本地 cwd 探测,不变**;`ProjectExists` 改为查 project 缓存/list | NEVER errors 语义保留 |
 | **mem_doctor** | **重定义**:`GET /api/v3/workspaces/{ws}`(连通)+ 鉴权校验 + 延迟测量 + 抽取积压检查 | 不再体检 SQLite;检查项重写 |
-| **mem_merge_projects** | **无直接 API**;降级为:list 源 project facts → 重新 ingest 到目标 → forget 源;或标注"云端不支持,请在 MemoryLake 控制台操作" | 破坏性,默认标注不支持 |
+| **mem_merge_projects** | **MemoryLake project 上不支持**(用户已确认不实现)。命中已 enable 的 project 时返回明确错误"MemoryLake 后端不支持项目合并"。SQLite project 行为不变 | 不实现云端版本 |
 
 ### 6.1 mem_judge 的 6-verb → conflict resolve 映射(建议)
 Engram 的 relation verbs(related/compatible/scoped/conflicts_with/supersedes/not_conflict)与 MemoryLake `MemoryConflictResolveStrategy` 不完全同构。建议:
@@ -219,7 +256,7 @@ Engram 的 relation verbs(related/compatible/scoped/conflicts_with/supersedes/no
 
 ## 7. 读路径与"准确性"策略(#5 重定义后)
 
-- **主检索**:V3 语义搜索,返回 score + metadata;Engram 用 metadata 做 type/scope/project 客户端过滤,用 score 排序,重建 `SearchResult{Observation, rank}`(rank = score)。
+- **主检索**:V3 语义搜索,返回 score + metadata;Engram 用 metadata 做 type/scope/project 客户端过滤,用 score 排序,重建 `SearchResult{Observation, rank}`(rank = score)。返回的 `Observation.content` 取 `metadata.engram_raw`(逐字原文,见 §4.2),非抽取文本。
 - **关键词兜底**:`GET .../facts?fact_fuzzy=<term>` 子串精确匹配,弥补语义搜索对标识符/报错串的弱项。`mem_search` 内部策略:query 含代码样 token(含 `/`、`_`、驼峰、`.`)时并行发起 fuzzy + semantic,合并去重。
 - **topic_key 直查**:query 含 `/` → 先 `fact_fuzzy=topic_key` 命中置顶(对齐旧行为)。
 - **多 actor 检索**:默认当前 actor;`all_projects`/跨人检索时传 `actor_ids=[]`(默认 principal)或显式多 actor,用 `GET /api/v3/workspaces/{ws}/memories/facts?actor_ids=...&project_ids=...`。
@@ -238,11 +275,12 @@ Engram 的 relation verbs(related/compatible/scoped/conflicts_with/supersedes/no
 
 ---
 
-## 9. 迁移与下线
+## 9. 迁移与开关(逐 project,不删 SQLite)
 
-- **一次性数据迁移(可选)**:提供 `engram migrate --to-memorylake` 子命令,遍历现有 SQLite observations → 按 project 分组 → append 消息 → 回填 metadata(含原 created_at 到 message timestamp)。迁移是**有损**的(抽取改写),原 SQLite 保留为只读备份。
-- **下线本地栈**:`internal/sync`、`internal/cloud/autosync`、`sync_mutations` 等在纯云端模型下无意义,分阶段移除;`engram sync`/`engram cloud` 子命令改为 no-op 或指向 MemoryLake。
-- **回滚**:保留 `ENGRAM_BACKEND=sqlite|memorylake` 开关(即便最终目标是纯 V3,过渡期用它对比效果),默认 memorylake。
+- **SQLite 保留**:默认后端不变,`internal/store`、`internal/sync`、`internal/cloud/autosync` 全部保留。本方案是**增量新增 MemoryLake 后端 + 逐 project 路由**,不是替换/下线本地栈。
+- **enable 时的数据迁移(可选、按 project)**:`engram memorylake enable --project X [--migrate]` 时,若带 `--migrate`,把该 project 现有 SQLite observations → append 消息 → 回填 metadata(`engram_raw` 存逐字原文、原 `created_at` 写 message timestamp)。迁移**有损**(抽取改写,但读回用 `engram_raw` 原文);原 SQLite 数据**原样保留**,disable 即回退。
+- **全局回退开关**:`ENGRAM_BACKEND=sqlite|memorylake`。缺省/`sqlite` = 安全阀,强制所有 project 走 SQLite(即使在启用清单里);`memorylake` = 遵循逐 project 清单。全局默认无需设置即为 SQLite。
+- **可逆**:disable 一个 project 立即回退 SQLite;MemoryLake 侧数据保留在 engram workspace(可选一并 forget)。
 
 ---
 
