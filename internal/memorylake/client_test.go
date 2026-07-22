@@ -16,7 +16,9 @@ func TestDoJSONUnwrapsSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
-	var out struct{ ID string `json:"id"` }
+	var out struct {
+		ID string `json:"id"`
+	}
 	if err := c.doJSON("GET", "/api/v3/workspaces/ws-1", nil, &out); err != nil {
 		t.Fatal(err)
 	}
