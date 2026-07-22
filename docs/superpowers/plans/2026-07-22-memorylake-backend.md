@@ -850,6 +850,7 @@ git commit -m "feat(mcp): route enabled projects to MemoryLake, default SQLite"
 - [ ] **Step 1: 更新 `DOCS.md`**:新增"MemoryLake 后端"节 —— 环境变量表、`engram memorylake enable/disable/status`、逐 project 语义、已知限制(异步~12s、抽取改写靠 engram_raw 读回、无硬删、merge 不支持)。
 - [ ] **Step 2: 更新 `CLAUDE.md`**:在"Interface & memory-model gotchas"补一行 MemoryLake 后端为逐 project opt-in、默认 SQLite。
 - [ ] **Step 3(可选): e2e**:`//go:build e2e`,对真实 `engram` workspace 建临时 selftest project 跑 save→轮询→search→get→forget→delete project(用后即删),校验 metadata round-trip 与抽取延迟。
+- [ ] **Step 3b(差分对比测试): 按 `docs/superpowers/specs/2026-07-22-memorylake-sqlite-parity-testing.md` 建 `internal/paritytest/`(`//go:build parity`)** —— 逐接口多 case 跑 SQLite vs MemoryLake、比对正确性、分歧判优,产出 #5 验收记分卡。CI 单独 `parity` job(夜间/手动,需注入 API key)。此为 #5 的验收仪器,依赖 Task 9 完成。
 - [ ] **Step 4: 运行 `go test ./...` + `go build ./cmd/engram`,确认全绿**
 - [ ] **Step 5: Commit**
 
