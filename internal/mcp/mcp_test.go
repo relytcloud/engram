@@ -149,7 +149,7 @@ func TestHandlePinAndUnpinObservation(t *testing.T) {
 	}
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id)}}}
-	res, err := handlePin(s, true)(context.Background(), req)
+	res, err := handlePin(StaticSelector(s), true)(context.Background(), req)
 	if err != nil {
 		t.Fatalf("pin handler: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestHandlePinAndUnpinObservation(t *testing.T) {
 		t.Fatalf("pin result should expose pinned=true, got %q", callResultText(t, res))
 	}
 
-	res, err = handlePin(s, false)(context.Background(), req)
+	res, err = handlePin(StaticSelector(s), false)(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unpin handler: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestHandlePinAndUnpinObservation(t *testing.T) {
 
 func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Auth architecture",
@@ -224,7 +224,7 @@ func TestHandleSaveAcceptsObservationAliasForContent(t *testing.T) {
 	if err := s.EnrollProject("engram"); err != nil {
 		t.Fatalf("enroll project: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":       "Alias save",
@@ -269,7 +269,7 @@ func TestHandleSaveAcceptsObservationAliasForContent(t *testing.T) {
 
 func TestHandleSaveRejectsMissingContent(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Missing body",
@@ -303,7 +303,7 @@ func TestHandleSaveAutoCapturesCurrentPromptByDefault(t *testing.T) {
 	activity := NewSessionActivity(10 * time.Minute)
 	sessionID := defaultSessionID("engram")
 	activity.RecordPrompt(sessionID, "engram", "please persist the auth decision")
-	h := handleSave(s, MCPConfig{}, activity)
+	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Auth decision",
@@ -355,7 +355,7 @@ func TestHandleSaveRecordsActivityForExplicitSessionID(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 	activity := NewSessionActivity(10 * time.Minute)
-	h := handleSave(s, MCPConfig{}, activity)
+	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":      "Explicit session save",
@@ -397,7 +397,7 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 	}
 
 	// mem_save with NO session_id — exactly what the proactive protocol does.
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Active session resolution",
 		"content": "**What**: saved without session_id\n**Why**: repro for #386",
@@ -429,7 +429,7 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
 	s := newMCPTestStore(t)
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "No active session",
 		"content": "**What**: saved with no active session\n**Why**: fallback regression guard",
@@ -473,7 +473,7 @@ func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
 		t.Fatalf("set newer session started_at: %v", err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Most recent active session",
 		"content": "**What**: saved with two active sessions\n**Why**: multi-session edge case",
@@ -501,7 +501,7 @@ func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
 
 func TestHandleSaveWithNilActivityStillSucceeds(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, nil)
+	h := handleSave(StaticSelector(s), MCPConfig{}, nil)
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Nil activity save",
@@ -521,7 +521,7 @@ func TestHandleSavePromptCaptureFailureIsNonFatal(t *testing.T) {
 	s := newMCPTestStore(t)
 	activity := NewSessionActivity(10 * time.Minute)
 	activity.RecordPrompt(defaultSessionID("engram"), "engram", "prompt capture should fail non-fatally")
-	h := handleSave(s, MCPConfig{}, activity)
+	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 
 	originalAddPromptIfMissing := addPromptIfMissing
 	addPromptIfMissing = func(*store.Store, store.AddPromptParams) (int64, bool, error) {
@@ -554,8 +554,8 @@ func TestHandleSavePromptCaptureFailureIsNonFatal(t *testing.T) {
 func TestHandleSavePromptFeedsAutoCaptureContext(t *testing.T) {
 	s := newMCPTestStore(t)
 	activity := NewSessionActivity(10 * time.Minute)
-	savePrompt := handleSavePrompt(s, MCPConfig{}, activity)
-	save := handleSave(s, MCPConfig{}, activity)
+	savePrompt := handleSavePrompt(StaticSelector(s), MCPConfig{}, activity)
+	save := handleSave(StaticSelector(s), MCPConfig{}, activity)
 
 	promptRes, err := savePrompt(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "user asked for prompt-linked bugfix memory",
@@ -597,7 +597,7 @@ func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 	s := newMCPTestStore(t)
 	activity := NewSessionActivity(10 * time.Minute)
 	activity.RecordPrompt(defaultSessionID("engram"), "engram", "do not capture this prompt")
-	h := handleSave(s, MCPConfig{}, activity)
+	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":          "SDD artifact",
@@ -624,7 +624,7 @@ func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 
 func TestHandleSaveNoCurrentPromptStillSucceeds(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "No prompt available",
@@ -649,7 +649,7 @@ func TestHandleSaveNoCurrentPromptStillSucceeds(t *testing.T) {
 
 func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":     "Auth architecture",
@@ -675,7 +675,7 @@ func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 
 func TestHandleCapturePassiveExtractsAndSaves(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCapturePassive(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Key Learnings:\n\n1. bcrypt cost=12 is the right balance for our server\n2. JWT refresh tokens need atomic rotation to prevent races\n",
@@ -701,7 +701,7 @@ func TestHandleCapturePassiveExtractsAndSaves(t *testing.T) {
 
 func TestHandleCapturePassiveRequiresContent(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCapturePassive(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
@@ -718,7 +718,7 @@ func TestHandleCapturePassiveRequiresContent(t *testing.T) {
 
 func TestHandleCapturePassiveWithNoLearningSection(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCapturePassive(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "plain text without learning headers",
@@ -741,7 +741,7 @@ func TestHandleCapturePassiveWithNoLearningSection(t *testing.T) {
 
 func TestHandleCapturePassiveDefaultsSourceAndSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCapturePassive(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Key Learnings:\n\n1. This learning is long enough to be persisted with default source",
@@ -770,7 +770,7 @@ func TestHandleCapturePassiveDefaultsSourceAndSession(t *testing.T) {
 
 func TestHandleCapturePassiveReturnsToolErrorOnStoreFailure(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCapturePassive(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Force FK failure: explicit session_id that does not exist.
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -846,7 +846,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("pin observation: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "panic",
 		"project": "engram",
@@ -876,7 +876,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("expected search result pinned=true, got %v", firstResult["pinned"])
 	}
 
-	update := handleUpdate(s)
+	update := handleUpdate(StaticSelector(s))
 	updateReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":    float64(obsID),
 		"title": "Fix parser panic",
@@ -889,7 +889,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("unexpected update error: %s", callResultText(t, updateRes))
 	}
 
-	getObs := handleGetObservation(s, MCPConfig{})
+	getObs := handleGetObservation(StaticSelector(s), MCPConfig{})
 	getReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id": float64(obsID),
 	}}}
@@ -901,7 +901,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("unexpected get error: %s", callResultText(t, getRes))
 	}
 
-	deleteHandler := handleDelete(s)
+	deleteHandler := handleDelete(StaticSelector(s))
 	delReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":          float64(obsID),
 		"hard_delete": true,
@@ -920,7 +920,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 
 func TestHandleSaveReturnsLifecycleState(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Lifecycle save",
@@ -957,7 +957,7 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 		t.Fatalf("backdate review_after: %v", err)
 	}
 
-	h := handleReview(s, MCPConfig{})
+	h := handleReview(StaticSelector(s), MCPConfig{})
 	listRes, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"action":  "list",
 		"project": "engram",
@@ -1009,7 +1009,7 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 		t.Fatalf("backdate review_after: %v", err)
 	}
 
-	h := handleReview(s, MCPConfig{})
+	h := handleReview(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"action": "mark_reviewed",
 		"id":     float64(id),
@@ -1032,7 +1032,7 @@ func TestHandleReviewListUnknownProjectReturnsStructuredError(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	h := handleReview(s, MCPConfig{})
+	h := handleReview(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"action":  "list",
 		"project": "engarm",
@@ -1066,7 +1066,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("add observation: %v", err)
 	}
 
-	savePrompt := handleSavePrompt(s, MCPConfig{}, nil)
+	savePrompt := handleSavePrompt(StaticSelector(s), MCPConfig{}, nil)
 	savePromptReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "how do we fix auth race conditions?",
 		"project": "engram",
@@ -1079,7 +1079,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected save prompt error: %s", callResultText(t, savePromptRes))
 	}
 
-	contextHandler := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	contextHandler := handleContext(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	contextReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
 		"scope":   "project",
@@ -1095,7 +1095,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("expected context output with memory stats")
 	}
 
-	statsHandler := handleStats(s, MCPConfig{})
+	statsHandler := handleStats(StaticSelector(s), MCPConfig{})
 	statsRes, err := statsHandler(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("stats handler error: %v", err)
@@ -1109,7 +1109,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("recent observations for timeline: %v len=%d", err, len(recent))
 	}
 
-	timelineHandler := handleTimeline(s, MCPConfig{})
+	timelineHandler := handleTimeline(StaticSelector(s), MCPConfig{})
 	timelineReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"observation_id": float64(recent[0].ID),
 		"before":         2.0,
@@ -1123,7 +1123,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected timeline error: %s", callResultText(t, timelineRes))
 	}
 
-	sessionSummary := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	sessionSummary := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	summaryReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
 		"content": "## Goal\nImprove tests",
@@ -1136,7 +1136,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected session summary error: %s", callResultText(t, summaryRes))
 	}
 
-	sessionStart := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	sessionStart := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	startReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":        "s-new",
 		"project":   "engram",
@@ -1150,7 +1150,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 		t.Fatalf("unexpected session start error: %s", callResultText(t, startRes))
 	}
 
-	sessionEnd := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	sessionEnd := handleSessionEnd(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	endReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":      "s-new",
 		"summary": "done",
@@ -1167,7 +1167,7 @@ func TestHandlePromptContextStatsTimelineAndSessionHandlers(t *testing.T) {
 func TestMCPHandlersErrorBranches(t *testing.T) {
 	s := newMCPTestStore(t)
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	noResultsReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "definitely-no-hit"}}}
 	noResultsRes, err := search(context.Background(), noResultsReq)
 	if err != nil {
@@ -1180,7 +1180,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected no memories response")
 	}
 
-	update := handleUpdate(s)
+	update := handleUpdate(StaticSelector(s))
 	missingIDRes, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("update missing id error: %v", err)
@@ -1198,7 +1198,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected update no fields to return tool error")
 	}
 
-	deleteHandler := handleDelete(s)
+	deleteHandler := handleDelete(StaticSelector(s))
 	delMissingIDRes, err := deleteHandler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("delete missing id error: %v", err)
@@ -1207,7 +1207,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected delete missing id to return tool error")
 	}
 
-	timeline := handleTimeline(s, MCPConfig{})
+	timeline := handleTimeline(StaticSelector(s), MCPConfig{})
 	timelineMissingIDRes, err := timeline(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("timeline missing id error: %v", err)
@@ -1216,7 +1216,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected timeline missing id to return tool error")
 	}
 
-	getObs := handleGetObservation(s, MCPConfig{})
+	getObs := handleGetObservation(StaticSelector(s), MCPConfig{})
 	getMissingIDRes, err := getObs(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("get observation missing id error: %v", err)
@@ -1256,7 +1256,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	searchRes, err := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "title"}}})
+	searchRes, err := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "title"}}})
 	if err != nil {
 		t.Fatalf("closed store search call: %v", err)
 	}
@@ -1264,7 +1264,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected search to return tool error when store is closed")
 	}
 
-	updateRes, err := handleUpdate(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
+	updateRes, err := handleUpdate(StaticSelector(s))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
 	if err != nil {
 		t.Fatalf("closed store update call: %v", err)
 	}
@@ -1272,7 +1272,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected update to return tool error when store is closed")
 	}
 
-	deleteRes, err := handleDelete(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
+	deleteRes, err := handleDelete(StaticSelector(s))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
 	if err != nil {
 		t.Fatalf("closed store delete call: %v", err)
 	}
@@ -1280,7 +1280,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected delete to return tool error when store is closed")
 	}
 
-	promptRes, err := handleSavePrompt(s, MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"content": "prompt", "project": "engram"}}})
+	promptRes, err := handleSavePrompt(StaticSelector(s), MCPConfig{}, nil)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"content": "prompt", "project": "engram"}}})
 	if err != nil {
 		t.Fatalf("closed store save prompt call: %v", err)
 	}
@@ -1288,7 +1288,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected save prompt to return tool error when store is closed")
 	}
 
-	contextRes, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{})
+	contextRes, err := handleContext(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("closed store context call: %v", err)
 	}
@@ -1296,7 +1296,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected context to return tool error when store is closed")
 	}
 
-	statsRes, err := handleStats(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
+	statsRes, err := handleStats(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("closed store stats call: %v", err)
 	}
@@ -1304,7 +1304,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected stats fallback result even when store is closed")
 	}
 
-	timelineRes, err := handleTimeline(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": 1.0}}})
+	timelineRes, err := handleTimeline(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": 1.0}}})
 	if err != nil {
 		t.Fatalf("closed store timeline call: %v", err)
 	}
@@ -1312,7 +1312,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected timeline to return tool error when store is closed")
 	}
 
-	getObsRes, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
+	getObsRes, err := handleGetObservation(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
 	if err != nil {
 		t.Fatalf("closed store get observation call: %v", err)
 	}
@@ -1320,7 +1320,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected get observation to return tool error when store is closed")
 	}
 
-	sessionSummaryRes, err := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "content": "summary"}}})
+	sessionSummaryRes, err := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "content": "summary"}}})
 	if err != nil {
 		t.Fatalf("closed store session summary call: %v", err)
 	}
@@ -1328,7 +1328,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected session summary to return tool error when store is closed")
 	}
 
-	sessionStartRes, err := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1", "project": "engram"}}})
+	sessionStartRes, err := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1", "project": "engram"}}})
 	if err != nil {
 		t.Fatalf("closed store session start call: %v", err)
 	}
@@ -1336,7 +1336,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected session start to return tool error when store is closed")
 	}
 
-	sessionEndRes, err := handleSessionEnd(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1"}}})
+	sessionEndRes, err := handleSessionEnd(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": "s1"}}})
 	if err != nil {
 		t.Fatalf("closed store session end call: %v", err)
 	}
@@ -1348,7 +1348,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 func TestMCPAdditionalCoverageBranches(t *testing.T) {
 	s := newMCPTestStore(t)
 
-	contextRes, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{})
+	contextRes, err := handleContext(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("context empty store: %v", err)
 	}
@@ -1359,7 +1359,7 @@ func TestMCPAdditionalCoverageBranches(t *testing.T) {
 		t.Fatalf("expected empty context message")
 	}
 
-	statsRes, err := handleStats(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
+	statsRes, err := handleStats(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("stats empty store: %v", err)
 	}
@@ -1383,7 +1383,7 @@ func TestMCPAdditionalCoverageBranches(t *testing.T) {
 	}
 
 	timelineReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"observation_id": float64(firstID), "before": 1.0, "after": 2.0}}}
-	timelineRes, err := handleTimeline(s, MCPConfig{})(context.Background(), timelineReq)
+	timelineRes, err := handleTimeline(StaticSelector(s), MCPConfig{})(context.Background(), timelineReq)
 	if err != nil {
 		t.Fatalf("timeline with header branches: %v", err)
 	}
@@ -1395,7 +1395,7 @@ func TestMCPAdditionalCoverageBranches(t *testing.T) {
 		t.Fatalf("expected timeline session/after sections, got %q", text)
 	}
 
-	save := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	save := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	saveReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Default values",
 		"content": "Ensure defaults for type and session are used",
@@ -1461,7 +1461,7 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 		t.Fatalf("add observation: %v", err)
 	}
 
-	res, err := handleUpdate(s)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleUpdate(StaticSelector(s))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":        float64(id),
 		"title":     "Updated",
 		"content":   "Updated content",
@@ -1484,7 +1484,7 @@ func TestHandleContextWithSessionOnlyUsesNoneProjects(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	res, err := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleContext(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"project": "engram",
 	}}})
 	if err != nil {
@@ -1508,7 +1508,7 @@ func TestHandleStatsReturnsErrorWhenLoaderFails(t *testing.T) {
 	})
 
 	s := newMCPTestStore(t)
-	res, err := handleStats(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
+	res, err := handleStats(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
 		t.Fatalf("stats handler error: %v", err)
 	}
@@ -1538,7 +1538,7 @@ func TestHandleTimelineBeforeSectionAndSummaryBranches(t *testing.T) {
 		t.Fatalf("end session: %v", err)
 	}
 
-	res, err := handleTimeline(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleTimeline(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"observation_id": float64(focusID),
 		"before":         2.0,
 		"after":          1.0,
@@ -1573,7 +1573,7 @@ func TestHandleGetObservationIncludesTopicAndToolMetadata(t *testing.T) {
 		t.Fatalf("add observation: %v", err)
 	}
 
-	res, err := handleGetObservation(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleGetObservation(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id": float64(id),
 	}}})
 	if err != nil {
@@ -1757,7 +1757,7 @@ func TestResolveToolsEmptyTokenBetweenCommas(t *testing.T) {
 // REQ-001 | Design §4
 func TestHandleSave_CandidatesReturned(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Save first observation — no candidates yet.
 	req1 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1827,7 +1827,7 @@ func TestHandleSave_CandidatesReturned(t *testing.T) {
 // REQ-007 | Design §4
 func TestHandleSave_NoCandidates_ResultUnchanged(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Save observation into empty store — no candidates possible.
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -1882,7 +1882,7 @@ func TestHandleSave_NoCandidates_ResultUnchanged(t *testing.T) {
 // REQ-001 edge case | Design §4
 func TestHandleSave_TopicKeyRevision_ReturnsCandidates(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Save a standalone observation (no topic_key) that will be a candidate.
 	req1 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -2010,7 +2010,7 @@ func TestHandleSearch_SupersededAnnotation(t *testing.T) {
 	}
 
 	// Search for old auth.
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "auth design",
 		"project": "engram",
@@ -2082,7 +2082,7 @@ func TestHandleSearch_PendingAsContested(t *testing.T) {
 		t.Fatalf("save pending relation: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "decision",
 		"project": "engram",
@@ -2118,7 +2118,7 @@ func TestHandleSearch_NoRelationsUnchanged(t *testing.T) {
 		t.Fatalf("add obs: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "parser panic",
 		"project": "engram",
@@ -2300,7 +2300,7 @@ func TestMemDoctorRegisteredAndReturnsEnvelope(t *testing.T) {
 	if srv.ListTools()["mem_doctor"] == nil {
 		t.Fatal("expected mem_doctor in agent profile")
 	}
-	res, err := handleDoctor(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "check": "manual_session_name_project_mismatch"}}})
+	res, err := handleDoctor(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "check": "manual_session_name_project_mismatch"}}})
 	if err != nil {
 		t.Fatalf("handleDoctor: %v", err)
 	}
@@ -2326,7 +2326,7 @@ func TestMemDoctorOmittedProjectUsesAutoDetectedScope(t *testing.T) {
 	if err := s.CreateSession("manual-save-"+detected.Project, detected.Project, dir); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	res, err := handleDoctor(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"check": "manual_session_name_project_mismatch"}}})
+	res, err := handleDoctor(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"check": "manual_session_name_project_mismatch"}}})
 	if err != nil {
 		t.Fatalf("handleDoctor: %v", err)
 	}
@@ -2344,7 +2344,7 @@ func TestMemDoctorUnknownProjectReturnsStructuredError(t *testing.T) {
 	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	res, err := handleDoctor(s, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "missing"}}})
+	res, err := handleDoctor(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "missing"}}})
 	if err != nil {
 		t.Fatalf("handleDoctor: %v", err)
 	}
@@ -2513,7 +2513,7 @@ func TestDefaultSessionIDScopedByProject(t *testing.T) {
 
 func TestHandleSaveCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Set up git repo so auto-detect gives us a known project.
 	dir := t.TempDir()
@@ -2554,7 +2554,7 @@ func TestHandleSaveCreatesProjectScopedSession(t *testing.T) {
 
 func TestHandleSavePromptCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSavePrompt(s, MCPConfig{}, nil)
+	h := handleSavePrompt(StaticSelector(s), MCPConfig{}, nil)
 
 	// Set up a git repo so auto-detect returns a known project.
 	dir := t.TempDir()
@@ -2603,7 +2603,7 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 	if err := s.EnrollProject("summary-session-project"); err != nil {
 		t.Fatalf("enroll project: %v", err)
 	}
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "Worked on auth module",
@@ -2625,7 +2625,7 @@ func TestHandleSessionSummaryCreatesProjectScopedSession(t *testing.T) {
 
 func TestHandleCapturePassiveCreatesProjectScopedSession(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleCapturePassive(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCapturePassive(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Set up a git repo so auto-detect returns a known project.
 	dir := t.TempDir()
@@ -2655,7 +2655,7 @@ func TestExplicitSessionIDBypassesDefault(t *testing.T) {
 	if err := s.CreateSession("custom-session-123", "myproject", "/work/myproject"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Provide explicit session_id — should NOT use defaultSessionID
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -2729,7 +2729,7 @@ func TestHandleSaveAutoDetectsWhenNoProjectArg(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Test memory",
@@ -2768,7 +2768,7 @@ func TestHandleSaveProjectNameNormalized(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Normalization test",
@@ -2788,7 +2788,7 @@ func TestHandleSaveProjectNameNormalized(t *testing.T) {
 
 func TestHandleSaveSimilarProjectWarning(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Build two git repos: "engram" and "engam" (Levenshtein distance 1).
 	parent := t.TempDir()
@@ -2859,7 +2859,7 @@ func TestHandleSaveNoSimilarWarningWhenProjectExists(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Save twice to the same (auto-detected) project — second save should NOT warn.
 	h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -2912,7 +2912,7 @@ func TestHandleMergeProjects(t *testing.T) {
 		t.Fatalf("add observation engram-memory: %v", err)
 	}
 
-	h := handleMergeProjects(s)
+	h := handleMergeProjects(StaticSelector(s))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"from": "engram-memory, ENGRAM", // comma-separated, with spaces and uppercase
@@ -2948,7 +2948,7 @@ func TestHandleMergeProjects(t *testing.T) {
 
 func TestHandleMergeProjectsRequiresFromAndTo(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleMergeProjects(s)
+	h := handleMergeProjects(StaticSelector(s))
 
 	// Missing "from"
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -3058,7 +3058,7 @@ func TestHandleSave_ExplicitProjectWinsOverAutoDetect(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed existing project: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "explicit project override test",
@@ -3111,7 +3111,7 @@ func TestSearchResponseIncludesNudgeAfterInactivity(t *testing.T) {
 	// Advance time past nudge threshold
 	now = now.Add(15 * time.Minute)
 
-	search := handleSearch(s, MCPConfig{}, activity)
+	search := handleSearch(StaticSelector(s), MCPConfig{}, activity)
 	res, err := search(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"query":   "test memory",
@@ -3157,7 +3157,7 @@ func TestSessionSummaryResponseIncludesActivityScore(t *testing.T) {
 	activity.RecordSave(sessionID)
 	activity.RecordSave(sessionID)
 
-	summary := handleSessionSummary(s, MCPConfig{}, activity)
+	summary := handleSessionSummary(StaticSelector(s), MCPConfig{}, activity)
 	res, err := summary(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			// project intentionally omitted — auto-detect only (REQ-308)
@@ -3211,7 +3211,7 @@ func TestSessionEndClearsActivity(t *testing.T) {
 	// Create session in store so EndSession works
 	s.CreateSession("real-session-id", project, "")
 
-	end := handleSessionEnd(s, MCPConfig{}, activity)
+	end := handleSessionEnd(StaticSelector(s), MCPConfig{}, activity)
 	_, err := end(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": "real-session-id",
@@ -3245,7 +3245,7 @@ func TestCapturePassiveRecordsToolCall(t *testing.T) {
 	project := "capture-passive-project"
 	sessionID := defaultSessionID(project)
 
-	capture := handleCapturePassive(s, MCPConfig{}, activity)
+	capture := handleCapturePassive(StaticSelector(s), MCPConfig{}, activity)
 	_, err := capture(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"content": "## Key Learnings:\n1. Test learning",
@@ -3278,7 +3278,7 @@ func TestSessionStartUsesDefaultSessionID(t *testing.T) {
 	activity := NewSessionActivity(10 * time.Minute)
 	project := "session-start-project"
 
-	start := handleSessionStart(s, MCPConfig{}, activity)
+	start := handleSessionStart(StaticSelector(s), MCPConfig{}, activity)
 	_, err := start(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": "real-unique-session-id",
@@ -3317,7 +3317,7 @@ func TestSessionStartWithoutDirectoryUsesCurrentWorkingDirectory(t *testing.T) {
 		t.Fatalf("enroll project: %v", err)
 	}
 
-	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	start := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := start(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": "session-start-cwd",
@@ -3360,7 +3360,7 @@ func TestSessionStartWithWhitespaceDirectoryUsesCurrentWorkingDirectory(t *testi
 		t.Fatalf("enroll project: %v", err)
 	}
 
-	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	start := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := start(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id":        "session-start-whitespace",
@@ -3405,7 +3405,7 @@ func TestSessionStartWithExplicitDirectoryPreservesDirectory(t *testing.T) {
 	}
 	explicitDir := filepath.Join(t.TempDir(), "explicit-worktree")
 
-	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	start := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := start(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id":        "session-start-explicit",
@@ -3452,7 +3452,7 @@ func TestSessionStartWithExplicitDirectoryResolvesProjectFromDirectory(t *testin
 	t.Chdir(workspace)
 
 	explicitDir := filepath.Join(rightRepo, "nested")
-	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	start := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := start(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id":        "session-start-explicit-project",
@@ -3493,7 +3493,7 @@ func TestSessionStartWithExplicitDirectoryTrimsWhitespaceBeforePersisting(t *tes
 
 	trimmedDir := filepath.Join(repoDir, "nested")
 	rawDir := " \n\t" + trimmedDir + "\t "
-	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	start := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := start(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id":        "session-start-trimmed-directory",
@@ -3538,7 +3538,7 @@ func TestSessionStartWithExplicitPlainDirectoryUsesDirectoryBasenameProject(t *t
 
 	t.Chdir(wrongRepo)
 
-	start := handleSessionStart(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	start := handleSessionStart(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := start(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id":        "session-start-explicit-plain-dir",
@@ -3623,7 +3623,7 @@ func TestMemSave_AutoDetectsProject(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "auto-detect test",
@@ -3671,7 +3671,7 @@ func TestMemSave_ExplicitProjectOverridesDetectedProject(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed existing project: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "should be explicit project",
@@ -3708,7 +3708,7 @@ func TestMemSave_ExplicitProjectRejectsInvalidName(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "invalid explicit project must fail",
@@ -3743,7 +3743,7 @@ func TestMemSave_ExplicitProjectTypoIsRejectedWithoutWrite(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "explicit typo must fail",
@@ -3785,7 +3785,7 @@ func TestMemSave_UsesSessionProjectWhenProjectOmitted(t *testing.T) {
 	if err := s.CreateSession("issue-334-session", "session-owned-project", "/work/session-owned-project"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":      "session project precedence",
@@ -3821,7 +3821,7 @@ func TestMemSave_MissingSessionIDFailsLoudly(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":      "missing session should fail",
@@ -3854,7 +3854,7 @@ func TestMemSave_ExplicitProjectMustMatchExistingSessionProject(t *testing.T) {
 	if err := s.CreateSession("cross-project-session", "session-owned-project", "/work/session-owned-project"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":      "cross-project mismatch should fail",
@@ -3897,7 +3897,7 @@ func TestMemSave_NonAmbiguousExplicitProjectIgnoresStaleRecoveryReason(t *testin
 	}); err != nil {
 		t.Fatalf("seed existing project: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "stale recovery reason keeps explicit project",
@@ -3932,7 +3932,7 @@ func TestMemSave_NonAmbiguousExplicitProjectStillFailsSessionMismatchWithStaleRe
 	if err := s.CreateSession("stale-recovery-mismatch", "session-owned-project", "/work/session-owned-project"); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "stale recovery reason must not bypass mismatch",
@@ -3976,7 +3976,7 @@ func TestMemSave_RepoConfigBeatsGitRemoteFallback(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "config project precedence",
 		"content": "test repo config project lock",
@@ -4012,7 +4012,7 @@ func TestMemSave_AmbiguousEnvelope(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "should not be saved",
@@ -4056,7 +4056,7 @@ func TestMemSave_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 
 	s := newMCPTestStore(t)
 	activity := NewSessionActivity(10 * time.Minute)
-	h := handleSave(s, MCPConfig{}, activity)
+	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 	initial, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "chosen project memory",
 		"content": "saved after explicit user choice",
@@ -4102,7 +4102,7 @@ func TestMemSave_AmbiguousRecoveryRejectsSyntheticUserChoiceReason(t *testing.T)
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "synthetic recovery reason must fail",
 		"content":               "must not save without explicit user selection evidence",
@@ -4138,7 +4138,7 @@ func TestMemSave_AmbiguousRecoveryRejectsWrongToken(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "wrong token must fail",
 		"content":               "must not save with wrong token",
@@ -4178,7 +4178,7 @@ func TestMemSave_AmbiguousRecoveryRejectsStaleToken(t *testing.T) {
 	s := newMCPTestStore(t)
 	activity := NewSessionActivity(10 * time.Minute)
 	activity.now = func() time.Time { return now }
-	h := handleSave(s, MCPConfig{}, activity)
+	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 	initial, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "stale token setup",
 		"content": "trigger ambiguous token",
@@ -4227,7 +4227,7 @@ func TestMemSave_AmbiguousRecoveryRejectsTokenForDifferentProject(t *testing.T) 
 
 	s := newMCPTestStore(t)
 	activity := NewSessionActivity(10 * time.Minute)
-	h := handleSave(s, MCPConfig{}, activity)
+	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 	initial, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "token bound project",
 		"content": "trigger ambiguous token",
@@ -4282,7 +4282,7 @@ func TestMemSave_AmbiguousChoiceRequiresExactAvailableProject(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "normalized choice must fail",
 		"content":               "must not save under normalized collision",
@@ -4319,7 +4319,7 @@ func TestMemSave_AmbiguousChoiceRequiresExactAvailableProject(t *testing.T) {
 	}
 
 	activity := NewSessionActivity(10 * time.Minute)
-	h = handleSave(s, MCPConfig{}, activity)
+	h = handleSave(StaticSelector(s), MCPConfig{}, activity)
 	initial, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "exact choice token",
 		"content": "trigger ambiguous token",
@@ -4359,7 +4359,7 @@ func TestMemSave_AmbiguousRecoveryRequiresExactAvailableProjectRegression(t *tes
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "ambiguous exact-match regression",
@@ -4380,7 +4380,7 @@ func TestMemSave_AmbiguousRecoveryRequiresExactAvailableProjectRegression(t *tes
 	}
 
 	activity := NewSessionActivity(10 * time.Minute)
-	h = handleSave(s, MCPConfig{}, activity)
+	h = handleSave(StaticSelector(s), MCPConfig{}, activity)
 	initial, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "exact regression token",
 		"content": "trigger ambiguous token",
@@ -4419,7 +4419,7 @@ func TestMemSave_AmbiguousRecoveryRejectsNormalizationCollisions(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	for _, choice := range []string{"foo--bar", "foo-bar"} {
 		res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -4475,7 +4475,7 @@ func TestMemSave_ExplicitBackedProjectRejectsAmbiguousNormalizationCollision(t *
 		t.Fatalf("seed observation: %v", err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "explicit backed collision must fail",
 		"content": "must not write into preexisting collapsed bucket",
@@ -4516,7 +4516,7 @@ func TestMemSave_ExplicitProjectRejectsCollapsedStoreBucket(t *testing.T) {
 		t.Fatalf("seed observation: %v", err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "collapsed store bucket must fail",
 		"content": "must not write into foo-bar via foo--bar",
@@ -4549,7 +4549,7 @@ func TestMemSave_ExplicitProjectRejectsCollapsedSessionBucket(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":      "collapsed session bucket must fail",
 		"content":    "must not write into session-backed foo-bar via foo--bar",
@@ -4592,7 +4592,7 @@ func TestMemSave_ExplicitProjectAcceptsExactStoreProject(t *testing.T) {
 		t.Fatalf("seed observation: %v", err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "exact foo-bar succeeds",
 		"content": "writes to exact existing foo-bar",
@@ -4622,7 +4622,7 @@ func TestMemSave_OmittedProjectWithStaleRecoveryReasonFallsBackToSession(t *test
 		t.Fatalf("create session: %v", err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "stale empty project uses session",
 		"content":               "session fallback must win when project is empty",
@@ -4653,7 +4653,7 @@ func TestMemSave_ExplicitBlankProjectFailsWithoutFallback(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":      "blank explicit project must fail",
 		"content":    "must not write",
@@ -4693,7 +4693,7 @@ func TestMemSave_AmbiguousEmptyProjectChoiceIsActionable(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "empty choice must fail",
 		"content":               "must not save",
@@ -4728,7 +4728,7 @@ func TestMemSave_AmbiguousWithInventedProjectRejected(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":                 "invented project memory",
 		"content":               "must not save",
@@ -4760,7 +4760,7 @@ func TestMemSavePrompt_AmbiguousWithValidUserChoiceSucceeds(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSavePrompt(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSavePrompt(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	initial, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "prompt needs ambiguous token first",
 	}}})
@@ -4802,7 +4802,7 @@ func TestMemSavePrompt_AmbiguousRecoveryRejectsSyntheticUserChoiceReason(t *test
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSavePrompt(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSavePrompt(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content":               "prompt text that does not identify the chosen project",
 		"project":               "repo-prompt-synthetic-b",
@@ -4836,7 +4836,7 @@ func TestMemSavePrompt_AmbiguousRecoveryRejectsWrongToken(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSavePrompt(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSavePrompt(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content":               "prompt must reject wrong token",
 		"project":               "repo-prompt-token-b",
@@ -4871,7 +4871,7 @@ func TestMemSavePrompt_AmbiguousWithInventedProjectRejected(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSavePrompt(s, MCPConfig{}, nil)
+	h := handleSavePrompt(StaticSelector(s), MCPConfig{}, nil)
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content":               "prompt must not save",
 		"project":               "invented-prompt-project",
@@ -4900,7 +4900,7 @@ func TestMemSave_SuccessEnvelope(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "envelope test",
@@ -4951,7 +4951,7 @@ func TestMemSearch_NoProjectAutoDetects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query": "searchable memory",
 		// no project — auto-detect
@@ -4986,7 +4986,7 @@ func TestMemSearch_ExplicitKnownProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "known project memory",
 		"project": "known-project",
@@ -5007,7 +5007,7 @@ func TestMemSearch_UnknownProjectError(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "anything",
 		"project": "does-not-exist-project",
@@ -5049,7 +5049,7 @@ func TestAllTools_ReadResponseEnvelope(t *testing.T) {
 	}
 
 	// mem_search envelope
-	hSearch := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	hSearch := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	resSearch, err := hSearch(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"query": "envelope test",
@@ -5060,7 +5060,7 @@ func TestAllTools_ReadResponseEnvelope(t *testing.T) {
 	}
 
 	// mem_get_observation envelope
-	hGet := handleGetObservation(s, MCPConfig{})
+	hGet := handleGetObservation(StaticSelector(s), MCPConfig{})
 	resGet, err := hGet(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": float64(obsID),
@@ -5086,7 +5086,7 @@ func TestMemCurrentProject_NormalResult(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleCurrentProject(s, MCPConfig{})
+	h := handleCurrentProject(StaticSelector(s), MCPConfig{})
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
@@ -5121,7 +5121,7 @@ func TestMemCurrentProject_AmbiguousNoError(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleCurrentProject(s, MCPConfig{})
+	h := handleCurrentProject(StaticSelector(s), MCPConfig{})
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil {
@@ -5153,7 +5153,7 @@ func TestMemCurrentProject_WarningCase3(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleCurrentProject(s, MCPConfig{})
+	h := handleCurrentProject(StaticSelector(s), MCPConfig{})
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil || res.IsError {
@@ -5272,7 +5272,7 @@ func TestHandleSaveInvalidConfigFailsClearly(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title": "should fail", "content": "invalid config", "type": "decision",
 	}}})
@@ -5305,7 +5305,7 @@ func TestHandleSaveAndPromptUseConfigProjectForWrites(t *testing.T) {
 	t.Chdir(subdir)
 
 	s := newMCPTestStore(t)
-	save := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	save := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := save(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title": "config write", "content": "memory saved under config project", "type": "decision",
 		"project": "config-locked", "project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
@@ -5318,7 +5318,7 @@ func TestHandleSaveAndPromptUseConfigProjectForWrites(t *testing.T) {
 		t.Fatalf("expected mem_save explicit-project envelope, got %v", body)
 	}
 
-	prompt := handleSavePrompt(s, MCPConfig{}, nil)
+	prompt := handleSavePrompt(StaticSelector(s), MCPConfig{}, nil)
 	res, err = prompt(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "prompt saved under config project",
 		"project": "attempted-override", "project_choice_reason": project.SourceUserSelectedAfterAmbiguousProject,
@@ -5462,7 +5462,7 @@ func TestHandleGetObservation_ResponseEnvelopeIncludesProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleGetObservation(s, MCPConfig{})
+	h := handleGetObservation(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": float64(id),
@@ -5496,7 +5496,7 @@ func TestHandleStats_AutoDetectsProject(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleStats(s, MCPConfig{})
+	h := handleStats(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil || res.IsError {
 		t.Fatalf("stats: err=%v isError=%v text=%q", err, res.IsError, callResultText(t, res))
@@ -5518,7 +5518,7 @@ func TestHandleStats_ExplicitUnknownProjectError(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleStats(s, MCPConfig{})
+	h := handleStats(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"project": "nonexistent-stats-project",
@@ -5562,7 +5562,7 @@ func TestHandleTimeline_AutoDetectsProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleTimeline(s, MCPConfig{})
+	h := handleTimeline(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"observation_id": float64(obsID),
@@ -5602,7 +5602,7 @@ func TestHandleTimeline_ExplicitUnknownProjectError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleTimeline(s, MCPConfig{})
+	h := handleTimeline(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"observation_id": float64(obsID),
@@ -5655,7 +5655,7 @@ func TestMemSessionSummary_ExplicitProjectOverride(t *testing.T) {
 	if err := s.EnrollProject("explicit-summary-project"); err != nil {
 		t.Fatal(err)
 	}
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -5688,7 +5688,7 @@ func TestMemSessionSummary_ResolveViaSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -5745,7 +5745,7 @@ func TestMemSessionSummary_AutoDetectsProject(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -5780,7 +5780,7 @@ func TestMemSessionSummary_AmbiguousReturnsError(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -5821,7 +5821,7 @@ func TestWriteTool_AmbiguousErrorUsesCwdRepos_NotAllProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"title":   "t",
@@ -5914,7 +5914,7 @@ func TestHandleSearch_SuccessUsesEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// Non-empty results path.
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
@@ -5966,7 +5966,7 @@ func TestHandleSearch_EnvelopeProjectMatchesQueryProject(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -5999,7 +5999,7 @@ func TestHandleContext_EnvelopeProjectMatchesQueryProject(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleContext(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{}},
@@ -6049,7 +6049,7 @@ func TestHandleGetObservation_DegradedPathNoEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleGetObservation(s, MCPConfig{})
+	h := handleGetObservation(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": float64(obsID),
@@ -6097,7 +6097,7 @@ func TestHandleGetObservation_EnvelopePresent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handleGetObservation(s, MCPConfig{})
+	h := handleGetObservation(StaticSelector(s), MCPConfig{})
 	res, err := h(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": float64(obsID),
@@ -6125,7 +6125,7 @@ func TestMCPConfig_CanConstructWithDefaultProject(t *testing.T) {
 // JW7: TestMemContext_SchemaNoLimitParam — mem_context schema must NOT advertise limit.
 func TestMemContext_SchemaNoLimitParam(t *testing.T) {
 	s := newMCPTestStore(t)
-	srv := newServerWithActivity(s, MCPConfig{}, nil, NewSessionActivity(10*time.Minute))
+	srv := newServerWithActivity(StaticSelector(s), MCPConfig{}, nil, NewSessionActivity(10*time.Minute))
 
 	tools := srv.ListTools()
 	st, ok := tools["mem_context"]
@@ -6179,7 +6179,7 @@ func TestAllTools_ReadResponseEnvelope_WithAssertions(t *testing.T) {
 	}
 
 	// mem_search envelope
-	hSearch := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	hSearch := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	resSearch, err := hSearch(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"query": "js1 envelope test",
@@ -6191,7 +6191,7 @@ func TestAllTools_ReadResponseEnvelope_WithAssertions(t *testing.T) {
 	assertEnvelope(t, "mem_search", resSearch)
 
 	// mem_get_observation envelope
-	hGet := handleGetObservation(s, MCPConfig{})
+	hGet := handleGetObservation(StaticSelector(s), MCPConfig{})
 	resGet, err := hGet(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{
 			"id": float64(obsID),
@@ -6203,7 +6203,7 @@ func TestAllTools_ReadResponseEnvelope_WithAssertions(t *testing.T) {
 	assertEnvelope(t, "mem_get_observation", resGet)
 
 	// mem_context envelope
-	hCtx := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	hCtx := handleContext(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	resCtx, err := hCtx(context.Background(), mcppkg.CallToolRequest{
 		Params: mcppkg.CallToolParams{Arguments: map[string]any{}},
 	})
@@ -6273,7 +6273,7 @@ func TestHandleSave_MCPConfig_OverridesDefaults(t *testing.T) {
 	cfg := MCPConfig{
 		BM25Floor: ptrF(0.0),
 	}
-	h := handleSave(s, cfg, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), cfg, NewSessionActivity(10*time.Minute))
 
 	// Save first observation — no candidates yet.
 	req1 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -6378,7 +6378,7 @@ func TestMemSearch_AnnotatesConflictsWith_Judged(t *testing.T) {
 		t.Fatalf("judge relation: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "cache",
 		"project": "engram",
@@ -6447,7 +6447,7 @@ func TestMemSearch_PendingConflict_KeepsPhase1Annotation(t *testing.T) {
 		t.Fatalf("save pending relation: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "decision",
 		"project": "engram",
@@ -6533,7 +6533,7 @@ func TestMemSearch_TitleEnrichment_SupersedesAndSupersededBy(t *testing.T) {
 		t.Fatalf("judge relation: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "JWT approach",
 		"project": "engram",
@@ -6623,7 +6623,7 @@ func TestMemSearch_TitleEnrichment_FallsBackToDeleted(t *testing.T) {
 		t.Fatalf("delete obs: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "superseding decision",
 		"project": "engram",
@@ -6770,7 +6770,7 @@ func TestMemSearch_AllThreeTypes_FormatExact(t *testing.T) {
 		t.Fatalf("judge superseded_by: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	searchRes, err := search(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "central architecture decision",
 		"project": "engram",
@@ -6810,7 +6810,7 @@ func TestProcessOverrideCurrentProjectBeatsAmbiguousCWD(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleCurrentProject(s, MCPConfig{DefaultProject: "Trusted Project"})
+	h := handleCurrentProject(StaticSelector(s), MCPConfig{DefaultProject: "Trusted Project"})
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{})
 	if err != nil || res.IsError {
@@ -6898,7 +6898,7 @@ func TestProcessOverrideSaveHandlerWritesToDefaultProject(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	s := newMCPTestStore(t)
-	h := handleSave(s, MCPConfig{DefaultProject: "Trusted Project"}, NewSessionActivity(10*time.Minute))
+	h := handleSave(StaticSelector(s), MCPConfig{DefaultProject: "Trusted Project"}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "process override write",
@@ -6960,7 +6960,7 @@ func TestHandleSearchPersonalScopeIgnoresCWDProject(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query": "personal",
 		"scope": "personal",
@@ -7024,7 +7024,7 @@ func TestHandleContextPersonalScopeIgnoresCWDProject(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	h := handleContext(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleContext(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"scope": "personal",
 		// no "project" argument — must NOT default to cwd project
@@ -7059,7 +7059,7 @@ func TestSessionSummary_ProcessOverrideWritesToDefaultProject(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{DefaultProject: "Trusted Project"}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{DefaultProject: "Trusted Project"}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Goal\nProcess override session summary",
@@ -7100,7 +7100,7 @@ func TestSessionSummary_ProcessOverrideBypassesAmbiguousCWD(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{DefaultProject: "override-project"}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{DefaultProject: "override-project"}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "## Goal\nAmbiguous override test",
@@ -7128,7 +7128,7 @@ func TestSessionSummary_EmptyContentRejected(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "",
@@ -7162,7 +7162,7 @@ func TestSessionSummary_WhitespaceOnlyContentRejected(t *testing.T) {
 	t.Chdir(dir)
 
 	s := newMCPTestStore(t)
-	h := handleSessionSummary(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSessionSummary(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"content": "   \n\t  ",
@@ -7213,7 +7213,7 @@ func TestHandleSearchAllProjectsReturnsResultsFromEveryProject(t *testing.T) {
 	s := newMCPTestStore(t)
 	seedCrossProjectMemories(t, s)
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":        "auth middleware",
 		"all_projects": true,
@@ -7253,7 +7253,7 @@ func TestHandleSearchAllProjectsOverridesProjectArg(t *testing.T) {
 	s := newMCPTestStore(t)
 	seedCrossProjectMemories(t, s)
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	// Pass both project="alpha" and all_projects=true: all_projects must win.
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":        "auth middleware",
@@ -7280,7 +7280,7 @@ func TestHandleSearchWithoutAllProjectsStillScopesToCurrentProject(t *testing.T)
 	s := newMCPTestStore(t)
 	seedCrossProjectMemories(t, s)
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	// Default behavior: project="alpha", no all_projects flag → only alpha matches.
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":   "auth middleware",
@@ -7342,7 +7342,7 @@ func TestHandleSearchLegacyMixedCaseProject(t *testing.T) {
 		t.Fatalf("rebuild FTS: %v", err)
 	}
 
-	search := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	search := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// The agent passes the project name as typed (mixed-case). handleSearch
 	// normalizes it to lowercase and must still resolve and return results.
@@ -7393,7 +7393,7 @@ func TestHandleSearch_MatchModeAny(t *testing.T) {
 	s := newMCPTestStore(t)
 	seedMCPMatchModeFixture(t, s)
 
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":      "auth compliance session",
 		"project":    "engram",
@@ -7429,7 +7429,7 @@ func TestHandleSearch_MatchModeInvalidError(t *testing.T) {
 	s := newMCPTestStore(t)
 	seedMCPMatchModeFixture(t, s)
 
-	h := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleSearch(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"query":      "auth compliance session",
 		"project":    "engram",

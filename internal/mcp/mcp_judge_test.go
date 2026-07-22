@@ -70,7 +70,7 @@ func TestHandleJudge_HappyPath(t *testing.T) {
 	s := newMCPTestStore(t)
 	judgmentID, _, _ := seedJudgeFixture(t, s)
 
-	h := handleJudge(s, NewSessionActivity(10*time.Minute))
+	h := handleJudge(StaticSelector(s), NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"judgment_id": judgmentID,
 		"relation":    "not_conflict",
@@ -113,7 +113,7 @@ func TestHandleJudge_OptionalFieldsStayNull(t *testing.T) {
 	s := newMCPTestStore(t)
 	judgmentID, _, _ := seedJudgeFixture(t, s)
 
-	h := handleJudge(s, NewSessionActivity(10*time.Minute))
+	h := handleJudge(StaticSelector(s), NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"judgment_id": judgmentID,
 		"relation":    "related",
@@ -152,7 +152,7 @@ func TestHandleJudge_OptionalFieldsStayNull(t *testing.T) {
 func TestHandleJudge_UnknownID_IsError(t *testing.T) {
 	s := newMCPTestStore(t)
 
-	h := handleJudge(s, NewSessionActivity(10*time.Minute))
+	h := handleJudge(StaticSelector(s), NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"judgment_id": "rel-does-not-exist",
 		"relation":    "not_conflict",
@@ -176,7 +176,7 @@ func TestHandleJudge_InvalidVerb_IsError(t *testing.T) {
 	s := newMCPTestStore(t)
 	judgmentID, _, _ := seedJudgeFixture(t, s)
 
-	h := handleJudge(s, NewSessionActivity(10*time.Minute))
+	h := handleJudge(StaticSelector(s), NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"judgment_id": judgmentID,
 		"relation":    "invalidverb",
@@ -206,7 +206,7 @@ func TestHandleJudge_Idempotent_Overwrite(t *testing.T) {
 	s := newMCPTestStore(t)
 	judgmentID, _, _ := seedJudgeFixture(t, s)
 
-	h := handleJudge(s, NewSessionActivity(10*time.Minute))
+	h := handleJudge(StaticSelector(s), NewSessionActivity(10*time.Minute))
 
 	// First verdict.
 	req1 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -247,7 +247,7 @@ func TestHandleJudge_Idempotent_Overwrite(t *testing.T) {
 // TestHandleJudge_RequiresJudgmentID — missing judgment_id returns IsError=true.
 func TestHandleJudge_RequiresJudgmentID(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := handleJudge(s, NewSessionActivity(10*time.Minute))
+	h := handleJudge(StaticSelector(s), NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"relation": "not_conflict",
@@ -268,7 +268,7 @@ func TestHandleJudge_RequiresRelation(t *testing.T) {
 	s := newMCPTestStore(t)
 	judgmentID, _, _ := seedJudgeFixture(t, s)
 
-	h := handleJudge(s, NewSessionActivity(10*time.Minute))
+	h := handleJudge(StaticSelector(s), NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"judgment_id": judgmentID,
 		// relation omitted

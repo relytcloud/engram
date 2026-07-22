@@ -60,6 +60,14 @@ type MCPConfig struct {
 
 var suggestTopicKey = store.SuggestTopicKey
 
+// addPromptIfMissing and loadMCPStats intentionally keep a concrete
+// *store.Store parameter (rather than MemoryBackend): both are package-level
+// var seams that existing tests reassign with a *store.Store-typed function
+// literal to inject failures. Widening the parameter type here would break
+// that seam. Call sites resolve the selected MemoryBackend down to a
+// *store.Store via a type assertion before invoking them — always the SQLite
+// backend today, since the default BackendSelector never resolves to
+// anything else.
 var addPromptIfMissing = func(s *store.Store, params store.AddPromptParams) (int64, bool, error) {
 	return s.AddPromptIfMissing(params)
 }
@@ -76,7 +84,7 @@ func currentWorkingDirectory() string {
 	return cwd
 }
 
-func ensureImplicitSessionWithCWD(s *store.Store, sessionID, project string) error {
+func ensureImplicitSessionWithCWD(s MemoryBackend, sessionID, project string) error {
 	return s.CreateSession(sessionID, project, currentWorkingDirectory())
 }
 
@@ -170,6 +178,16 @@ func NewServer(s *store.Store) *server.MCPServer {
 	return NewServerWithConfig(s, MCPConfig{}, nil)
 }
 
+// NewServerWithSelector creates an MCP server whose mem_* handlers resolve
+// their MemoryBackend per project via sel, instead of always using a single
+// *store.Store. Every other public constructor (NewServer,
+// NewServerWithTools, NewServerWithConfig) wraps a *store.Store in
+// StaticSelector and delegates here, so this is the one place that actually
+// threads a BackendSelector through tool registration.
+func NewServerWithSelector(sel BackendSelector, cfg MCPConfig, allowlist map[string]bool) *server.MCPServer {
+	return newServerWithActivity(sel, cfg, allowlist, NewSessionActivity(10*time.Minute))
+}
+
 // serverInstructions tells MCP clients when to use Engram's tools.
 // 7 core tools are eager (always in context). The rest are deferred
 // and require ToolSearch to load.
@@ -230,10 +248,10 @@ func NewServerWithTools(s *store.Store, allowlist map[string]bool) *server.MCPSe
 // NewServerWithConfig creates an MCP server with full configuration including
 // default project detection and optional tool allowlist.
 func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]bool) *server.MCPServer {
-	return newServerWithActivity(s, cfg, allowlist, NewSessionActivity(10*time.Minute))
+	return newServerWithActivity(StaticSelector(s), cfg, allowlist, NewSessionActivity(10*time.Minute))
 }
 
-func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
+func newServerWithActivity(sel BackendSelector, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
 	srv := server.NewMCPServer(
 		"engram",
 		"0.1.0",
@@ -241,7 +259,7 @@ func newServerWithActivity(s *store.Store, cfg MCPConfig, allowlist map[string]b
 		server.WithInstructions(serverInstructions),
 	)
 
-	registerTools(srv, s, cfg, allowlist, activity)
+	registerTools(srv, sel, cfg, allowlist, activity)
 	return srv
 }
 
@@ -254,8 +272,11 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 	return allowlist[name]
 }
 
-// registerTools registers all enabled MCP tools on the given server.
-func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
+// registerTools registers all enabled MCP tools on the given server. Each
+// handler is constructed with sel (a BackendSelector) rather than a fixed
+// backend, so the memory backend used for a given call can vary by resolved
+// project (Task 2 wires this abstraction; sel is always StaticSelector today).
+func registerTools(srv *server.MCPServer, sel BackendSelector, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) {
 	writeQueue := newWriteQueue(defaultMCPWriteQueueSize)
 
 	// ─── mem_search (profile: agent, core — always in context) ─────────
@@ -291,7 +312,7 @@ func registerTools(srv *server.MCPServer, s *store.Store, cfg MCPConfig, allowli
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
 			),
-			handleSearch(s, cfg, activity),
+			handleSearch(sel, cfg, activity),
 		)
 	}
 
@@ -365,7 +386,7 @@ Examples:
 					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for SDD artifacts or automated saves."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSave(s, cfg, activity)),
+			queuedWriteHandler(writeQueue, handleSave(sel, cfg, activity)),
 		)
 	}
 
@@ -400,7 +421,7 @@ Examples:
 					mcp.Description("New topic key (normalized internally)"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleUpdate(s)),
+			queuedWriteHandler(writeQueue, handleUpdate(sel)),
 		)
 	}
 
@@ -421,7 +442,7 @@ Examples:
 				mcp.WithNumber("observation_id", mcp.Description("Observation id for action=mark_reviewed.")),
 				mcp.WithNumber("id", mcp.Description("Backward-compatible alias for observation_id.")),
 			),
-			queuedWriteHandler(writeQueue, handleReview(s, cfg)),
+			queuedWriteHandler(writeQueue, handleReview(sel, cfg)),
 		)
 	}
 
@@ -469,7 +490,7 @@ Examples:
 					mcp.Description("If true, permanently deletes the observation"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleDelete(s)),
+			queuedWriteHandler(writeQueue, handleDelete(sel)),
 		)
 	}
 
@@ -500,7 +521,7 @@ Examples:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSavePrompt(s, cfg, activity)),
+			queuedWriteHandler(writeQueue, handleSavePrompt(sel, cfg, activity)),
 		)
 	}
 
@@ -517,7 +538,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithNumber("id", mcp.Required(), mcp.Description("Observation ID to pin")),
 			),
-			handlePin(s, true),
+			handlePin(sel, true),
 		)
 	}
 	if shouldRegister("mem_unpin", allowlist) {
@@ -532,7 +553,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithNumber("id", mcp.Required(), mcp.Description("Observation ID to unpin")),
 			),
-			handlePin(s, false),
+			handlePin(sel, false),
 		)
 	}
 
@@ -554,7 +575,7 @@ Examples:
 				),
 				// JW7: limit param removed — schema advertised it but handleContext never read it.
 			),
-			handleContext(s, cfg, activity),
+			handleContext(sel, cfg, activity),
 		)
 	}
 
@@ -573,7 +594,7 @@ Examples:
 					mcp.Description("Project to echo in envelope context (omit for auto-detect; stats themselves are global aggregates)"),
 				),
 			),
-			handleStats(s, cfg),
+			handleStats(sel, cfg),
 		)
 	}
 
@@ -602,7 +623,7 @@ Examples:
 					mcp.Description("Filter by project name (omit for auto-detect)"),
 				),
 			),
-			handleTimeline(s, cfg),
+			handleTimeline(sel, cfg),
 		)
 	}
 
@@ -621,7 +642,7 @@ Examples:
 					mcp.Description("The observation ID to retrieve"),
 				),
 			),
-			handleGetObservation(s, cfg),
+			handleGetObservation(sel, cfg),
 		)
 	}
 
@@ -684,7 +705,7 @@ GUIDELINES:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionSummary(s, cfg, activity)),
+			queuedWriteHandler(writeQueue, handleSessionSummary(sel, cfg, activity)),
 		)
 	}
 
@@ -707,7 +728,7 @@ GUIDELINES:
 					mcp.Description("Working directory"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionStart(s, cfg, activity)),
+			queuedWriteHandler(writeQueue, handleSessionStart(sel, cfg, activity)),
 		)
 	}
 
@@ -730,7 +751,7 @@ GUIDELINES:
 					mcp.Description("Summary of what was accomplished"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionEnd(s, cfg, activity)),
+			queuedWriteHandler(writeQueue, handleSessionEnd(sel, cfg, activity)),
 		)
 	}
 
@@ -760,7 +781,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleCapturePassive(s, cfg, activity)),
+			queuedWriteHandler(writeQueue, handleCapturePassive(sel, cfg, activity)),
 		)
 	}
 
@@ -784,7 +805,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The canonical project name to merge INTO (e.g. 'engram')"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleMergeProjects(s)),
+			queuedWriteHandler(writeQueue, handleMergeProjects(sel)),
 		)
 	}
 
@@ -799,7 +820,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
 			),
-			handleCurrentProject(s, cfg),
+			handleCurrentProject(sel, cfg),
 		)
 	}
 
@@ -817,7 +838,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithString("project", mcp.Description("Project to diagnose (omit for auto-detect)")),
 				mcp.WithString("check", mcp.Description("Optional diagnostic check code to run")),
 			),
-			handleDoctor(s, cfg),
+			handleDoctor(sel, cfg),
 		)
 	}
 
@@ -871,7 +892,7 @@ Re-judging an already-judged ID overwrites the verdict (deliberate revision).`),
 					mcp.Description("Session ID for provenance (default: auto)"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleJudge(s, activity)),
+			queuedWriteHandler(writeQueue, handleJudge(sel, activity)),
 		)
 	}
 
@@ -928,7 +949,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 					mcp.Description("Your model identifier for provenance (e.g. \"claude-haiku-4-5\")"),
 				),
 			),
-			handleCompare(s, activity),
+			handleCompare(sel, activity),
 		)
 	}
 }
@@ -938,7 +959,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 // handleCurrentProject implements mem_current_project. It NEVER returns an error
 // even on ambiguous cwd — it always returns a success result with whatever
 // detection info is available (REQ-313).
-func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleCurrentProject(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cwd, _ := os.Getwd()
 		res := projectpkg.DetectProjectFull(cwd)
@@ -965,7 +986,7 @@ func handleCurrentProject(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 	}
 }
 
-func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, _ := req.GetArguments()["query"].(string)
 		typ, _ := req.GetArguments()["type"].(string)
@@ -979,6 +1000,11 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 		if matchMode != "" && matchMode != "all" && matchMode != "any" {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid match_mode %q: must be \"all\" or \"any\"", matchMode)), nil
 		}
+
+		// Resolve project first against the default (project-unaware) backend —
+		// project existence/config lookups are backend-selection metadata, not
+		// the content operation itself.
+		s := sel("")
 
 		// all_projects=true short-circuits project resolution: we search globally
 		// regardless of the project override or any auto-detected project. This
@@ -1006,6 +1032,7 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 			project, _ = store.NormalizeProject(project)
 			detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
 		}
+		s = sel(project) // re-resolve now that the target project is known
 
 		// REQ-391: personal scope is cross-project by definition. When scope=personal
 		// and no explicit project override was provided, clear the project filter so
@@ -1148,12 +1175,15 @@ func handleSearch(s *store.Store, cfg MCPConfig, activity *SessionActivity) serv
 	}
 }
 
-func handlePin(s *store.Store, pinned bool) server.ToolHandlerFunc {
+func handlePin(sel BackendSelector, pinned bool) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
+		// Pin/unpin is addressed purely by observation id — no project is
+		// known or needed to pick a backend.
+		s := sel("")
 
 		var err error
 		if pinned {
@@ -1183,8 +1213,9 @@ func handlePin(s *store.Store, pinned bool) server.ToolHandlerFunc {
 	}
 }
 
-func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		s := sel("")
 		title, _ := req.GetArguments()["title"].(string)
 		content, _ := req.GetArguments()["content"].(string)
 		if strings.TrimSpace(content) == "" {
@@ -1226,6 +1257,7 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 		// Normalize project name and capture warning
 		normalized, normWarning := store.NormalizeProject(project)
 		project = normalized
+		s = sel(project) // re-resolve now that the target project is known
 
 		if typ == "" {
 			typ = "manual"
@@ -1276,12 +1308,18 @@ func handleSave(s *store.Store, cfg MCPConfig, activity *SessionActivity) server
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
-				if _, _, promptErr := addPromptIfMissing(s, store.AddPromptParams{
-					SessionID: sessionID,
-					Content:   prompt,
-					Project:   project,
-				}); promptErr != nil {
-					fmt.Fprintf(os.Stderr, "engram: auto prompt capture error (non-fatal): %v\n", promptErr)
+				// addPromptIfMissing is a *store.Store-typed test seam (see its
+				// declaration); resolve the concrete SQLite backend to call it.
+				// Always succeeds today since the default selector never
+				// resolves to anything else.
+				if sqliteStore, ok := s.(*store.Store); ok {
+					if _, _, promptErr := addPromptIfMissing(sqliteStore, store.AddPromptParams{
+						SessionID: sessionID,
+						Content:   prompt,
+						Project:   project,
+					}); promptErr != nil {
+						fmt.Fprintf(os.Stderr, "engram: auto prompt capture error (non-fatal): %v\n", promptErr)
+					}
 				}
 			}
 		}
@@ -1387,12 +1425,15 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 	}
 }
 
-func handleUpdate(s *store.Store) server.ToolHandlerFunc {
+func handleUpdate(sel BackendSelector) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
+		// Update is addressed purely by observation id — no project is known
+		// or needed to pick a backend.
+		s := sel("")
 
 		update := store.UpdateObservationParams{}
 		if v, ok := req.GetArguments()["title"].(string); ok {
@@ -1440,8 +1481,9 @@ func handleUpdate(s *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		s := sel("")
 		action, _ := req.GetArguments()["action"].(string)
 		switch strings.TrimSpace(action) {
 		case "list":
@@ -1466,6 +1508,7 @@ func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 				detRes = res
 				detRes.Source = projectpkg.SourceAllProjects
 			}
+			s = sel(projectFilter) // re-resolve now that the target project filter is known
 
 			observations, err := s.ObservationsNeedingReview(projectFilter, limit)
 			if err != nil {
@@ -1541,12 +1584,15 @@ func handleReview(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleDelete(s *store.Store) server.ToolHandlerFunc {
+func handleDelete(sel BackendSelector) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
+		// Delete is addressed purely by observation id — no project is known
+		// or needed to pick a backend.
+		s := sel("")
 
 		hardDelete := boolArg(req, "hard_delete", false)
 		if err := s.DeleteObservation(id, hardDelete); err != nil {
@@ -1561,7 +1607,7 @@ func handleDelete(s *store.Store) server.ToolHandlerFunc {
 	}
 }
 
-func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSavePrompt(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
@@ -1584,6 +1630,7 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			return writeProjectErrorResult(activity, recoverySessionID, detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
+		s := sel(project)
 
 		if sessionID == "" {
 			sessionID = resolveFallbackSessionID(s, project)
@@ -1610,8 +1657,9 @@ func handleSavePrompt(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 	}
 }
 
-func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleContext(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		s := sel("")
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		scope, _ := req.GetArguments()["scope"].(string)
 
@@ -1630,6 +1678,7 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 		project := detRes.Project
 		project, _ = store.NormalizeProject(project)
 		detRes.Project = project // JR2-1: keep envelope in sync with normalized query project
+		s = sel(project)         // re-resolve now that the target project is known
 
 		// REQ-391: personal scope is cross-project by definition. When scope=personal
 		// and no explicit project override was provided, clear the project filter so
@@ -1671,8 +1720,11 @@ func handleContext(s *store.Store, cfg MCPConfig, activity *SessionActivity) ser
 }
 
 // handleStats returns a tool handler function for mem_stats.
-func handleStats(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleStats(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// mem_stats reports global aggregates (not scoped to one project), so
+		// it always uses the default (project-unaware) backend.
+		s := sel("")
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
@@ -1688,7 +1740,14 @@ func handleStats(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 		}
 
-		stats, err := loadMCPStats(s)
+		// loadMCPStats is a *store.Store-typed test seam (see its declaration);
+		// resolve the concrete SQLite backend to call it. Always succeeds
+		// today since the default selector never resolves to anything else.
+		sqliteStore, ok := s.(*store.Store)
+		if !ok {
+			return mcp.NewToolResultError("mem_stats requires a local SQLite-backed project"), nil
+		}
+		stats, err := loadMCPStats(sqliteStore)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get stats: " + err.Error()), nil
 		}
@@ -1709,11 +1768,12 @@ func handleStats(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 
 // DoctorToolHandler returns a tool handler function for mem_doctor.
 func DoctorToolHandler(s *store.Store) server.ToolHandlerFunc {
-	return handleDoctor(s, MCPConfig{})
+	return handleDoctor(StaticSelector(s), MCPConfig{})
 }
 
-func handleDoctor(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleDoctor(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		s := sel("")
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		check, _ := req.GetArguments()["check"].(string)
 		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
@@ -1726,8 +1786,16 @@ func handleDoctor(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 		}
 		project := detRes.Project
 		project, _ = store.NormalizeProject(project)
+		s = sel(project) // re-resolve now that the target project is known
+		// diagnostic.Scope needs a concrete *store.Store (it runs direct SQL
+		// checks that are not part of MemoryBackend). Always succeeds today
+		// since the default selector never resolves to anything else.
+		sqliteStore, ok := s.(*store.Store)
+		if !ok {
+			return mcp.NewToolResultError("mem_doctor requires a local SQLite-backed project"), nil
+		}
 		runner := diagnostic.NewRunner()
-		scope := diagnostic.Scope{Store: s, Project: project, Now: time.Now()}
+		scope := diagnostic.Scope{Store: sqliteStore, Project: project, Now: time.Now()}
 		var report diagnostic.Report
 		if strings.TrimSpace(check) != "" {
 			report, err = runner.RunOne(ctx, scope, check)
@@ -1749,8 +1817,11 @@ func handleDoctor(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleTimeline(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Timeline is addressed by observation_id; project is only used for
+		// the response envelope, so the default backend is used throughout.
+		s := sel("")
 		observationID := int64(intArg(req, "observation_id", 0))
 		if observationID == 0 {
 			return mcp.NewToolResultError("observation_id is required"), nil
@@ -1816,8 +1887,11 @@ func handleTimeline(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
 }
 
 // handleGetObservation returns a tool handler function for mem_get_observation.
-func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc {
+func handleGetObservation(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Get-by-id is addressed purely by observation id — no project is
+		// known or needed to pick a backend.
+		s := sel("")
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
@@ -1868,8 +1942,9 @@ func handleGetObservation(s *store.Store, cfg MCPConfig) server.ToolHandlerFunc 
 // handleSessionSummary returns a tool handler function that saves a comprehensive
 // end-of-session summary memory. It supports explicit project override matching
 // the precedence of mem_save.
-func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSessionSummary(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		s := sel("")
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
 		projectChoice, _ := req.GetArguments()["project"].(string)
@@ -1903,6 +1978,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 		project := detRes.Project
 
 		project, _ = store.NormalizeProject(project)
+		s = sel(project) // re-resolve now that the target project is known
 
 		if sessionID == "" {
 			sessionID = resolveFallbackSessionID(s, project)
@@ -1931,7 +2007,7 @@ func handleSessionSummary(s *store.Store, cfg MCPConfig, activity *SessionActivi
 	}
 }
 
-func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSessionStart(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		directory, _ := req.GetArguments()["directory"].(string)
@@ -1943,6 +2019,7 @@ func handleSessionStart(s *store.Store, cfg MCPConfig, activity *SessionActivity
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
+		s := sel(project)
 
 		activity.RecordToolCall(defaultSessionID(project))
 		if resolvedDirectory == "" {
@@ -1972,7 +2049,7 @@ func resolveSessionStartProject(explicitDirectory string) (projectpkg.DetectionR
 	return res, nil
 }
 
-func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleSessionEnd(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, _ := req.GetArguments()["id"].(string)
 		summary, _ := req.GetArguments()["summary"].(string)
@@ -1993,6 +2070,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 			}
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
+		s := sel(project)
 
 		if err := s.EndSession(id, summary); err != nil {
 			return mcp.NewToolResultError("Failed to end session: " + err.Error()), nil
@@ -2005,7 +2083,7 @@ func handleSessionEnd(s *store.Store, cfg MCPConfig, activity *SessionActivity) 
 	}
 }
 
-func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
+func handleCapturePassive(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		content, _ := req.GetArguments()["content"].(string)
 		sessionID, _ := req.GetArguments()["session_id"].(string)
@@ -2017,6 +2095,7 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 			return writeProjectErrorResult(nil, "", detRes, err), nil
 		}
 		project, _ := store.NormalizeProject(detRes.Project)
+		s := sel(project)
 
 		activity.RecordToolCall(defaultSessionID(project))
 
@@ -2060,8 +2139,10 @@ func handleCapturePassive(s *store.Store, cfg MCPConfig, activity *SessionActivi
 // candidate (judgment_id is in candidates[]). Use to mark SUPERSEDES,
 // CONFLICTS_WITH, NOT_CONFLICT, RELATED, COMPATIBLE, or SCOPED.
 // Ask the user when ambiguous."
-func handleJudge(s *store.Store, activity *SessionActivity) server.ToolHandlerFunc {
+func handleJudge(sel BackendSelector, activity *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Judging a relation is addressed by judgment_id, not project.
+		s := sel("")
 		judgmentID, _ := req.GetArguments()["judgment_id"].(string)
 		relation, _ := req.GetArguments()["relation"].(string)
 
@@ -2126,8 +2207,10 @@ func handleJudge(s *store.Store, activity *SessionActivity) server.ToolHandlerFu
 // "Persist a semantic verdict you have already judged externally into Engram.
 // Accepts int IDs for both observations, resolves them to sync_ids, then
 // calls JudgeBySemantic. Returns the persisted relation's sync_id."
-func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
+func handleCompare(sel BackendSelector, _ *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Compare resolves both sides by observation id, not project.
+		s := sel("")
 		// --- required numeric IDs ---
 		rawA, okA := req.GetArguments()["memory_id_a"].(float64)
 		rawB, okB := req.GetArguments()["memory_id_b"].(float64)
@@ -2193,8 +2276,11 @@ func handleCompare(s *store.Store, _ *SessionActivity) server.ToolHandlerFunc {
 	}
 }
 
-func handleMergeProjects(s *store.Store) server.ToolHandlerFunc {
+func handleMergeProjects(sel BackendSelector) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Merging spans multiple named projects at once — always uses the
+		// default (project-unaware) backend that owns the project registry.
+		s := sel("")
 		fromStr, _ := req.GetArguments()["from"].(string)
 		to, _ := req.GetArguments()["to"].(string)
 
@@ -2409,7 +2495,7 @@ func resolveWriteProjectWithChoice(projectChoice, reason string, validateToken a
 
 // resolveSaveWriteProjectWithProcessOverride resolves the write project target
 // by applying the process-level project override before falling back to full precedence resolution.
-func resolveSaveWriteProjectWithProcessOverride(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator, defaultProject string) (projectpkg.DetectionResult, error) {
+func resolveSaveWriteProjectWithProcessOverride(s MemoryBackend, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator, defaultProject string) (projectpkg.DetectionResult, error) {
 	if !explicitProjectProvided && strings.TrimSpace(projectChoice) == "" && strings.TrimSpace(sessionID) == "" && strings.TrimSpace(reason) == "" {
 		if processRes, ok := processProjectResult(defaultProject); ok {
 			return processRes, nil
@@ -2420,7 +2506,7 @@ func resolveSaveWriteProjectWithProcessOverride(s *store.Store, projectChoice st
 
 // resolveSaveWriteProject resolves the write project target using the full MCP precedence:
 // explicit request parameter, existing session association, or nearest configuration/directory detection.
-func resolveSaveWriteProject(s *store.Store, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
+func resolveSaveWriteProject(s MemoryBackend, projectChoice string, explicitProjectProvided bool, reason, sessionID string, validateToken ambiguousRecoveryTokenValidator) (projectpkg.DetectionResult, error) {
 	trimmedSessionID := strings.TrimSpace(sessionID)
 	trimmedProjectChoice := strings.TrimSpace(projectChoice)
 	trimmedReason := strings.TrimSpace(reason)
@@ -2622,7 +2708,7 @@ func uniqueTrimmedProjects(names ...string) []string {
 	return result
 }
 
-func knownWriteProjects(s *store.Store, context projectpkg.DetectionResult) []string {
+func knownWriteProjects(s MemoryBackend, context projectpkg.DetectionResult) []string {
 	seen := make(map[string]struct{})
 	projects := make([]string, 0)
 	add := func(name string) {
@@ -2747,7 +2833,7 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 // If override is empty, falls back to auto-detection from cwd.
 // JW2: normalizes the override (lowercase+trim) before ProjectExists lookup so
 // that e.g. "MyApp" and "  myapp  " both resolve to the stored "myapp".
-func resolveReadProjectWithProcessOverride(s *store.Store, override, defaultProject string) (projectpkg.DetectionResult, error) {
+func resolveReadProjectWithProcessOverride(s MemoryBackend, override, defaultProject string) (projectpkg.DetectionResult, error) {
 	if strings.TrimSpace(override) == "" {
 		if res, ok := processProjectResult(defaultProject); ok {
 			return res, nil
@@ -2756,7 +2842,7 @@ func resolveReadProjectWithProcessOverride(s *store.Store, override, defaultProj
 	return resolveReadProject(s, override)
 }
 
-func resolveReadProject(s *store.Store, override string) (projectpkg.DetectionResult, error) {
+func resolveReadProject(s MemoryBackend, override string) (projectpkg.DetectionResult, error) {
 	override = strings.TrimSpace(override)
 	if override == "" {
 		return resolveWriteProject()
@@ -2971,7 +3057,7 @@ func defaultSessionID(project string) string {
 // When no active session exists for the project (or the store query fails for
 // any reason), it falls back to the manual-save-{project} session, preserving
 // the prior behavior for projects with no live session.
-func resolveFallbackSessionID(s *store.Store, project string) string {
+func resolveFallbackSessionID(s MemoryBackend, project string) string {
 	if s != nil {
 		if id, ok, err := s.MostRecentActiveSession(project); err == nil && ok {
 			return id
