@@ -3,6 +3,7 @@ package memorylake
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/url"
 	"time"
@@ -112,6 +113,55 @@ func (c *Client) listFacts(ws, projID string) ([]Fact, error) {
 // and returns whatever was collected so far (task-12 hardening brief I2).
 const maxListAllFactsPages = 1000
 
+// maxPaginationPages is maxListAllFactsPages' counterpart for every other
+// cursor-paginated MemoryLake list endpoint this package follows to
+// exhaustion (workspaces, projects, actors — see identity.go and
+// backend.go's ProjectExists/ListProjectNames). Kept as its own named
+// constant rather than reusing maxListAllFactsPages so the two concerns
+// (facts vs. everything else) can be tuned independently even though they
+// currently share the same value and the same task-12 rationale: a page cap
+// that is both generous for real usage and guaranteed to terminate against a
+// misbehaving/malicious server.
+const maxPaginationPages = 1000
+
+// paginatedPage is the response shape every MemoryLake cursor-paginated list
+// endpoint wraps its items in: `data.items` plus `data.continuation_token`
+// (empty/absent once there are no more pages).
+type paginatedPage[T any] struct {
+	Items             []T    `json:"items"`
+	ContinuationToken string `json:"continuation_token"`
+}
+
+// listAllPages is the shared pagination loop behind every "fetch the entire
+// list" call in this package (facts, workspaces, projects, actors): it
+// follows continuation_token across pages, calling pathForPage with the
+// token for the next page to fetch ("" for the first) until the server
+// stops returning one or maxPages is reached — whichever comes first.
+// Hitting maxPages is deliberately not an error (mirrors listAllFacts' prior
+// standalone behavior, task-12 hardening brief I2): it just stops early and
+// returns whatever was collected so far, with what identifying the call site
+// in the log line so operators can tell which list ran away.
+func listAllPages[T any](c *Client, maxPages int, what string, pathForPage func(token string) string) ([]T, error) {
+	var all []T
+	token := ""
+	for page := 0; page < maxPages; page++ {
+		var out paginatedPage[T]
+		if err := c.doJSON("GET", pathForPage(token), nil, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.Items...)
+		if out.ContinuationToken == "" {
+			return all, nil
+		}
+		token = out.ContinuationToken
+		if page == maxPages-1 {
+			log.Printf("[memorylake] %s: reached page cap=%d; server keeps returning a continuation_token, stopping with %d items collected so far",
+				what, maxPages, len(all))
+		}
+	}
+	return all, nil
+}
+
 // listAllFacts fetches every fact MemoryLake has recorded for project projID
 // within workspace ws, following continuation_token across pages until the
 // server stops returning one or maxListAllFactsPages is reached (see its doc
@@ -120,31 +170,14 @@ const maxListAllFactsPages = 1000
 // Timeline, FormatContext) rather than the bounded, single-page listFacts
 // used by the write path.
 func (c *Client) listAllFacts(ws, projID string) ([]Fact, error) {
-	var all []Fact
-	token := ""
-	for page := 0; page < maxListAllFactsPages; page++ {
+	what := fmt.Sprintf("listAllFacts for project %s (ws %s)", projID, ws)
+	return listAllPages[Fact](c, maxListAllFactsPages, what, func(token string) string {
 		path := "/api/v3/workspaces/" + ws + "/projects/" + projID + "/memories/facts?page_size=200"
 		if token != "" {
 			path += "&continuation_token=" + url.QueryEscape(token)
 		}
-		var out struct {
-			Items             []Fact `json:"items"`
-			ContinuationToken string `json:"continuation_token"`
-		}
-		if err := c.doJSON("GET", path, nil, &out); err != nil {
-			return nil, err
-		}
-		all = append(all, out.Items...)
-		if out.ContinuationToken == "" {
-			return all, nil
-		}
-		token = out.ContinuationToken
-		if page == maxListAllFactsPages-1 {
-			log.Printf("[memorylake] listAllFacts: reached maxListAllFactsPages=%d for project %s (ws %s); server keeps returning a continuation_token, stopping with %d facts collected so far",
-				maxListAllFactsPages, projID, ws, len(all))
-		}
-	}
-	return all, nil
+		return path
+	})
 }
 
 // patchFactMetadata overwrites the metadata of fact factID (within project

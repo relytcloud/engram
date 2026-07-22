@@ -744,18 +744,15 @@ func (b *MemoryLakeBackend) CountObservationsForProject(name string) (int, error
 // reference. Unlike the local store (which recognizes a project from any of
 // observations/sessions/prompts/enrollment), MemoryLake's only durable
 // project registry is this list, so that's the sole source of truth here.
-//
-// TODO(pagination): GET .../projects may be cursor-paginated for workspaces
-// with many projects; first cut reads only the first page, same limitation
-// already accepted by EnsureProject/ResolveWorkspaceID. See spec §11.5.
+// Uses listAllProjects (see identity.go) to follow continuation_token
+// across pages rather than only the first, so a workspace with many
+// projects still gets a correct answer.
 func (b *MemoryLakeBackend) ProjectExists(name string) (bool, error) {
-	var out struct {
-		Items []projItem `json:"items"`
-	}
-	if err := b.client.doJSON("GET", "/api/v3/workspaces/"+b.ws+"/projects", nil, &out); err != nil {
+	items, err := b.client.listAllProjects(b.ws)
+	if err != nil {
 		return false, err
 	}
-	for _, p := range out.Items {
+	for _, p := range items {
 		if p.CustomID == name || p.Name == name {
 			return true, nil
 		}
@@ -764,18 +761,16 @@ func (b *MemoryLakeBackend) ProjectExists(name string) (bool, error) {
 }
 
 // ListProjectNames returns the custom_id (falling back to display name when
-// custom_id is empty) of every project in the workspace.
-//
-// TODO(pagination): see ProjectExists — first cut reads only the first page.
+// custom_id is empty) of every project in the workspace, following
+// continuation_token across pages via listAllProjects (see identity.go and
+// ProjectExists above).
 func (b *MemoryLakeBackend) ListProjectNames() ([]string, error) {
-	var out struct {
-		Items []projItem `json:"items"`
-	}
-	if err := b.client.doJSON("GET", "/api/v3/workspaces/"+b.ws+"/projects", nil, &out); err != nil {
+	items, err := b.client.listAllProjects(b.ws)
+	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(out.Items))
-	for _, p := range out.Items {
+	names := make([]string, 0, len(items))
+	for _, p := range items {
 		if p.CustomID != "" {
 			names = append(names, p.CustomID)
 		} else {
