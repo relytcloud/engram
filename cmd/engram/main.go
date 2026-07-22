@@ -66,11 +66,19 @@ var (
 	newHTTPServer = server.New
 	startHTTP     = (*server.Server).Start
 
-	newMCPServer           = mcp.NewServer
-	newMCPServerWithTools  = mcp.NewServerWithTools
-	newMCPServerWithConfig = mcp.NewServerWithConfig
-	resolveMCPTools        = mcp.ResolveTools
-	serveMCP               = mcpserver.ServeStdio
+	newMCPServer             = mcp.NewServer
+	newMCPServerWithTools    = mcp.NewServerWithTools
+	newMCPServerWithConfig   = mcp.NewServerWithConfig
+	newMCPServerWithSelector = mcp.NewServerWithSelector
+	resolveMCPTools          = mcp.ResolveTools
+	serveMCP                 = mcpserver.ServeStdio
+
+	// loadMemorylakeConfig and loadMemorylakeEnablement are the injectable
+	// hooks cmdMCP uses to assemble the per-project routing selector
+	// (NewRoutingSelector in routing.go). Overridable in tests so they don't
+	// depend on real environment variables / the real ~/.engram/memorylake.json.
+	loadMemorylakeConfig     = memorylake.LoadConfig
+	loadMemorylakeEnablement = memorylake.LoadEnablement
 
 	// detectProject is injectable for testing; wraps project.DetectProject.
 	detectProject = project.DetectProject
@@ -899,7 +907,20 @@ func cmdMCP(cfg store.Config) {
 
 	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
 	allowlist := resolveMCPTools(toolsFilter)
-	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
+
+	// Route enabled projects to MemoryLake, everything else to the local
+	// sqlite store `s` — the same store that would otherwise be used
+	// directly (StaticSelector-style). MemoryLake stays strictly opt-in per
+	// project; a missing/unreadable enablement file just means no project
+	// is enabled yet, not a startup failure.
+	mlCfg := loadMemorylakeConfig()
+	enab, err := loadMemorylakeEnablement(memorylake.DefaultEnablementPath())
+	if err != nil {
+		log.Printf("[engram] memorylake: failed to load enablement list (continuing with sqlite-only): %v", err)
+		enab = &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{}}
+	}
+	sel := NewRoutingSelector(s, mlCfg, enab)
+	mcpSrv := newMCPServerWithSelector(sel, mcpCfg, allowlist)
 
 	if err := serveMCP(mcpSrv); err != nil {
 		stopAutosync()

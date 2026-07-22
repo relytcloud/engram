@@ -1025,12 +1025,12 @@ func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 	cfg := testConfig(t)
 
 	var capturedCfg mcp.MCPConfig
-	oldNew := newMCPServerWithConfig
-	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	oldNew := newMCPServerWithSelector
+	t.Cleanup(func() { newMCPServerWithSelector = oldNew })
+	newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
 		// Return a valid server so serveMCP doesn't panic
-		return oldNew(s, mcpCfg, allowlist)
+		return oldNew(sel, mcpCfg, allowlist)
 	}
 
 	oldServe := serveMCP
@@ -1054,11 +1054,11 @@ func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 	t.Setenv("ENGRAM_PROJECT", "env-project")
 
 	var capturedCfg mcp.MCPConfig
-	oldNew := newMCPServerWithConfig
-	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	oldNew := newMCPServerWithSelector
+	t.Cleanup(func() { newMCPServerWithSelector = oldNew })
+	newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
-		return oldNew(s, mcpCfg, allowlist)
+		return oldNew(sel, mcpCfg, allowlist)
 	}
 
 	oldServe := serveMCP
@@ -1084,11 +1084,11 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	detectProject = func(string) string { return "detected-from-git" }
 
 	var capturedCfg mcp.MCPConfig
-	oldNew := newMCPServerWithConfig
-	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	oldNew := newMCPServerWithSelector
+	t.Cleanup(func() { newMCPServerWithSelector = oldNew })
+	newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
-		return oldNew(s, mcpCfg, allowlist)
+		return oldNew(sel, mcpCfg, allowlist)
 	}
 
 	oldServe := serveMCP
