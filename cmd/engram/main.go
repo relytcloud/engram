@@ -33,6 +33,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/internal/memorylake"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/server"
@@ -658,6 +659,8 @@ func main() {
 		cmdObsidianExport(cfg)
 	case "projects":
 		cmdProjects(cfg)
+	case "memorylake":
+		cmdMemorylake(cfg)
 	case "setup":
 		cmdSetup(cfg)
 	case "protocol-mode":
@@ -2333,6 +2336,171 @@ func cmdProjectsPrune(cfg store.Config) {
 	fmt.Printf("\nPruned %d project(s): %d sessions, %d prompts removed.\n", len(selected), totalSessions, totalPrompts)
 }
 
+// cmdMemorylake routes: engram memorylake enable --project <name> [--migrate]
+//
+//	engram memorylake disable --project <name>
+//	engram memorylake status
+func cmdMemorylake(cfg store.Config) {
+	subCmd := "status"
+	if len(os.Args) > 2 {
+		subCmd = os.Args[2]
+	}
+	switch subCmd {
+	case "enable":
+		cmdMemorylakeEnable(cfg)
+	case "disable":
+		cmdMemorylakeDisable(cfg)
+	case "status", "":
+		cmdMemorylakeStatus(cfg)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown memorylake subcommand: %s\n", subCmd)
+		printMemorylakeUsage()
+		exitFunc(1)
+	}
+}
+
+func printMemorylakeUsage() {
+	fmt.Fprintln(os.Stderr, "usage: engram memorylake enable --project <name> [--migrate]")
+	fmt.Fprintln(os.Stderr, "       engram memorylake disable --project <name>")
+	fmt.Fprintln(os.Stderr, "       engram memorylake status")
+}
+
+func cmdMemorylakeEnable(cfg store.Config) {
+	project := ""
+	migrate := false
+	for i := 3; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--project":
+			if i+1 < len(os.Args) {
+				project = os.Args[i+1]
+				i++
+			}
+		case "--migrate":
+			migrate = true
+		}
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "engram: --project <name> is required")
+		printMemorylakeUsage()
+		exitFunc(1)
+		return
+	}
+
+	path := memorylake.DefaultEnablementPath()
+	enablement, err := memorylake.LoadEnablement(path)
+	if err != nil {
+		fatal(err)
+	}
+
+	// TODO(task5/task10): resolve ProjID via identity.EnsureProject(project)
+	// once internal/identity lands. Until then ProjID is left empty and the
+	// enablement entry only records that the project opted in.
+	entry := memorylake.ProjectEntry{
+		ProjID:    "",
+		EnabledAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	enablement.EnabledProjects[project] = entry
+	if err := enablement.Save(path); err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("Enabled MemoryLake backend for project %q.\n", project)
+	if migrate {
+		// TODO(task9): trigger migration of existing SQLite memories for
+		// this project into MemoryLake once the migration path lands.
+		fmt.Println("Note: --migrate is not yet implemented (arrives in Task 9); no data was migrated.")
+	}
+}
+
+func cmdMemorylakeDisable(cfg store.Config) {
+	project := ""
+	for i := 3; i < len(os.Args); i++ {
+		if os.Args[i] == "--project" && i+1 < len(os.Args) {
+			project = os.Args[i+1]
+			i++
+		}
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "engram: --project <name> is required")
+		printMemorylakeUsage()
+		exitFunc(1)
+		return
+	}
+
+	path := memorylake.DefaultEnablementPath()
+	enablement, err := memorylake.LoadEnablement(path)
+	if err != nil {
+		fatal(err)
+	}
+
+	if _, ok := enablement.IsEnabled(project); !ok {
+		fmt.Printf("Project %q is not enabled for MemoryLake (no change).\n", project)
+		return
+	}
+
+	delete(enablement.EnabledProjects, project)
+	if err := enablement.Save(path); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("Disabled MemoryLake backend for project %q (now using local SQLite).\n", project)
+}
+
+func cmdMemorylakeStatus(cfg store.Config) {
+	path := memorylake.DefaultEnablementPath()
+	enablement, err := memorylake.LoadEnablement(path)
+	if err != nil {
+		fatal(err)
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	names, err := s.ListProjectNames()
+	if err != nil {
+		fatal(err)
+	}
+
+	// Include any enabled projects that may not (yet) have observations in
+	// the local store, so `status` is authoritative from the enablement
+	// list even before any local memories exist.
+	seen := make(map[string]bool, len(names))
+	all := make([]string, 0, len(names))
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			all = append(all, n)
+		}
+	}
+	for n := range enablement.EnabledProjects {
+		if !seen[n] {
+			seen[n] = true
+			all = append(all, n)
+		}
+	}
+	sort.Strings(all)
+
+	if len(all) == 0 {
+		fmt.Println("No projects found.")
+		return
+	}
+
+	fmt.Printf("MemoryLake backend status (%d project(s)):\n", len(all))
+	for _, name := range all {
+		if entry, ok := enablement.IsEnabled(name); ok {
+			projID := entry.ProjID
+			if projID == "" {
+				projID = "(pending)"
+			}
+			fmt.Printf("  %-30s memorylake  (proj_id=%s, enabled_at=%s)\n", name, projID, entry.EnabledAt)
+		} else {
+			fmt.Printf("  %-30s sqlite\n", name)
+		}
+	}
+}
+
 // cmdSetup classifies os.Args[2:] with a two-pass, order-independent
 // algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
 // Approach; JD-014 residual fix). The FIRST pass scans every token and only
@@ -2679,6 +2847,12 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
+  memorylake status  Show MemoryLake backend enablement per project (sqlite vs memorylake)
+  memorylake enable --project <name> [--migrate]
+                     Enable the MemoryLake backend for a project
+                       --migrate  Migrate existing SQLite memories (arrives in Task 9)
+  memorylake disable --project <name>
+                     Disable the MemoryLake backend for a project (reverts to local SQLite)
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
                      cursor, vscode-copilot, kilocode)
