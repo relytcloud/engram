@@ -53,13 +53,22 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 		if enab == nil {
 			return sqlite
 		}
+
+		// enab.EnabledProjects is a plain map, mutated (backfilled with a
+		// resolved MemoryLake project id) inside resolveMemoryLakeBackend
+		// below while mu is held. Reading it via IsEnabled must happen under
+		// the same mu — not before acquiring it — or a concurrent read here
+		// can race with that write (mem-go's stdio server dispatches mem_*
+		// calls to multiple worker goroutines, so two different projects can
+		// call this selector at the same time).
+		mu.Lock()
+		defer mu.Unlock()
+
 		entry, ok := enab.IsEnabled(project)
 		if !ok {
 			return sqlite
 		}
 
-		mu.Lock()
-		defer mu.Unlock()
 		if cached, hit := cache[project]; hit {
 			return cached
 		}

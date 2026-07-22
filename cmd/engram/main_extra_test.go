@@ -523,6 +523,10 @@ func TestCmdMCPAndTUIBranches(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error { return errors.New("mcp failed") }
 	_, mcpErr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
@@ -1895,6 +1899,10 @@ func TestUnconfiguredCloudKeepsLocalCommandDefaults(t *testing.T) {
 	stubExitWithPanic(t)
 	t.Setenv("ENGRAM_CLOUD_SERVER", "")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	// cmdMCP (called below) unconditionally loads
+	// memorylake.DefaultEnablementPath() ($HOME/.engram/memorylake.json);
+	// isolate HOME so this test never reads a real machine's file.
+	t.Setenv("HOME", t.TempDir())
 
 	cfg := testConfig(t)
 
@@ -4001,6 +4009,11 @@ func TestCmdMCP(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json) in every subtest below that reaches
+	// past storeNew; isolate HOME once here so none of them ever read a real
+	// machine's file and all stay on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	assertFatal := func(t *testing.T, stderr string, recovered any, want string) {
 		t.Helper()
@@ -4126,6 +4139,10 @@ func TestCmdMCP(t *testing.T) {
 func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 	cfg := testConfig(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	var mu sync.Mutex
 	var pushed []autosync.MutationEntry
@@ -4252,6 +4269,10 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	cfg := testConfig(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	pullCalled := make(chan struct{})
 	var closePullCalled sync.Once

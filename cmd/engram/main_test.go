@@ -1023,6 +1023,10 @@ func TestCmdProjectsAllNoGroups(t *testing.T) {
 
 func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 	cfg := testConfig(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	var capturedCfg mcp.MCPConfig
 	oldNew := newMCPServerWithSelector
@@ -1050,6 +1054,9 @@ func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 
 func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 	cfg := testConfig(t)
+	// See TestCmdMCPDetectsProjectFromFlag: isolate HOME so cmdMCP's
+	// memorylake enablement load never touches a real machine's file.
+	t.Setenv("HOME", t.TempDir())
 
 	t.Setenv("ENGRAM_PROJECT", "env-project")
 
@@ -1077,6 +1084,9 @@ func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 
 func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	cfg := testConfig(t)
+	// See TestCmdMCPDetectsProjectFromFlag: isolate HOME so cmdMCP's
+	// memorylake enablement load never touches a real machine's file.
+	t.Setenv("HOME", t.TempDir())
 
 	// Stub detectProject to simulate git detection
 	old := detectProject

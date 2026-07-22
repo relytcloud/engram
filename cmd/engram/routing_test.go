@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
@@ -156,5 +158,72 @@ func TestNewRoutingSelector_ResolutionFailureFallsBackToSQLite(t *testing.T) {
 	got2 := sel("myproj")
 	if got2 != mcp.MemoryBackend(sqlite) {
 		t.Fatalf("expected cached sqlite fallback on second call, got %T", got2)
+	}
+}
+
+// TestNewRoutingSelector_ConcurrentEnabledUnresolvedProjectsNoDataRace
+// reproduces the data race fixed by guarding enab.EnabledProjects access with
+// mu end-to-end: 20 distinct enabled-but-unresolved projects are routed
+// concurrently (mirroring mcp-go's stdio server, which dispatches concurrent
+// mem_* calls across multiple worker goroutines). Before the fix, the
+// unlocked enab.IsEnabled read here raced with the locked
+// enab.EnabledProjects[project] = entry write in resolveMemoryLakeBackend and
+// `go test -race` reported a concurrent map read/write (and could fatal the
+// process with "concurrent map writes" outside of -race too). This must pass
+// cleanly under `go test -race ./cmd/engram/`.
+func TestNewRoutingSelector_ConcurrentEnabledUnresolvedProjectsNoDataRace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/workspaces":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"items": []map[string]any{{"id": "ws-1", "name": "engram", "custom_id": "engram"}},
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{}}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			var body struct {
+				CustomID string `json:"custom_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "resolved-" + body.CustomID}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	sqlite := &stubBackend{name: "sqlite"}
+
+	const numProjects = 20
+	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{}}
+	for i := 0; i < numProjects; i++ {
+		enab.EnabledProjects[fmt.Sprintf("concurrent-proj-%d", i)] = memorylake.ProjectEntry{}
+	}
+
+	sel := NewRoutingSelector(sqlite, cfg, enab)
+
+	results := make([]mcp.MemoryBackend, numProjects)
+	var wg sync.WaitGroup
+	for i := 0; i < numProjects; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = sel(fmt.Sprintf("concurrent-proj-%d", i))
+		}(i)
+	}
+	wg.Wait()
+
+	for i, got := range results {
+		if _, ok := got.(*memorylake.MemoryLakeBackend); !ok {
+			t.Fatalf("project %d: expected *memorylake.MemoryLakeBackend, got %T", i, got)
+		}
 	}
 }
