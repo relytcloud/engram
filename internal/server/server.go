@@ -18,9 +18,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/internal/mcp"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -77,6 +79,36 @@ type Server struct {
 	// promptBuilder constructs LLM prompts for semantic scan pairs.
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
+
+	// selector, when configured via SetBackendSelector, routes the subset of
+	// handlers below whose store calls are fully covered by mcp.MemoryBackend
+	// to a per-project backend (sqlite or MemoryLake) instead of always using
+	// store directly — see backendForProject/backendForSession/
+	// backendForObservation. nil (the default set by New) preserves today's
+	// behavior exactly: every call goes through the local sqlite `store`.
+	//
+	// Endpoints backed by store methods outside MemoryBackend (Export/Import,
+	// relation browsing, prompt search, MigrateProject, doctor, ...) are
+	// inherently local-sqlite concepts with no MemoryLake equivalent yet and
+	// are intentionally left on `store` unconditionally — see Task 15's
+	// report for the full list.
+	selector mcp.BackendSelector
+
+	// sessionProject and obsProject cache, in-process only, which project a
+	// routed session/observation was created under — populated at
+	// CreateSession/AddObservation time (once selector is configured). Several
+	// existing HTTP endpoints identify their target purely by session/
+	// observation ID (POST /sessions/{id}/end, GET/PATCH/DELETE
+	// /observations/{id}, ...) with no project in the request body, so there
+	// is no way to route them from the request alone without changing the
+	// wire contract (task constraint: existing endpoint contracts stay
+	// unchanged). Consulting this cache lets those ID-only endpoints reach
+	// the SAME backend their session/observation actually lives on. A miss
+	// (unknown ID, selector unset, or a fresh process that did not create it)
+	// falls back to the local sqlite store — identical to pre-routing
+	// behavior for anything not in the cache.
+	sessionProject sync.Map // sessionID string -> project string
+	obsProject     sync.Map // observation id int64 -> project string
 }
 
 func New(s *store.Store, port int) *Server {
@@ -107,6 +139,54 @@ func (s *Server) SetRunnerFactory(fn SemanticRunnerFactory) {
 // When not set, an empty-string builder is used (valid for tests, not production).
 func (s *Server) SetPromptBuilder(fn SemanticPromptBuilder) {
 	s.promptBuilder = fn
+}
+
+// SetBackendSelector configures per-project routing (sqlite vs MemoryLake)
+// for the subset of HTTP handlers whose store calls are fully covered by
+// mcp.MemoryBackend (see the Server.selector field doc for the full
+// boundary). When never called (the zero value, nil), every handler uses the
+// local sqlite store directly — byte-for-byte the pre-routing behavior.
+func (s *Server) SetBackendSelector(sel mcp.BackendSelector) {
+	s.selector = sel
+}
+
+// backendForProject resolves the storage backend for project via the
+// configured selector, or the local sqlite store if no selector has been
+// configured. project should already be normalized by the caller when it
+// matters for matching enablement (store.NormalizeProject) — resolution here
+// treats project as an opaque routing key.
+func (s *Server) backendForProject(project string) mcp.MemoryBackend {
+	if s.selector == nil {
+		return s.store
+	}
+	return s.selector(project)
+}
+
+// backendForSession resolves the backend that owns sessionID: the project it
+// was routed under at CreateSession time (see sessionProject), or the local
+// sqlite store when unknown (selector unset, never routed, or a process that
+// did not create this session) — matching pre-routing behavior exactly for
+// anything not in the cache.
+func (s *Server) backendForSession(sessionID string) mcp.MemoryBackend {
+	if s.selector == nil {
+		return s.store
+	}
+	if v, ok := s.sessionProject.Load(sessionID); ok {
+		return s.selector(v.(string))
+	}
+	return s.store
+}
+
+// backendForObservation mirrors backendForSession for an observation id
+// (see obsProject, populated at AddObservation time).
+func (s *Server) backendForObservation(id int64) mcp.MemoryBackend {
+	if s.selector == nil {
+		return s.store
+	}
+	if v, ok := s.obsProject.Load(id); ok {
+		return s.selector(v.(string))
+	}
+	return s.store
 }
 
 // notifyWrite calls the onWrite callback if configured (best-effort, non-blocking).
@@ -268,9 +348,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateSession(body.ID, body.Project, body.Directory); err != nil {
+	project, _ := store.NormalizeProject(body.Project)
+	backend := s.backendForProject(project)
+	if err := backend.CreateSession(body.ID, body.Project, body.Directory); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if s.selector != nil {
+		s.sessionProject.Store(body.ID, project)
 	}
 
 	s.notifyWrite()
@@ -285,7 +370,7 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&body)
 
-	if err := s.store.EndSession(id, body.Summary); err != nil {
+	if err := s.backendForSession(id).EndSession(id, body.Summary); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -308,7 +393,8 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	session, err := s.store.GetSession(r.PathValue("id"))
+	id := r.PathValue("id")
+	session, err := s.backendForSession(id).GetSession(id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "session not found")
@@ -335,10 +421,15 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := s.store.AddObservation(body)
+	project, _ := store.NormalizeProject(body.Project)
+	backend := s.backendForProject(project)
+	id, err := backend.AddObservation(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if s.selector != nil {
+		s.obsProject.Store(id, project)
 	}
 
 	s.notifyWrite()
@@ -359,7 +450,8 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.store.PassiveCapture(body)
+	project, _ := store.NormalizeProject(body.Project)
+	result, err := s.backendForProject(project).PassiveCapture(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -412,7 +504,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.store.Search(query, store.SearchOptions{
+	routeProject, _ := store.NormalizeProject(project)
+	results, err := s.backendForProject(routeProject).Search(query, store.SearchOptions{
 		Type:      params.Get("type"),
 		Project:   project,
 		Scope:     params.Get("scope"),
@@ -435,7 +528,7 @@ func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obs, err := s.store.GetObservation(id)
+	obs, err := s.backendForObservation(id).GetObservation(id)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "observation not found")
 		return
@@ -463,7 +556,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	obs, err := s.store.UpdateObservation(id, body)
+	obs, err := s.backendForObservation(id).UpdateObservation(id, body)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -482,7 +575,7 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 	}
 
 	hard := queryBool(r, "hard", false)
-	if err := s.store.DeleteObservation(id, hard); err != nil {
+	if err := s.backendForObservation(id).DeleteObservation(id, hard); err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
@@ -516,7 +609,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	before := queryInt(r, "before", 5)
 	after := queryInt(r, "after", 5)
 
-	result, err := s.store.Timeline(id, before, after)
+	result, err := s.backendForObservation(id).Timeline(id, before, after)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -529,7 +622,8 @@ func (s *Server) handleReviewList(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	limit := queryInt(r, "limit", 10)
 
-	observations, err := s.store.ObservationsNeedingReview(project, limit)
+	routeProject, _ := store.NormalizeProject(project)
+	observations, err := s.backendForProject(routeProject).ObservationsNeedingReview(project, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -565,7 +659,8 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.store.MarkReviewed(id); err != nil {
+	backend := s.backendForObservation(id)
+	if err := backend.MarkReviewed(id); err != nil {
 		if errors.Is(err, store.ErrObservationNotFound) {
 			jsonError(w, http.StatusNotFound, err.Error())
 			return
@@ -573,7 +668,7 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	obs, err := s.store.GetObservation(id)
+	obs, err := backend.GetObservation(id)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "marked reviewed but failed to reload observation: "+err.Error())
 		return
@@ -617,14 +712,16 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 
 	// When the client omits the project, derive it from the session so the
 	// prompt is attributed correctly without the hook detecting it eagerly on
-	// every message.
+	// every message. Looked up on the session's OWN backend (backendForSession)
+	// since that's where the session actually lives.
 	if strings.TrimSpace(body.Project) == "" {
-		if sess, err := s.store.GetSession(body.SessionID); err == nil {
+		if sess, err := s.backendForSession(body.SessionID).GetSession(body.SessionID); err == nil {
 			body.Project = sess.Project
 		}
 	}
 
-	id, err := s.store.AddPrompt(body)
+	project, _ := store.NormalizeProject(body.Project)
+	id, err := s.backendForProject(project).AddPrompt(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -774,7 +871,8 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(project, scope)
+	routeProject, _ := store.NormalizeProject(project)
+	context, err := s.backendForProject(routeProject).FormatContext(project, scope)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1410,7 +1508,7 @@ func (s *Server) validateSessionProject(w http.ResponseWriter, sessionID, projec
 		return true
 	}
 	projectName, _ = store.NormalizeProject(projectName)
-	session, err := s.store.GetSession(sessionID)
+	session, err := s.backendForSession(sessionID).GetSession(sessionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "session not found")
