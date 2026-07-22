@@ -140,6 +140,16 @@ func (c *Client) semanticSearchFacts(ws, projID, actorID, query string, opts sto
 
 // fuzzyFacts issues the GET .../projects/{proj}/memories/facts?fact_fuzzy=
 // substring lookup used to pin topic_key hits ahead of semantic results.
+//
+// Deliberately single-page (page_size=200, no continuation_token
+// following), unlike listAllFacts/listAllProjects/etc: a topic_key is a
+// specific slash-separated identifier (see engram's topic_key format), so a
+// substring match against it is expected to hit a handful of facts at most,
+// never the whole project. A project needing >200 fact_fuzzy hits for one
+// topic_key is already outside what this pinning fast-path is designed for
+// (see spec §11.5) — SearchFacts still returns full, correct results in that
+// case via the semantic results it merges these into, just without the
+// pinning boost past the first page.
 func (c *Client) fuzzyFacts(ws, projID, term string) ([]Fact, error) {
 	var out struct {
 		Items []Fact `json:"items"`
