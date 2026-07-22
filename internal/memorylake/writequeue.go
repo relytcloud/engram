@@ -3,6 +3,7 @@ package memorylake
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/url"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -81,10 +82,14 @@ func contentHash(s string) string {
 // listFacts fetches the facts MemoryLake currently has recorded for project
 // projID within workspace ws.
 //
-// TODO(pagination): GET .../facts may be cursor-paginated (continuation_token)
-// for projects with many facts. First cut only reads the first page (fixed
-// page_size=200), matching the same first-cut limitation already accepted in
-// ResolveWorkspaceID/EnsureProject. See spec §11.5.
+// This intentionally reads only the first page (page_size=200) and is used
+// exclusively by the write path (AddObservation's pre-append snapshot,
+// BackfillFacts' poll loop): both need a fast, frequent read rather than an
+// exhaustive one, and a project accumulating >200 unbackfilled/stale facts
+// between polls is already outside the bounds this backend is designed for.
+// Read-side aggregate methods (Stats, CountObservationsForProject, Timeline,
+// FormatContext) need the *complete* fact list to be accurate and use
+// listAllFacts instead. See spec §11.5.
 func (c *Client) listFacts(ws, projID string) ([]Fact, error) {
 	var out struct {
 		Items []Fact `json:"items"`
@@ -94,6 +99,36 @@ func (c *Client) listFacts(ws, projID string) ([]Fact, error) {
 		return nil, err
 	}
 	return out.Items, nil
+}
+
+// listAllFacts fetches every fact MemoryLake has recorded for project projID
+// within workspace ws, following continuation_token across pages until the
+// server stops returning one. Used by read/aggregate paths that must count or
+// enumerate the whole project (Stats, CountObservationsForProject, Timeline,
+// FormatContext) rather than the bounded, single-page listFacts used by the
+// write path.
+func (c *Client) listAllFacts(ws, projID string) ([]Fact, error) {
+	var all []Fact
+	token := ""
+	for {
+		path := "/api/v3/workspaces/" + ws + "/projects/" + projID + "/memories/facts?page_size=200"
+		if token != "" {
+			path += "&continuation_token=" + url.QueryEscape(token)
+		}
+		var out struct {
+			Items             []Fact `json:"items"`
+			ContinuationToken string `json:"continuation_token"`
+		}
+		if err := c.doJSON("GET", path, nil, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.Items...)
+		if out.ContinuationToken == "" {
+			break
+		}
+		token = out.ContinuationToken
+	}
+	return all, nil
 }
 
 // patchFactMetadata overwrites the metadata of fact factID (within project

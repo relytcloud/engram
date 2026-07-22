@@ -71,6 +71,10 @@ func newTestBackend(t *testing.T, srvURL string) *MemoryLakeBackend {
 	if err != nil {
 		t.Fatalf("LoadIDMap: %v", err)
 	}
+	topics, err := LoadTopicIndex(t.TempDir() + "/topics.json")
+	if err != nil {
+		t.Fatalf("LoadTopicIndex: %v", err)
+	}
 	return &MemoryLakeBackend{
 		client:  NewClient(cfg),
 		cfg:     cfg,
@@ -78,6 +82,7 @@ func newTestBackend(t *testing.T, srvURL string) *MemoryLakeBackend {
 		projID:  "proj-1",
 		actorID: "actor-1",
 		idmap:   idmap,
+		topics:  topics,
 		poll:    1 * time.Millisecond,
 		maxWait: 500 * time.Millisecond,
 	}
@@ -619,5 +624,442 @@ func TestNewBackend(t *testing.T) {
 	}
 	if b.poll != 2000*time.Millisecond || b.maxWait != 30000*time.Millisecond {
 		t.Fatalf("poll/maxWait not derived from cfg: %v / %v", b.poll, b.maxWait)
+	}
+}
+
+// ─── Task 12: topic_key upsert ───────────────────────────────────────────────
+
+// TestBackend_AddObservation_TopicKeyUpsertHit_PatchesInPlace verifies that
+// when the TopicIndex already has a fact for project+scope+topic_key,
+// AddObservation PATCHes that fact directly and never appends a conversation
+// message (no POST .../messages, no snapshot GET for backfill) — the whole
+// point of the upsert fast path.
+func TestBackend_AddObservation_TopicKeyUpsertHit_PatchesInPlace(t *testing.T) {
+	var patchCount, appendCount int32
+	var patchBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-topic"
+		switch {
+		case r.Method == "GET" && r.URL.Path == p:
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-topic", "fact": "old content",
+				"metadata": map[string]any{
+					metaRaw: "old content", metaTitle: "old title", metaType: "decision",
+					metaScope: "global", metaTopicKey: "arch/db", metaRev: float64(2), "pinned": true,
+				},
+			}})
+		case r.Method == "PATCH" && r.URL.Path == p:
+			atomic.AddInt32(&patchCount, 1)
+			json.NewDecoder(r.Body).Decode(&patchBody)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-topic", "fact": "new content", "metadata": patchBody["metadata"],
+			}})
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/messages"):
+			atomic.AddInt32(&appendCount, 1)
+			t.Fatalf("topic_key upsert hit must not append a new message, got POST %s", r.URL.Path)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	if err := b.topics.Put("proj", "global", "arch/db", "fact-topic"); err != nil {
+		t.Fatalf("seed TopicIndex: %v", err)
+	}
+
+	id, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "global", TopicKey: "arch/db",
+		Type: "decision", Title: "new title", Content: "new content",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if patchCount != 1 {
+		t.Fatalf("PATCH count=%d, want exactly 1", patchCount)
+	}
+	if appendCount != 0 {
+		t.Fatalf("append count=%d, want 0 (must not append on upsert hit)", appendCount)
+	}
+	if id != b.idmap.IntFor("fact-topic") {
+		t.Fatalf("id=%d, want the int64 mapped to fact-topic", id)
+	}
+
+	md, _ := patchBody["metadata"].(map[string]any)
+	if md[metaRaw] != "new content" {
+		t.Fatalf("PATCH metadata.engram_raw=%v, want new content", md[metaRaw])
+	}
+	if md[metaTitle] != "new title" {
+		t.Fatalf("PATCH metadata.engram_title=%v, want new title", md[metaTitle])
+	}
+	revF, ok := md[metaRev].(float64)
+	if !ok || int(revF) != 3 {
+		t.Fatalf("PATCH metadata.engram_rev=%v, want 3 (2+1)", md[metaRev])
+	}
+	if md["pinned"] != true {
+		t.Fatalf("PATCH must preserve unrelated metadata keys (pinned): %v", md)
+	}
+	if patchBody["fact"] != "new content" {
+		t.Fatalf("PATCH fact=%v, want new content", patchBody["fact"])
+	}
+}
+
+// TestBackend_AddObservation_TopicKeyUpsertMiss_RecordsIndex verifies that
+// when the TopicIndex has no entry for project+scope+topic_key,
+// AddObservation falls through to the normal append+backfill path and then
+// records the first backfilled fact into the TopicIndex so a subsequent save
+// with the same key upserts instead of appending again.
+func TestBackend_AddObservation_TopicKeyUpsertMiss_RecordsIndex(t *testing.T) {
+	var appended int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.StoreInt32(&appended, 1)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			var items []map[string]any
+			if atomic.LoadInt32(&appended) == 1 {
+				items = []map[string]any{
+					{"id": "fact-new", "fact": "extracted", "metadata": map[string]any{}},
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-new":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-new", "fact": "extracted", "metadata": map[string]any{metaObsID: "obs"},
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	if _, ok := b.topics.Lookup("proj", "global", "arch/db"); ok {
+		t.Fatal("TopicIndex must start empty for this key")
+	}
+
+	id, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "global", TopicKey: "arch/db",
+		SessionID: "sess-1", Type: "decision", Title: "t", Content: "some content",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if id != b.idmap.IntFor("fact-new") {
+		t.Fatalf("id=%d, want the int64 mapped to fact-new", id)
+	}
+
+	factID, ok := b.topics.Lookup("proj", "global", "arch/db")
+	if !ok || factID != "fact-new" {
+		t.Fatalf("TopicIndex.Lookup after miss = (%q, %v), want (fact-new, true)", factID, ok)
+	}
+}
+
+// TestBackend_AddObservation_TopicKeyUpsert_SecondSaveHitsIndex is an
+// end-to-end check that a miss followed by a second save with the same key
+// upserts (PATCH only, no second append).
+func TestBackend_AddObservation_TopicKeyUpsert_SecondSaveHitsIndex(t *testing.T) {
+	var appendCount int32
+	var patchCount int32
+	factsExtracted := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-1"
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.AddInt32(&appendCount, 1)
+			factsExtracted = true
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			var items []map[string]any
+			if factsExtracted {
+				items = []map[string]any{{"id": "fact-1", "fact": "extracted", "metadata": map[string]any{}}}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case r.Method == "GET" && r.URL.Path == p:
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-1", "fact": "v1", "metadata": map[string]any{metaRaw: "v1", metaObsID: "obs"},
+			}})
+		case r.Method == "PATCH":
+			atomic.AddInt32(&patchCount, 1)
+			var body struct {
+				Metadata map[string]any `json:"metadata"`
+				Fact     string         `json:"fact"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-1", "fact": body.Fact, "metadata": body.Metadata,
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+
+	id1, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "global", TopicKey: "arch/db",
+		SessionID: "sess-1", Type: "decision", Title: "t", Content: "v1",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (first): %v", err)
+	}
+	if appendCount != 1 {
+		t.Fatalf("append count after first save=%d, want 1", appendCount)
+	}
+
+	id2, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "global", TopicKey: "arch/db",
+		Type: "decision", Title: "t", Content: "v2",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (second): %v", err)
+	}
+	if id1 != id2 {
+		t.Fatalf("second save returned a different id: %d vs %d (should upsert same fact)", id1, id2)
+	}
+	if appendCount != 1 {
+		t.Fatalf("append count after second save=%d, want still 1 (no new message)", appendCount)
+	}
+	if patchCount < 1 {
+		t.Fatalf("expected at least one PATCH for the second (upsert) save, got %d", patchCount)
+	}
+}
+
+// ─── Task 12: ProjectExists / ListProjectNames ───────────────────────────────
+
+func projectListServer(t *testing.T, items []map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects" {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+}
+
+func TestBackend_ProjectExists_TrueWhenMatchedByCustomIDOrName(t *testing.T) {
+	srv := projectListServer(t, []map[string]any{
+		{"id": "p-1", "custom_id": "alpha", "name": "Alpha Project"},
+		{"id": "p-2", "custom_id": "", "name": "beta"},
+	})
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	for _, name := range []string{"alpha", "beta"} {
+		ok, err := b.ProjectExists(name)
+		if err != nil {
+			t.Fatalf("ProjectExists(%q): %v", name, err)
+		}
+		if !ok {
+			t.Fatalf("ProjectExists(%q)=false, want true", name)
+		}
+	}
+}
+
+func TestBackend_ProjectExists_FalseWhenUnknown(t *testing.T) {
+	srv := projectListServer(t, []map[string]any{
+		{"id": "p-1", "custom_id": "alpha", "name": "Alpha Project"},
+	})
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	ok, err := b.ProjectExists("does-not-exist")
+	if err != nil {
+		t.Fatalf("ProjectExists: %v", err)
+	}
+	if ok {
+		t.Fatal("ProjectExists(unknown)=true, want false")
+	}
+}
+
+func TestBackend_ListProjectNames_ReturnsCustomIDsFallingBackToName(t *testing.T) {
+	srv := projectListServer(t, []map[string]any{
+		{"id": "p-1", "custom_id": "alpha", "name": "Alpha Project"},
+		{"id": "p-2", "custom_id": "", "name": "beta"},
+	})
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	names, err := b.ListProjectNames()
+	if err != nil {
+		t.Fatalf("ListProjectNames: %v", err)
+	}
+	if len(names) != 2 || names[0] != "alpha" || names[1] != "beta" {
+		t.Fatalf("names=%v, want [alpha beta]", names)
+	}
+}
+
+// ─── Task 12: Stats / CountObservationsForProject (paginated, expired-excluding) ─
+
+// factsPageServer serves GET .../facts across two pages (continuation_token)
+// so tests exercise listAllFacts' pagination loop, and excludes/includes an
+// expired fact to verify Stats/CountObservationsForProject skip it.
+func factsPageServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	page1 := []map[string]any{
+		{"id": "fact-1", "fact": "a", "expired": false, "created_at": "2026-07-20T00:00:00Z"},
+		{"id": "fact-2", "fact": "b", "expired": true, "created_at": "2026-07-20T01:00:00Z"},
+	}
+	page2 := []map[string]any{
+		{"id": "fact-3", "fact": "c", "expired": false, "created_at": "2026-07-20T02:00:00Z"},
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			// Stats() also lists project names; not the focus of this test, so
+			// just answer with an empty project list.
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{}}})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts"):
+			if r.URL.Query().Get("continuation_token") == "next" {
+				json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": page2, "continuation_token": ""}})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": page1, "continuation_token": "next"}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+}
+
+func TestBackend_Stats_CountsAcrossPagesExcludingExpired(t *testing.T) {
+	srv := factsPageServer(t)
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	stats, err := b.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	// 3 facts total across 2 pages, 1 expired (fact-2) excluded => 2.
+	if stats.TotalObservations != 2 {
+		t.Fatalf("TotalObservations=%d, want 2 (3 facts across pages, 1 expired excluded)", stats.TotalObservations)
+	}
+}
+
+func TestBackend_CountObservationsForProject_ExcludesExpired(t *testing.T) {
+	srv := factsPageServer(t)
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	n, err := b.CountObservationsForProject("ignored")
+	if err != nil {
+		t.Fatalf("CountObservationsForProject: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("count=%d, want 2", n)
+	}
+}
+
+// ─── Task 12: Timeline ───────────────────────────────────────────────────────
+
+func TestBackend_Timeline_OrdersByCreatedAtAndExcludesExpiredNeighbors(t *testing.T) {
+	items := []map[string]any{
+		{"id": "fact-a", "fact": "A", "created_at": "2026-07-20T00:00:00Z", "metadata": map[string]any{metaRaw: "A"}},
+		{"id": "fact-b", "fact": "B", "expired": true, "created_at": "2026-07-20T00:30:00Z", "metadata": map[string]any{metaRaw: "B"}},
+		{"id": "fact-c", "fact": "C", "created_at": "2026-07-20T01:00:00Z", "metadata": map[string]any{metaRaw: "C"}},
+		{"id": "fact-d", "fact": "D", "created_at": "2026-07-20T02:00:00Z", "metadata": map[string]any{metaRaw: "D"}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts") {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+	anchorID := b.idmap.IntFor("fact-c")
+
+	res, err := b.Timeline(anchorID, 5, 5)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	if res.Focus.Content != "C" {
+		t.Fatalf("Focus.Content=%q, want C", res.Focus.Content)
+	}
+	// fact-b is expired and must be excluded from Before, leaving only fact-a.
+	if len(res.Before) != 1 || res.Before[0].Content != "A" {
+		t.Fatalf("Before=%+v, want exactly [A] (expired fact-b excluded)", res.Before)
+	}
+	if len(res.After) != 1 || res.After[0].Content != "D" {
+		t.Fatalf("After=%+v, want exactly [D]", res.After)
+	}
+	if res.TotalInRange != 3 {
+		t.Fatalf("TotalInRange=%d, want 3", res.TotalInRange)
+	}
+}
+
+// ─── Task 12: FormatContext ──────────────────────────────────────────────────
+
+func TestBackend_FormatContext_PinnedFirstThenRecentExcludingExpired(t *testing.T) {
+	items := []map[string]any{
+		{"id": "fact-1", "fact": "f1", "created_at": "2026-07-20T00:00:00Z",
+			"metadata": map[string]any{metaRaw: "unpinned content", metaTitle: "U", metaType: "note", metaScope: "global"}},
+		{"id": "fact-2", "fact": "f2", "created_at": "2026-07-20T01:00:00Z",
+			"metadata": map[string]any{metaRaw: "pinned content", metaTitle: "P", metaType: "decision", metaScope: "global", "pinned": true}},
+		{"id": "fact-3", "fact": "f3", "expired": true, "created_at": "2026-07-20T02:00:00Z",
+			"metadata": map[string]any{metaRaw: "expired content", metaTitle: "E", metaType: "note", metaScope: "global"}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts") {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	out, err := b.FormatContext("proj", "global")
+	if err != nil {
+		t.Fatalf("FormatContext: %v", err)
+	}
+	if strings.Contains(out, "expired content") {
+		t.Fatalf("FormatContext must exclude expired facts:\n%s", out)
+	}
+	pinnedIdx := strings.Index(out, "pinned content")
+	unpinnedIdx := strings.Index(out, "unpinned content")
+	if pinnedIdx < 0 || unpinnedIdx < 0 {
+		t.Fatalf("FormatContext missing expected content:\n%s", out)
+	}
+	if pinnedIdx > unpinnedIdx {
+		t.Fatalf("pinned content must appear before recent/unpinned content:\n%s", out)
+	}
+}
+
+func TestBackend_FormatContext_ScopeFilter(t *testing.T) {
+	items := []map[string]any{
+		{"id": "fact-1", "fact": "f1", "created_at": "2026-07-20T00:00:00Z",
+			"metadata": map[string]any{metaRaw: "global scope content", metaTitle: "G", metaType: "note", metaScope: "global"}},
+		{"id": "fact-2", "fact": "f2", "created_at": "2026-07-20T01:00:00Z",
+			"metadata": map[string]any{metaRaw: "project scope content", metaTitle: "P", metaType: "note", metaScope: "project"}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts") {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	out, err := b.FormatContext("proj", "project")
+	if err != nil {
+		t.Fatalf("FormatContext: %v", err)
+	}
+	if strings.Contains(out, "global scope content") {
+		t.Fatalf("FormatContext scope filter leaked global-scope content:\n%s", out)
+	}
+	if !strings.Contains(out, "project scope content") {
+		t.Fatalf("FormatContext scope filter dropped matching content:\n%s", out)
 	}
 }

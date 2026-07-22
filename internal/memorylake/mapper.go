@@ -26,6 +26,11 @@ const (
 	metaScope    = "engram_scope"
 	metaObsID    = "engram_obs_id"
 	metaTopicKey = "topic_key"
+	// metaRev mirrors store.Observation.RevisionCount: incremented each time a
+	// topic_key upsert PATCHes an existing fact in place (see backend.go's
+	// upsertTopicKeyFact). Set to 1 on first write, matching the local store's
+	// revision_count default.
+	metaRev = "engram_rev"
 )
 
 // FactMetadata builds the metadata map engram attaches to a MemoryLake fact
@@ -41,6 +46,7 @@ func FactMetadata(p store.AddObservationParams, obsID string, raw string) map[st
 		metaType:  p.Type,
 		metaScope: p.Scope,
 		metaObsID: obsID,
+		metaRev:   1,
 	}
 	if p.TopicKey != "" {
 		md[metaTopicKey] = p.TopicKey
@@ -70,13 +76,34 @@ func ObservationFromFact(f Fact) store.Observation {
 	}
 
 	obs := store.Observation{
-		Content: content,
-		Title:   get(metaTitle),
-		Type:    get(metaType),
-		Scope:   get(metaScope),
+		Content:       content,
+		Title:         get(metaTitle),
+		Type:          get(metaType),
+		Scope:         get(metaScope),
+		RevisionCount: revisionFromMetadata(f.Metadata),
 	}
 	if tk := get(metaTopicKey); tk != "" {
 		obs.TopicKey = &tk
 	}
 	return obs
+}
+
+// revisionFromMetadata decodes metadata[metaRev] into an int, defaulting to 1
+// (matching internal/store's revision_count default for a freshly-created
+// observation) when the key is absent — e.g. for facts that predate
+// engram_rev being stamped, or facts created outside engram entirely. JSON
+// numbers decode as float64 through map[string]any, so that is the primary
+// case handled; int/int64 are also accepted for metadata built in-process
+// (e.g. FactMetadata's literal 1) before ever round-tripping through JSON.
+func revisionFromMetadata(md map[string]any) int {
+	switch v := md[metaRev].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	default:
+		return 1
+	}
 }

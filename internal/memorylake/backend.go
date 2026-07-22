@@ -2,9 +2,11 @@ package memorylake
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +40,7 @@ type MemoryLakeBackend struct {
 	projID  string // resolved MemoryLake project id
 	actorID string // resolved MemoryLake actor id
 	idmap   *IDMap
+	topics  *TopicIndex
 	poll    time.Duration
 	maxWait time.Duration
 
@@ -88,6 +91,11 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 		return nil, err
 	}
 
+	topics, err := LoadTopicIndex(topicIndexPath(projID))
+	if err != nil {
+		return nil, err
+	}
+
 	return &MemoryLakeBackend{
 		client:  client,
 		cfg:     cfg,
@@ -95,6 +103,7 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 		projID:  projID,
 		actorID: actorID,
 		idmap:   idmap,
+		topics:  topics,
 		poll:    time.Duration(cfg.ExtractPollMS) * time.Millisecond,
 		maxWait: time.Duration(cfg.ExtractMaxWaitMS) * time.Millisecond,
 	}, nil
@@ -135,6 +144,18 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 	// stay concurrent.
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
+
+	// topic_key upsert: same project+scope+topic_key updates the existing
+	// fact in place (mirrors internal/store's topic_key match-and-UPDATE
+	// path) instead of appending a new conversation message. The local
+	// TopicIndex is what makes "the existing fact" findable at all — see
+	// topicindex.go's doc comment for why MemoryLake itself can't answer this
+	// query (metadata isn't filterable server-side).
+	if p.TopicKey != "" {
+		if factID, ok := b.topics.Lookup(p.Project, p.Scope, p.TopicKey); ok {
+			return b.upsertTopicKeyFact(factID, p)
+		}
+	}
 
 	convCustomID := p.SessionID
 	if convCustomID == "" {
@@ -179,6 +200,14 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 				first = id
 			}
 		}
+		// Record the first backfilled fact as this topic_key's fact so the
+		// next save with the same project+scope+topic_key upserts it instead
+		// of appending another message.
+		if p.TopicKey != "" {
+			if err := b.topics.Put(p.Project, p.Scope, p.TopicKey, facts[0].ID); err != nil {
+				return 0, err
+			}
+		}
 		return first, nil
 	}
 
@@ -188,6 +217,40 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 		provisional = obsID
 	}
 	return b.idmap.IntFor(provisional), nil
+}
+
+// upsertTopicKeyFact implements the topic_key upsert hit path: PATCH the
+// already-known fact in place (new content + refreshed metadata) instead of
+// appending a new conversation message and waiting on extraction. This
+// mirrors internal/store's topic_key match: on a hit, the store's SQL UPDATEs
+// type/title/content/topic_key and bumps revision_count on the existing row
+// rather than inserting a new one (see store.go's AddObservation). scope is
+// intentionally left untouched here for the same reason the store's SQL never
+// assigns it on that branch: scope is part of what identified this fact as
+// the match (via the TopicIndex key) in the first place, so it cannot differ
+// from what's already stored. Any other metadata keys already on the fact
+// (e.g. "pinned") are preserved verbatim.
+func (b *MemoryLakeBackend) upsertTopicKeyFact(factID string, p store.AddObservationParams) (int64, error) {
+	current, err := b.getFact(factID)
+	if err != nil {
+		return 0, err
+	}
+
+	md := map[string]any{}
+	for k, v := range current.Metadata {
+		md[k] = v
+	}
+	md[metaRaw] = p.Content
+	md[metaTitle] = p.Title
+	md[metaType] = p.Type
+	md[metaTopicKey] = p.TopicKey
+	md[metaObsID] = contentHash(p.Content)
+	md[metaRev] = revisionFromMetadata(current.Metadata) + 1
+
+	if _, err := b.patchFact(factID, map[string]any{"fact": p.Content, "metadata": md}); err != nil {
+		return 0, err
+	}
+	return b.idmap.IntFor(factID), nil
 }
 
 // GetObservation resolves the int64 id through the IDMap to a MemoryLake fact
@@ -321,19 +384,36 @@ func (b *MemoryLakeBackend) setPinned(id int64, pinned bool) error {
 // Timeline lists the project's facts, orders them by created_at, and returns
 // the N facts before/after the anchor observation.
 //
-// First-cut: session grouping, prompts, and DeletedAt filtering are not
-// modeled (facts carry no engram session id, and forgotten facts are excluded
-// server-side). SessionInfo is left nil. TODO(spec §6): richer timeline
+// First-cut: session grouping and prompts are not modeled (facts carry no
+// engram session id). SessionInfo is left nil. TODO(spec §6): richer timeline
 // fidelity once fact metadata carries session linkage.
 func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*store.TimelineResult, error) {
+	if before <= 0 {
+		before = 5
+	}
+	if after <= 0 {
+		after = 5
+	}
+
 	anchorFactID, ok := b.idmap.FactFor(observationID)
 	if !ok {
 		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
 	}
 
-	facts, err := b.client.listFacts(b.ws, b.projID)
+	allFacts, err := b.client.listAllFacts(b.ws, b.projID)
 	if err != nil {
 		return nil, err
+	}
+
+	// Exclude expired (soft-deleted) facts from the timeline window, mirroring
+	// the local store's `deleted_at IS NULL` filter on before/after — except
+	// the anchor itself, which must stay locatable even if it has since
+	// expired (the caller explicitly asked for this observation's timeline).
+	facts := make([]Fact, 0, len(allFacts))
+	for _, f := range allFacts {
+		if f.ID == anchorFactID || !f.Expired {
+			facts = append(facts, f)
+		}
 	}
 	// Chronological order (created_at ascending); fall back to id for stability.
 	sortFactsByCreatedAsc(facts)
@@ -353,14 +433,15 @@ func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*s
 		o := ObservationFromFact(f)
 		o.ID = b.idmap.IntFor(f.ID)
 		return store.TimelineEntry{
-			ID:        o.ID,
-			Type:      o.Type,
-			Title:     o.Title,
-			Content:   o.Content,
-			Scope:     o.Scope,
-			TopicKey:  o.TopicKey,
-			CreatedAt: f.CreatedAt,
-			UpdatedAt: f.UpdatedAt,
+			ID:            o.ID,
+			Type:          o.Type,
+			Title:         o.Title,
+			Content:       o.Content,
+			Scope:         o.Scope,
+			TopicKey:      o.TopicKey,
+			RevisionCount: o.RevisionCount,
+			CreatedAt:     f.CreatedAt,
+			UpdatedAt:     f.UpdatedAt,
 		}
 	}
 
@@ -389,75 +470,189 @@ func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*s
 	return res, nil
 }
 
-// FormatContext renders a lightweight text block of the project's facts,
-// optionally filtered by scope.
+// maxFormatContextRecent bounds how many non-pinned facts FormatContext
+// includes, mirroring the local store's cfg.MaxContextResults ceiling (a
+// fixed reasonable default here since this backend has no equivalent config
+// field).
+const maxFormatContextRecent = 20
+
+// FormatContext renders a human-readable text block of the project's facts,
+// optionally filtered by scope, with pinned facts (metadata["pinned"] == true)
+// listed ahead of the most recent unpinned ones — the same priority order as
+// the local store's FormatContext (pinned section before recent-observations
+// section).
 //
-// First-cut: no session/recency grouping like the store's FormatContext.
-// TODO(spec §6): match the store's richer context formatting.
+// project is accepted for signature compatibility but ignored: a backend
+// instance is already bound to a single MemoryLake project (see
+// CountObservationsForProject).
+//
+// First-cut: no session/prompt sections (see CreateSession/AddPrompt doc
+// comments — MemoryLake has no session or prompt tracking in this backend).
+// TODO(spec §6): fold in sessions/prompts if/when they gain a MemoryLake
+// analogue.
 func (b *MemoryLakeBackend) FormatContext(project, scope string) (string, error) {
-	facts, err := b.client.listFacts(b.ws, b.projID)
+	_ = project
+	allFacts, err := b.client.listAllFacts(b.ws, b.projID)
 	if err != nil {
 		return "", err
 	}
-	var out []byte
-	out = append(out, "## Memory Context\n\n"...)
-	for _, f := range facts {
-		o := ObservationFromFact(f)
-		if scope != "" && o.Scope != scope {
+
+	active := make([]Fact, 0, len(allFacts))
+	for _, f := range allFacts {
+		if !f.Expired {
+			active = append(active, f)
+		}
+	}
+	sortFactsByCreatedAsc(active)
+
+	var pinned, recent []Fact
+	for _, f := range active {
+		if scope != "" && ObservationFromFact(f).Scope != scope {
 			continue
 		}
-		out = append(out, "- "...)
-		if o.Title != "" {
-			out = append(out, o.Title...)
-			out = append(out, ": "...)
+		if isPinned(f) {
+			pinned = append(pinned, f)
+		} else {
+			recent = append(recent, f)
 		}
-		out = append(out, o.Content...)
-		out = append(out, '\n')
 	}
-	return string(out), nil
+	// Most-recent-first within each group.
+	reverseFacts(pinned)
+	reverseFacts(recent)
+	if len(recent) > maxFormatContextRecent {
+		recent = recent[:maxFormatContextRecent]
+	}
+
+	if len(pinned) == 0 && len(recent) == 0 {
+		return "", nil
+	}
+
+	var out strings.Builder
+	out.WriteString("## Memory Context (MemoryLake)\n\n")
+
+	if len(pinned) > 0 {
+		out.WriteString("### Pinned\n")
+		for _, f := range pinned {
+			o := ObservationFromFact(f)
+			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, o.Content)
+		}
+		out.WriteString("\n")
+	}
+
+	if len(recent) > 0 {
+		out.WriteString("### Recent Observations\n")
+		for _, f := range recent {
+			o := ObservationFromFact(f)
+			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, o.Content)
+		}
+		out.WriteString("\n")
+	}
+
+	return out.String(), nil
 }
 
-// Stats reports observation count from the fact list.
+// isPinned reports whether a fact's metadata carries the pinned flag set by
+// PinObservation.
+func isPinned(f Fact) bool {
+	p, _ := f.Metadata["pinned"].(bool)
+	return p
+}
+
+// reverseFacts reverses facts in place.
+func reverseFacts(facts []Fact) {
+	for i, j := 0, len(facts)-1; i < j; i, j = i+1, j-1 {
+		facts[i], facts[j] = facts[j], facts[i]
+	}
+}
+
+// Stats reports observation counts from the project's full fact list
+// (excluding expired/forgotten facts, mirroring the store's `deleted_at IS
+// NULL` exclusion), plus the workspace's project names.
 //
-// First-cut: sessions and prompts are not tracked distinctly on MemoryLake, so
-// their counts are 0 and Projects is left empty. TODO(spec §6): populate from a
-// statistics endpoint / project listing.
+// First-cut: sessions and prompts have no MemoryLake-tracked analogue in this
+// backend (see CreateSession/AddPrompt doc comments), so those counts stay 0
+// rather than an invented value. If listing project names fails, Stats still
+// succeeds with Projects left nil — mirroring the local store's Stats, which
+// likewise treats project-listing failure as non-fatal.
 func (b *MemoryLakeBackend) Stats() (*store.Stats, error) {
-	facts, err := b.client.listFacts(b.ws, b.projID)
+	facts, err := b.client.listAllFacts(b.ws, b.projID)
 	if err != nil {
 		return nil, err
 	}
-	return &store.Stats{TotalObservations: len(facts)}, nil
+	stats := &store.Stats{TotalObservations: countActive(facts)}
+	if names, err := b.ListProjectNames(); err == nil {
+		stats.Projects = names
+	}
+	return stats, nil
 }
 
-// CountObservationsForProject counts facts in the backend's project. The name
-// argument is accepted for signature compatibility but ignored: a backend
-// instance is bound to a single MemoryLake project.
+// countActive counts facts that are not expired (MemoryLake's soft-delete
+// flag, the analogue of the store's deleted_at IS NULL exclusion).
+func countActive(facts []Fact) int {
+	n := 0
+	for _, f := range facts {
+		if !f.Expired {
+			n++
+		}
+	}
+	return n
+}
+
+// CountObservationsForProject counts non-expired facts in the backend's
+// project. The name argument is accepted for signature compatibility but
+// ignored: a backend instance is bound to a single MemoryLake project.
 func (b *MemoryLakeBackend) CountObservationsForProject(name string) (int, error) {
-	facts, err := b.client.listFacts(b.ws, b.projID)
+	facts, err := b.client.listAllFacts(b.ws, b.projID)
 	if err != nil {
 		return 0, err
 	}
-	return len(facts), nil
+	return countActive(facts), nil
 }
 
-// ProjectExists reports true: the backend is only constructed for a project
-// that was resolved/created at enablement time, so the bound project exists.
-// The name argument is accepted for signature compatibility.
+// ProjectExists checks name against the workspace's project list (matched by
+// custom_id or display name), the same way EnsureProject resolves a project
+// reference. Unlike the local store (which recognizes a project from any of
+// observations/sessions/prompts/enrollment), MemoryLake's only durable
+// project registry is this list, so that's the sole source of truth here.
 //
-// First-cut: does not cross-check name against the workspace project list.
-// TODO(spec §6): verify against GET .../projects when name != bound project.
+// TODO(pagination): GET .../projects may be cursor-paginated for workspaces
+// with many projects; first cut reads only the first page, same limitation
+// already accepted by EnsureProject/ResolveWorkspaceID. See spec §11.5.
 func (b *MemoryLakeBackend) ProjectExists(name string) (bool, error) {
-	return true, nil
+	var out struct {
+		Items []projItem `json:"items"`
+	}
+	if err := b.client.doJSON("GET", "/api/v3/workspaces/"+b.ws+"/projects", nil, &out); err != nil {
+		return false, err
+	}
+	for _, p := range out.Items {
+		if p.CustomID == name || p.Name == name {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-// ListProjectNames returns no names in the first cut.
+// ListProjectNames returns the custom_id (falling back to display name when
+// custom_id is empty) of every project in the workspace.
 //
-// First-cut: engram's human-readable project name is not recoverable from the
-// backend's resolved project id alone. TODO(spec §6): list workspace projects
-// and map custom_id → engram project name.
+// TODO(pagination): see ProjectExists — first cut reads only the first page.
 func (b *MemoryLakeBackend) ListProjectNames() ([]string, error) {
-	return nil, nil
+	var out struct {
+		Items []projItem `json:"items"`
+	}
+	if err := b.client.doJSON("GET", "/api/v3/workspaces/"+b.ws+"/projects", nil, &out); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(out.Items))
+	for _, p := range out.Items {
+		if p.CustomID != "" {
+			names = append(names, p.CustomID)
+		} else {
+			names = append(names, p.Name)
+		}
+	}
+	return names, nil
 }
 
 // ─── Tier B: sessions (first-cut) ────────────────────────────────────────────
