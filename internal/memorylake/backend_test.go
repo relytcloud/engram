@@ -782,8 +782,15 @@ func TestBackend_AddObservation_TopicKeyUpsert_SecondSaveHitsIndex(t *testing.T)
 			}
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
 		case r.Method == "GET" && r.URL.Path == p:
+			// Realistic stamped metadata: the first save's backfill (see
+			// FactMetadata) would have recorded this fact's scope/topic_key,
+			// which the second save's hit-validation (isValidTopicKeyHit,
+			// task-12 hardening brief C1) now checks before trusting the
+			// TopicIndex hit.
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
-				"id": "fact-1", "fact": "v1", "metadata": map[string]any{metaRaw: "v1", metaObsID: "obs"},
+				"id": "fact-1", "fact": "v1", "metadata": map[string]any{
+					metaRaw: "v1", metaObsID: "obs", metaScope: "global", metaTopicKey: "arch/db",
+				},
 			}})
 		case r.Method == "PATCH":
 			atomic.AddInt32(&patchCount, 1)
@@ -1061,5 +1068,391 @@ func TestBackend_FormatContext_ScopeFilter(t *testing.T) {
 	}
 	if !strings.Contains(out, "project scope content") {
 		t.Fatalf("FormatContext scope filter dropped matching content:\n%s", out)
+	}
+}
+
+// TestBackend_FormatContext_TruncatesContentTo300 is the I3 regression:
+// internal/store's FormatContext truncates every observation's content to
+// 300 runes before rendering it (store.go's truncate(obs.Content, 300)); the
+// MemoryLake backend must match that so a project's rendered context block
+// has the same shape regardless of which backend produced it.
+func TestBackend_FormatContext_TruncatesContentTo300(t *testing.T) {
+	long := strings.Repeat("a", 400)
+	items := []map[string]any{
+		{"id": "fact-1", "fact": "f1", "created_at": "2026-07-20T00:00:00Z",
+			"metadata": map[string]any{metaRaw: long, metaTitle: "T", metaType: "note", metaScope: "global"}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts") {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	out, err := b.FormatContext("proj", "")
+	if err != nil {
+		t.Fatalf("FormatContext: %v", err)
+	}
+	if strings.Contains(out, long) {
+		t.Fatalf("FormatContext did not truncate 400-rune content:\n%s", out)
+	}
+	want := strings.Repeat("a", 300) + "..."
+	if !strings.Contains(out, want) {
+		t.Fatalf("FormatContext missing expected 300-rune truncation with ellipsis:\n%s", out)
+	}
+}
+
+// ─── Task-12 hardening (C1): TopicIndex hits are validated, not trusted ─────
+
+// TestBackend_AddObservation_TopicKeyUpsert_ExpiredHitFallsThroughAndRecreates
+// is the C1 critical-bug regression: a TopicIndex entry pointing at a fact
+// that has since been forgotten (Expired == true) must NOT be PATCHed back
+// into existence. Search/Timeline/Stats/FormatContext all exclude expired
+// facts, so silently upserting into one would report success while the
+// content stays permanently invisible. AddObservation must instead treat the
+// hit as a miss, fall through to append+backfill, and re-point the index at
+// the freshly created fact.
+func TestBackend_AddObservation_TopicKeyUpsert_ExpiredHitFallsThroughAndRecreates(t *testing.T) {
+	var appended, patchedExpired int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expiredPath := "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-expired"
+		switch {
+		case r.Method == "GET" && r.URL.Path == expiredPath:
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-expired", "fact": "forgotten content", "expired": true,
+				"metadata": map[string]any{
+					metaRaw: "forgotten content", metaScope: "global", metaTopicKey: "arch/db",
+				},
+			}})
+		case r.Method == "PATCH" && r.URL.Path == expiredPath:
+			atomic.AddInt32(&patchedExpired, 1)
+			t.Fatal("must not PATCH an expired fact back into existence")
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.StoreInt32(&appended, 1)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			var items []map[string]any
+			if atomic.LoadInt32(&appended) == 1 {
+				items = []map[string]any{{"id": "fact-new", "fact": "new content", "metadata": map[string]any{}}}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case r.Method == "PATCH" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-new":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-new", "fact": "new content", "metadata": map[string]any{metaObsID: "obs"},
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	if err := b.topics.Put("proj", "global", "arch/db", "fact-expired"); err != nil {
+		t.Fatalf("seed TopicIndex: %v", err)
+	}
+
+	id, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "global", TopicKey: "arch/db",
+		SessionID: "sess-1", Type: "decision", Title: "t", Content: "new content",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if patchedExpired != 0 {
+		t.Fatal("expired fact was PATCHed (revived)")
+	}
+	if id != b.idmap.IntFor("fact-new") {
+		t.Fatalf("id=%d, want the int64 mapped to fact-new (a fresh fact, not the expired one)", id)
+	}
+	// Self-heal: the index must now point at the new fact, not the expired one.
+	factID, ok := b.topics.Lookup("proj", "global", "arch/db")
+	if !ok || factID != "fact-new" {
+		t.Fatalf("TopicIndex.Lookup after expired-hit fallthrough = (%q, %v), want (fact-new, true)", factID, ok)
+	}
+}
+
+// TestBackend_AddObservation_TopicKeyUpsert_ScopeEmptyMatchesScopeProject is
+// the I1 regression at the AddObservation level (not just topicIndexKey in
+// isolation): a first save under scope="" and a second save under
+// scope="project" for the same topic_key must be treated as the SAME fact —
+// the second save must upsert (PATCH only), never append a second message.
+func TestBackend_AddObservation_TopicKeyUpsert_ScopeEmptyMatchesScopeProject(t *testing.T) {
+	var appendCount, patchCount int32
+	factsExtracted := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		factPath := "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-1"
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.AddInt32(&appendCount, 1)
+			factsExtracted = true
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			var items []map[string]any
+			if factsExtracted {
+				items = []map[string]any{{"id": "fact-1", "fact": "extracted", "metadata": map[string]any{}}}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case r.Method == "GET" && r.URL.Path == factPath:
+			// Stamped with the RAW (unnormalized) scope the first save used
+			// ("" — empty string, exactly what FactMetadata stores verbatim).
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-1", "fact": "v1",
+				"metadata": map[string]any{metaRaw: "v1", metaObsID: "obs", metaScope: "", metaTopicKey: "arch/db"},
+			}})
+		case r.Method == "PATCH":
+			atomic.AddInt32(&patchCount, 1)
+			var body struct {
+				Metadata map[string]any `json:"metadata"`
+				Fact     string         `json:"fact"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-1", "fact": body.Fact, "metadata": body.Metadata,
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+
+	id1, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "", TopicKey: "arch/db",
+		SessionID: "sess-1", Type: "decision", Title: "t", Content: "v1",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (first, scope=\"\"): %v", err)
+	}
+	if appendCount != 1 {
+		t.Fatalf("append count after first save=%d, want 1", appendCount)
+	}
+
+	id2, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "project", TopicKey: "arch/db",
+		Type: "decision", Title: "t", Content: "v2",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (second, scope=project): %v", err)
+	}
+	if id1 != id2 {
+		t.Fatalf("second save (scope=project) returned a different id than the first (scope=\"\"): %d vs %d, want equal (same normalized key)", id1, id2)
+	}
+	if appendCount != 1 {
+		t.Fatalf("append count after second save=%d, want still 1 (scope=\"\" and scope=project must collide onto the same upsert)", appendCount)
+	}
+	if patchCount < 1 {
+		t.Fatal("expected at least one PATCH for the second (upsert) save")
+	}
+}
+
+// ─── Task-12 hardening (C2): Delete/Update maintain the TopicIndex ─────────
+
+// TestBackend_DeleteObservation_PurgesTopicIndex_ThenSameTopicKeySaveAppendsNew
+// is the C2 end-to-end regression: forgetting a topic_key fact must clear its
+// TopicIndex entry so a later save with the same project+scope+topic_key
+// cannot upsert-PATCH the now-forgotten fact back into visibility. It must
+// instead go through the normal append+backfill path and produce a brand new
+// fact.
+func TestBackend_DeleteObservation_PurgesTopicIndex_ThenSameTopicKeySaveAppendsNew(t *testing.T) {
+	var appendCount, patchOldCount int32
+	var forgot, deleted atomic.Bool
+	factsExtracted := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		oldFactPath := "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-old"
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.AddInt32(&appendCount, 1)
+			factsExtracted = true
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			var items []map[string]any
+			if factsExtracted {
+				items = []map[string]any{{"id": "fact-old", "fact": "v1", "metadata": map[string]any{}}}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case r.Method == "PATCH" && r.URL.Path == oldFactPath:
+			// The very first PATCH here is BackfillFacts' legitimate initial
+			// metadata stamp (part of establishing fact-old in the first
+			// save, before delete). Any PATCH arriving AFTER the fact has
+			// been forgotten would mean the deleted fact got revived via a
+			// topic_key upsert hit — that must never happen (C1+C2).
+			atomic.AddInt32(&patchOldCount, 1)
+			if deleted.Load() {
+				t.Fatal("must not PATCH fact-old after it has been forgotten (deleted)")
+			}
+			var body struct {
+				Metadata map[string]any `json:"metadata"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-old", "fact": "v1", "metadata": body.Metadata,
+			}})
+		case r.Method == "POST" && r.URL.Path == oldFactPath+"/forget":
+			forgot.Store(true)
+			deleted.Store(true)
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	// The mock never extracts a NEW fact for the second save's message (it
+	// always reports fact-old, already-known and already-backfilled) — that
+	// second save's backfill correctly times out (extraction "pending" is a
+	// valid, non-error outcome; see AddObservation's doc comment). Shorten
+	// maxWait so this test doesn't pay the default 500ms for that timeout.
+	b.maxWait = 30 * time.Millisecond
+
+	// First save: establish fact-old + its TopicIndex entry via the normal
+	// append+backfill path.
+	id1, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "global", TopicKey: "arch/db",
+		SessionID: "sess-1", Type: "decision", Title: "t", Content: "v1",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation (first): %v", err)
+	}
+	if appendCount != 1 {
+		t.Fatalf("append count after first save=%d, want 1", appendCount)
+	}
+	if factID, ok := b.topics.Lookup("proj", "global", "arch/db"); !ok || factID != "fact-old" {
+		t.Fatalf("TopicIndex not seeded as expected: (%q, %v)", factID, ok)
+	}
+
+	// Forget it.
+	if err := b.DeleteObservation(id1, false); err != nil {
+		t.Fatalf("DeleteObservation: %v", err)
+	}
+	if !forgot.Load() {
+		t.Fatal("expected forget POST")
+	}
+	if factID, ok := b.topics.Lookup("proj", "global", "arch/db"); ok {
+		t.Fatalf("TopicIndex entry still present after delete: %q (want purged)", factID)
+	}
+
+	// Second save with the identical project+scope+topic_key must NOT hit the
+	// (now-cleared) index — it appends a fresh message/fact rather than
+	// PATCHing fact-old.
+	if _, err := b.AddObservation(store.AddObservationParams{
+		Project: "proj", Scope: "global", TopicKey: "arch/db",
+		SessionID: "sess-2", Type: "decision", Title: "t2", Content: "v2 after delete",
+	}); err != nil {
+		t.Fatalf("AddObservation (after delete): %v", err)
+	}
+	if patchOldCount != 1 {
+		t.Fatalf("fact-old was PATCHed %d times, want exactly 1 (the initial backfill stamp only — no revival PATCH after delete)", patchOldCount)
+	}
+	if appendCount != 2 {
+		t.Fatalf("append count after post-delete save=%d, want 2 (must append, not upsert)", appendCount)
+	}
+}
+
+// TestBackend_UpdateObservation_ScopeChange_PurgesTopicIndex is the C2
+// regression for UpdateObservation: changing the scope (or topic_key) that a
+// fact was originally upserted under must purge the TopicIndex entry pointing
+// at it, so the OLD project+scope+topic_key can never resolve to this
+// now-reassigned fact again.
+func TestBackend_UpdateObservation_ScopeChange_PurgesTopicIndex(t *testing.T) {
+	factPath := "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-1"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == factPath:
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-1", "fact": "old",
+				"metadata": map[string]any{metaRaw: "old", metaScope: "global", metaTopicKey: "arch/db"},
+			}})
+		case r.Method == "PATCH" && r.URL.Path == factPath:
+			var body struct {
+				Metadata map[string]any `json:"metadata"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-1", "fact": "old", "metadata": body.Metadata,
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	id := b.idmap.IntFor("fact-1")
+	if err := b.topics.Put("proj", "global", "arch/db", "fact-1"); err != nil {
+		t.Fatalf("seed TopicIndex: %v", err)
+	}
+
+	newScope := "personal"
+	if _, err := b.UpdateObservation(id, store.UpdateObservationParams{Scope: &newScope}); err != nil {
+		t.Fatalf("UpdateObservation: %v", err)
+	}
+
+	if factID, ok := b.topics.Lookup("proj", "global", "arch/db"); ok {
+		t.Fatalf("TopicIndex entry for the old scope still present after UpdateObservation changed it: %q", factID)
+	}
+}
+
+// ─── Task-12 hardening (I2): listAllFacts pagination is bounded ────────────
+
+// TestListAllFacts_TerminatesAgainstInfiniteContinuationToken is exercised
+// via Stats (a real caller of listAllFacts) against a server that always
+// returns a non-empty continuation_token, simulating a misbehaving/malicious
+// server. Without a cap the pagination loop in listAllFacts would never
+// terminate; with the cap, the call must return (bounded results, nil error)
+// rather than hang.
+func TestListAllFacts_TerminatesAgainstInfiniteContinuationToken(t *testing.T) {
+	var gets int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{}}})
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts"):
+			atomic.AddInt32(&gets, 1)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"items":              []map[string]any{{"id": "x", "fact": "y"}},
+				"continuation_token": "always-more", // never empty: server never stops
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+
+	done := make(chan struct{})
+	var stats *store.Stats
+	var err error
+	go func() {
+		stats, err = b.Stats()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stats (via listAllFacts) did not terminate against an infinite continuation_token")
+	}
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != int32(maxListAllFactsPages) {
+		t.Fatalf("facts-list GET count=%d, want exactly maxListAllFactsPages=%d", got, maxListAllFactsPages)
+	}
+	if stats.TotalObservations != maxListAllFactsPages {
+		t.Fatalf("TotalObservations=%d, want %d (one fact per page, capped)", stats.TotalObservations, maxListAllFactsPages)
 	}
 }

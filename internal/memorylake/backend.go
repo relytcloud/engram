@@ -3,6 +3,7 @@ package memorylake
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -151,9 +152,35 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 	// TopicIndex is what makes "the existing fact" findable at all — see
 	// topicindex.go's doc comment for why MemoryLake itself can't answer this
 	// query (metadata isn't filterable server-side).
+	//
+	// A TopicIndex hit is NOT trusted blindly: the index is only ever this
+	// backend's own eventually-consistent cache, and internal/store's
+	// equivalent match query filters `deleted_at IS NULL` — a hit here must
+	// clear the same bar. Before PATCHing, fetch the fact and reject the hit
+	// (falling through to the normal append+backfill path below, exactly as
+	// if the index had never had an entry) when either:
+	//   - the fact has since been forgotten (Expired == true) — without this
+	//     check, upserting into a forgotten fact would silently "revive" it:
+	//     Search/Timeline/Stats/FormatContext all exclude expired facts, so
+	//     the save would report success while its content stays permanently
+	//     invisible (task-12 hardening brief C1).
+	//   - the fact's own metadata no longer agrees with the scope/topic_key
+	//     that produced this lookup (normalized on both sides) — this catches
+	//     index drift from a fact whose identity moved out from under it
+	//     (e.g. UpdateObservation reassigning scope/topic_key; see C2) even if
+	//     the index entry itself was never explicitly purged.
+	// Either way, AddObservation self-heals: falling through re-establishes a
+	// fresh fact and topics.Put below overwrites the stale entry with it.
 	if p.TopicKey != "" {
 		if factID, ok := b.topics.Lookup(p.Project, p.Scope, p.TopicKey); ok {
-			return b.upsertTopicKeyFact(factID, p)
+			current, err := b.getFact(factID)
+			if err != nil {
+				return 0, err
+			}
+			if isValidTopicKeyHit(current, p) {
+				return b.upsertTopicKeyFact(current, p)
+			}
+			// Stale/expired index entry: treat as a miss and fall through.
 		}
 	}
 
@@ -219,10 +246,46 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 	return b.idmap.IntFor(provisional), nil
 }
 
+// isValidTopicKeyHit reports whether fact f is actually eligible to be
+// upserted as the project+scope+topic_key match for p — i.e. whether a
+// TopicIndex hit resolving to f should be trusted (see AddObservation's C1
+// hardening comment). A hit is valid only when:
+//   - f has not been forgotten (soft-deleted): f.Expired == false, mirroring
+//     internal/store's `deleted_at IS NULL` filter on its own topic_key match
+//     query.
+//   - f's own stamped scope/topic_key metadata (normalized) still agrees with
+//     the scope/topic_key this lookup was made for (also normalized) — a
+//     mismatch means the index entry has drifted from the fact's actual
+//     current identity (e.g. after UpdateObservation reassigned it).
+//
+// Any other difference (title, type, content) is exactly what an upsert is
+// *for* and does not affect validity.
+func isValidTopicKeyHit(f Fact, p store.AddObservationParams) bool {
+	if f.Expired {
+		return false
+	}
+	if normalizeIndexScope(metaString(f.Metadata, metaScope)) != normalizeIndexScope(p.Scope) {
+		return false
+	}
+	return normalizeIndexTopicKey(metaString(f.Metadata, metaTopicKey)) == normalizeIndexTopicKey(p.TopicKey)
+}
+
+// metaString reads a string-valued metadata key from a MemoryLake fact's
+// metadata map, returning "" if the key is absent or not a string. Local to
+// backend.go (not mapper.go, which task-12's hardening scope leaves
+// untouched) — used only by isValidTopicKeyHit above.
+func metaString(md map[string]any, key string) string {
+	if v, ok := md[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
 // upsertTopicKeyFact implements the topic_key upsert hit path: PATCH the
-// already-known fact in place (new content + refreshed metadata) instead of
-// appending a new conversation message and waiting on extraction. This
-// mirrors internal/store's topic_key match: on a hit, the store's SQL UPDATEs
+// already-known (and already fetched + validated, see isValidTopicKeyHit)
+// fact in place (new content + refreshed metadata) instead of appending a new
+// conversation message and waiting on extraction. This mirrors
+// internal/store's topic_key match: on a hit, the store's SQL UPDATEs
 // type/title/content/topic_key and bumps revision_count on the existing row
 // rather than inserting a new one (see store.go's AddObservation). scope is
 // intentionally left untouched here for the same reason the store's SQL never
@@ -230,12 +293,10 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 // the match (via the TopicIndex key) in the first place, so it cannot differ
 // from what's already stored. Any other metadata keys already on the fact
 // (e.g. "pinned") are preserved verbatim.
-func (b *MemoryLakeBackend) upsertTopicKeyFact(factID string, p store.AddObservationParams) (int64, error) {
-	current, err := b.getFact(factID)
-	if err != nil {
-		return 0, err
-	}
-
+//
+// current is the fact AddObservation already fetched (and validated) for this
+// hit — reusing it here avoids a second, redundant GET.
+func (b *MemoryLakeBackend) upsertTopicKeyFact(current Fact, p store.AddObservationParams) (int64, error) {
 	md := map[string]any{}
 	for k, v := range current.Metadata {
 		md[k] = v
@@ -247,10 +308,10 @@ func (b *MemoryLakeBackend) upsertTopicKeyFact(factID string, p store.AddObserva
 	md[metaObsID] = contentHash(p.Content)
 	md[metaRev] = revisionFromMetadata(current.Metadata) + 1
 
-	if _, err := b.patchFact(factID, map[string]any{"fact": p.Content, "metadata": md}); err != nil {
+	if _, err := b.patchFact(current.ID, map[string]any{"fact": p.Content, "metadata": md}); err != nil {
 		return 0, err
 	}
-	return b.idmap.IntFor(factID), nil
+	return b.idmap.IntFor(current.ID), nil
 }
 
 // GetObservation resolves the int64 id through the IDMap to a MemoryLake fact
@@ -318,6 +379,26 @@ func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservatio
 	if err != nil {
 		return nil, err
 	}
+
+	// If this update changed the fact's scope and/or topic_key, its
+	// project+scope+topic_key identity may no longer match whatever
+	// project+scope+topic_key the TopicIndex filed it under (that project
+	// isn't itself recoverable from fact metadata — see RemoveByFactID's doc
+	// comment — so the exact old key can't be recomputed here). Purge any
+	// entry pointing at this fact so a later save using the OLD
+	// scope/topic_key can never upsert-PATCH into this now-reassigned fact; a
+	// save using the NEW scope/topic_key simply misses and re-establishes its
+	// own entry via the normal append path (task-12 hardening brief C2). This
+	// purge is best-effort for the same reason as DeleteObservation's: the
+	// PATCH above already succeeded, and isValidTopicKeyHit's scope/topic_key
+	// comparison (C1) independently self-heals a stale pointer even if this
+	// purge fails to persist.
+	if p.Scope != nil || p.TopicKey != nil {
+		if _, rmErr := b.topics.RemoveByFactID(factID); rmErr != nil {
+			log.Printf("[memorylake] UpdateObservation: failed to purge stale TopicIndex entry for fact %s: %v", factID, rmErr)
+		}
+	}
+
 	obs := ObservationFromFact(updated)
 	obs.ID = id
 	obs.CreatedAt = updated.CreatedAt
@@ -329,13 +410,30 @@ func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservatio
 // MemoryLake has no hard delete — forget marks the fact expired while retaining
 // it for audit — so the hardDelete flag is intentionally ignored: a hard-delete
 // request degrades to a forget. An id with no fact mapping is a no-op (nil).
+//
+// Once the fact is forgotten, any TopicIndex entry pointing at it is purged
+// (see RemoveByFactID) so a later save with the same project+scope+topic_key
+// can never upsert-PATCH a forgotten fact back into visibility. isValidTopicKeyHit's
+// Expired check (C1) already prevents that outcome on its own even if this
+// purge never ran; removing the pointer here just means most later saves
+// avoid paying for an extra GET+append round trip (task-12 hardening brief
+// C2). The purge is best-effort: it runs after forgetFact has already
+// succeeded, and a failure to persist it does not resurface the C1 data-loss
+// bug (self-healed on the next hit), so it is logged rather than returned as
+// this call's error.
 func (b *MemoryLakeBackend) DeleteObservation(id int64, hardDelete bool) error {
 	_ = hardDelete // MemoryLake only supports soft delete (forget); see doc comment.
 	factID, ok := b.idmap.FactFor(id)
 	if !ok {
 		return nil
 	}
-	return b.forgetFact(factID)
+	if err := b.forgetFact(factID); err != nil {
+		return err
+	}
+	if _, err := b.topics.RemoveByFactID(factID); err != nil {
+		log.Printf("[memorylake] DeleteObservation: failed to purge stale TopicIndex entry for fact %s: %v", factID, err)
+	}
+	return nil
 }
 
 // Search delegates to SearchFacts (Task 8), which handles semantic search plus
@@ -476,6 +574,27 @@ func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*s
 // field).
 const maxFormatContextRecent = 20
 
+// formatContextContentTruncateLen mirrors internal/store's FormatContext,
+// which truncates every observation's content to 300 runes (via its
+// unexported truncate helper) before rendering pinned/recent lines — see
+// internal/store/store.go's FormatContext. internal/store does not export
+// that helper, so truncate below replicates it so MemoryLake-backed projects
+// produce the same shape of context block as SQLite-backed ones (task-12
+// hardening brief I3).
+const formatContextContentTruncateLen = 300
+
+// truncate mirrors internal/store's unexported truncate(s, max): a rune-safe
+// cut to at most max runes, with a literal "..." appended when s was longer.
+// Copied here (not exported by internal/store) — see
+// internal/store/store.go:truncate. Keep in sync if that rule ever changes.
+func truncate(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "..."
+}
+
 // FormatContext renders a human-readable text block of the project's facts,
 // optionally filtered by scope, with pinned facts (metadata["pinned"] == true)
 // listed ahead of the most recent unpinned ones — the same priority order as
@@ -534,7 +653,7 @@ func (b *MemoryLakeBackend) FormatContext(project, scope string) (string, error)
 		out.WriteString("### Pinned\n")
 		for _, f := range pinned {
 			o := ObservationFromFact(f)
-			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, o.Content)
+			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, truncate(o.Content, formatContextContentTruncateLen))
 		}
 		out.WriteString("\n")
 	}
@@ -543,7 +662,7 @@ func (b *MemoryLakeBackend) FormatContext(project, scope string) (string, error)
 		out.WriteString("### Recent Observations\n")
 		for _, f := range recent {
 			o := ObservationFromFact(f)
-			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, o.Content)
+			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, truncate(o.Content, formatContextContentTruncateLen))
 		}
 		out.WriteString("\n")
 	}
