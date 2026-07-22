@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/memorylake"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 // Compile-time assertion that *memorylake.MemoryLakeBackend implements the
@@ -187,4 +190,65 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 
 func warnMemoryLakeFallback(project, step string, err error) {
 	fmt.Fprintf(os.Stderr, "[engram] memorylake: %s for project %q failed, falling back to sqlite: %v\n", step, project, err)
+}
+
+// buildRoutingSelector loads the MemoryLake config + per-project enablement
+// list and returns a BackendSelector wired the same way `engram mcp` (cmdMCP)
+// wires it: every project resolves to sqlite unless explicitly enabled.
+// Loading failures are non-fatal — an unreadable/missing enablement file just
+// means no project is enabled yet (sqlite-only), matching cmdMCP's behavior.
+//
+// This is the single place `engram save`, `engram search`, and `engram serve`
+// (HTTP) assemble their selector from, so all four interfaces (CLI save/
+// search, MCP, HTTP) route enabled projects to MemoryLake identically —
+// eliminating the split-brain where only `engram mcp` honored enablement.
+func buildRoutingSelector(sqlite mcp.MemoryBackend) mcp.BackendSelector {
+	mlCfg := loadMemorylakeConfig()
+	enab, err := loadMemorylakeEnablement(memorylake.DefaultEnablementPath())
+	if err != nil {
+		log.Printf("[engram] memorylake: failed to load enablement list (continuing with sqlite-only): %v", err)
+		enab = &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{}}
+	}
+	return NewRoutingSelector(sqlite, mlCfg, enab)
+}
+
+// resolveCLIRoutingProject determines which project a CLI save/search call
+// should route on: the explicit --project flag when given, otherwise the
+// cwd-detected project (mirroring how `engram mcp` resolves an implicit
+// project — see resolveReadProject / resolveSaveWriteProject in
+// internal/mcp/mcp.go). This is ONLY used to pick a backend; it does not
+// change what project value is stored on the observation or used as a search
+// filter (those stay exactly as parsed from flags, preserving today's
+// behavior byte-for-byte when the resolved project is not MemoryLake-enabled).
+func resolveCLIRoutingProject(flagProject string) string {
+	if p := strings.TrimSpace(flagProject); p != "" {
+		return p
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return detectProject(cwd)
+}
+
+// backendSearch runs a search against the resolved backend b. When b is the
+// local sqlite *store.Store, it goes through the overridable storeSearch hook
+// so existing test stubbing (main_extra_test.go) keeps working unchanged; any
+// other backend (a genuine MemoryLake backend) is called directly through the
+// mcp.MemoryBackend interface.
+func backendSearch(b mcp.MemoryBackend, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
+	if ss, ok := b.(*store.Store); ok {
+		return storeSearch(ss, query, opts)
+	}
+	return b.Search(query, opts)
+}
+
+// backendAddObservation mirrors backendSearch for AddObservation: sqlite goes
+// through the overridable storeAddObservation hook, everything else (a
+// genuine MemoryLake backend) is called directly.
+func backendAddObservation(b mcp.MemoryBackend, p store.AddObservationParams) (int64, error) {
+	if ss, ok := b.(*store.Store); ok {
+		return storeAddObservation(ss, p)
+	}
+	return b.AddObservation(p)
 }

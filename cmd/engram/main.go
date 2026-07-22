@@ -759,6 +759,13 @@ func cmdServe(cfg store.Config) {
 		return llmBuildPrompt(a, b)
 	})
 
+	// Route enabled projects to MemoryLake for the subset of endpoints
+	// internal/server can route (see Server.selector's doc) — the same
+	// selector `engram mcp` and `engram save`/`engram search` use, so the
+	// OpenCode/Pi HTTP session-tracking path no longer split-brains against
+	// an enabled project.
+	srv.SetBackendSelector(buildRoutingSelector(s))
+
 	// Graceful shutdown context — cancelled on SIGINT/SIGTERM.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -912,14 +919,10 @@ func cmdMCP(cfg store.Config) {
 	// sqlite store `s` — the same store that would otherwise be used
 	// directly (StaticSelector-style). MemoryLake stays strictly opt-in per
 	// project; a missing/unreadable enablement file just means no project
-	// is enabled yet, not a startup failure.
-	mlCfg := loadMemorylakeConfig()
-	enab, err := loadMemorylakeEnablement(memorylake.DefaultEnablementPath())
-	if err != nil {
-		log.Printf("[engram] memorylake: failed to load enablement list (continuing with sqlite-only): %v", err)
-		enab = &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{}}
-	}
-	sel := NewRoutingSelector(s, mlCfg, enab)
+	// is enabled yet, not a startup failure. buildRoutingSelector is the same
+	// helper `engram save`/`engram search`/`engram serve` use, so all
+	// interfaces route enabled projects identically.
+	sel := buildRoutingSelector(s)
 	mcpSrv := newMCPServerWithSelector(sel, mcpCfg, allowlist)
 
 	if err := serveMCP(mcpSrv); err != nil {
@@ -994,7 +997,14 @@ func cmdSearch(cfg store.Config) {
 	}
 	defer s.Close()
 
-	results, err := storeSearch(s, query, opts)
+	// Route to MemoryLake when the target project (--project, else cwd
+	// detection) is enabled; otherwise backend is `s` itself and behavior is
+	// byte-for-byte unchanged from before routing existed. This is the same
+	// selector `engram mcp` and `engram serve` use.
+	sel := buildRoutingSelector(s)
+	backend := sel(resolveCLIRoutingProject(opts.Project))
+
+	results, err := backendSearch(backend, query, opts)
 	if err != nil {
 		fatal(err)
 		return
@@ -1062,6 +1072,13 @@ func cmdSave(cfg store.Config) {
 	}
 	defer s.Close()
 
+	// Route to MemoryLake when the target project (--project, else cwd
+	// detection) is enabled; otherwise backend is `s` itself and behavior is
+	// byte-for-byte unchanged from before routing existed. This is the same
+	// selector `engram mcp` and `engram serve` use.
+	sel := buildRoutingSelector(s)
+	backend := sel(resolveCLIRoutingProject(project))
+
 	sessionID := "manual-save"
 	if project != "" {
 		sessionID = "manual-save-" + project
@@ -1070,10 +1087,10 @@ func cmdSave(cfg store.Config) {
 	if err != nil {
 		fatal(err)
 	}
-	if err := s.CreateSession(sessionID, project, cwd); err != nil {
+	if err := backend.CreateSession(sessionID, project, cwd); err != nil {
 		fatal(err)
 	}
-	id, err := storeAddObservation(s, store.AddObservationParams{
+	id, err := backendAddObservation(backend, store.AddObservationParams{
 		SessionID: sessionID,
 		Type:      typ,
 		Title:     title,
