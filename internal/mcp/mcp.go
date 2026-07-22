@@ -60,19 +60,19 @@ type MCPConfig struct {
 
 var suggestTopicKey = store.SuggestTopicKey
 
-// addPromptIfMissing and loadMCPStats intentionally keep a concrete
-// *store.Store parameter (rather than MemoryBackend): both are package-level
-// var seams that existing tests reassign with a *store.Store-typed function
-// literal to inject failures. Widening the parameter type here would break
-// that seam. Call sites resolve the selected MemoryBackend down to a
-// *store.Store via a type assertion before invoking them — always the SQLite
-// backend today, since the default BackendSelector never resolves to
-// anything else.
-var addPromptIfMissing = func(s *store.Store, params store.AddPromptParams) (int64, bool, error) {
+// addPromptIfMissing and loadMCPStats are package-level var seams that
+// existing tests reassign with a function literal to inject failures
+// (TestHandleSavePromptCaptureFailureIsNonFatal,
+// TestHandleStatsReturnsErrorWhenLoaderFails). Both take the MemoryBackend
+// interface — not a concrete *store.Store — so that a MemoryLake-enabled
+// project's backend flows through unchanged instead of requiring a type
+// assertion down to SQLite at the call site: mem_stats and automatic prompt
+// capture now work for any MemoryBackend implementation, not just SQLite.
+var addPromptIfMissing = func(s MemoryBackend, params store.AddPromptParams) (int64, bool, error) {
 	return s.AddPromptIfMissing(params)
 }
 
-var loadMCPStats = func(s *store.Store) (*store.Stats, error) {
+var loadMCPStats = func(s MemoryBackend) (*store.Stats, error) {
 	return s.Stats()
 }
 
@@ -1308,18 +1308,16 @@ func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) s
 
 		if capturePrompt && activity != nil {
 			if prompt, ok := activity.CurrentPrompt(sessionID, project); ok {
-				// addPromptIfMissing is a *store.Store-typed test seam (see its
-				// declaration); resolve the concrete SQLite backend to call it.
-				// Always succeeds today since the default selector never
-				// resolves to anything else.
-				if sqliteStore, ok := s.(*store.Store); ok {
-					if _, _, promptErr := addPromptIfMissing(sqliteStore, store.AddPromptParams{
-						SessionID: sessionID,
-						Content:   prompt,
-						Project:   project,
-					}); promptErr != nil {
-						fmt.Fprintf(os.Stderr, "engram: auto prompt capture error (non-fatal): %v\n", promptErr)
-					}
+				// addPromptIfMissing is a MemoryBackend-typed test seam (see its
+				// declaration) — calling it directly on s means automatic prompt
+				// capture works for MemoryLake-enabled projects too, not just
+				// SQLite.
+				if _, _, promptErr := addPromptIfMissing(s, store.AddPromptParams{
+					SessionID: sessionID,
+					Content:   prompt,
+					Project:   project,
+				}); promptErr != nil {
+					fmt.Fprintf(os.Stderr, "engram: auto prompt capture error (non-fatal): %v\n", promptErr)
 				}
 			}
 		}
@@ -1722,9 +1720,6 @@ func handleContext(sel BackendSelector, cfg MCPConfig, activity *SessionActivity
 // handleStats returns a tool handler function for mem_stats.
 func handleStats(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// mem_stats reports global aggregates (not scoped to one project), so
-		// it always uses the default (project-unaware) backend.
-		s := sel("")
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
@@ -1740,14 +1735,16 @@ func handleStats(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 		}
 
-		// loadMCPStats is a *store.Store-typed test seam (see its declaration);
-		// resolve the concrete SQLite backend to call it. Always succeeds
-		// today since the default selector never resolves to anything else.
-		sqliteStore, ok := s.(*store.Store)
-		if !ok {
-			return mcp.NewToolResultError("mem_stats requires a local SQLite-backed project"), nil
-		}
-		stats, err := loadMCPStats(sqliteStore)
+		// mem_stats loads aggregates from the resolved project's own backend.
+		// For the default SQLite backend, sel(...) always returns the same
+		// shared store regardless of the project name passed in, so this is
+		// byte-for-byte unchanged from before for SQLite projects: still a
+		// global, cross-project aggregate. For a MemoryLake-enabled project,
+		// this routes to that project's own backend so its Stats() (a
+		// MemoryBackend-typed test seam via loadMCPStats — see its
+		// declaration) is used instead of hard-erroring.
+		s := sel(detRes.Project)
+		stats, err := loadMCPStats(s)
 		if err != nil {
 			return mcp.NewToolResultError("Failed to get stats: " + err.Error()), nil
 		}
@@ -1787,23 +1784,27 @@ func handleDoctor(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		project := detRes.Project
 		project, _ = store.NormalizeProject(project)
 		s = sel(project) // re-resolve now that the target project is known
-		// diagnostic.Scope needs a concrete *store.Store (it runs direct SQL
-		// checks that are not part of MemoryBackend). Always succeeds today
-		// since the default selector never resolves to anything else.
-		sqliteStore, ok := s.(*store.Store)
-		if !ok {
-			return mcp.NewToolResultError("mem_doctor requires a local SQLite-backed project"), nil
-		}
-		runner := diagnostic.NewRunner()
-		scope := diagnostic.Scope{Store: sqliteStore, Project: project, Now: time.Now()}
+
 		var report diagnostic.Report
-		if strings.TrimSpace(check) != "" {
-			report, err = runner.RunOne(ctx, scope, check)
+		// diagnostic.Scope needs a concrete *store.Store (it runs direct SQL
+		// checks that are not part of MemoryBackend). A project routed to a
+		// backend that isn't SQLite (e.g. a MemoryLake-enabled project)
+		// cannot run those checks, so mem_doctor substitutes a lightweight
+		// MemoryBackend-only connectivity/latency suite (runMemoryLakeDoctor)
+		// instead of hard-erroring. The SQLite path below is unchanged.
+		if sqliteStore, ok := s.(*store.Store); ok {
+			runner := diagnostic.NewRunner()
+			scope := diagnostic.Scope{Store: sqliteStore, Project: project, Now: time.Now()}
+			if strings.TrimSpace(check) != "" {
+				report, err = runner.RunOne(ctx, scope, check)
+			} else {
+				report, err = runner.RunAll(ctx, scope)
+			}
+			if err != nil {
+				report = diagnostic.ErrorReport(project, err)
+			}
 		} else {
-			report, err = runner.RunAll(ctx, scope)
-		}
-		if err != nil {
-			report = diagnostic.ErrorReport(project, err)
+			report = runMemoryLakeDoctor(ctx, s, project, check)
 		}
 		out, marshalErr := jsonMarshal(report)
 		if marshalErr != nil {
