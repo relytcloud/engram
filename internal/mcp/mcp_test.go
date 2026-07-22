@@ -149,7 +149,7 @@ func TestHandlePinAndUnpinObservation(t *testing.T) {
 	}
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": float64(id)}}}
-	res, err := handlePin(StaticSelector(s), true)(context.Background(), req)
+	res, err := handlePin(StaticSelector(s), MCPConfig{}, true)(context.Background(), req)
 	if err != nil {
 		t.Fatalf("pin handler: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestHandlePinAndUnpinObservation(t *testing.T) {
 		t.Fatalf("pin result should expose pinned=true, got %q", callResultText(t, res))
 	}
 
-	res, err = handlePin(StaticSelector(s), false)(context.Background(), req)
+	res, err = handlePin(StaticSelector(s), MCPConfig{}, false)(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unpin handler: %v", err)
 	}
@@ -876,7 +876,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("expected search result pinned=true, got %v", firstResult["pinned"])
 	}
 
-	update := handleUpdate(StaticSelector(s))
+	update := handleUpdate(StaticSelector(s), MCPConfig{})
 	updateReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":    float64(obsID),
 		"title": "Fix parser panic",
@@ -901,7 +901,7 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 		t.Fatalf("unexpected get error: %s", callResultText(t, getRes))
 	}
 
-	deleteHandler := handleDelete(StaticSelector(s))
+	deleteHandler := handleDelete(StaticSelector(s), MCPConfig{})
 	delReq := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":          float64(obsID),
 		"hard_delete": true,
@@ -1180,7 +1180,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected no memories response")
 	}
 
-	update := handleUpdate(StaticSelector(s))
+	update := handleUpdate(StaticSelector(s), MCPConfig{})
 	missingIDRes, err := update(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("update missing id error: %v", err)
@@ -1198,7 +1198,7 @@ func TestMCPHandlersErrorBranches(t *testing.T) {
 		t.Fatalf("expected update no fields to return tool error")
 	}
 
-	deleteHandler := handleDelete(StaticSelector(s))
+	deleteHandler := handleDelete(StaticSelector(s), MCPConfig{})
 	delMissingIDRes, err := deleteHandler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{}}})
 	if err != nil {
 		t.Fatalf("delete missing id error: %v", err)
@@ -1264,7 +1264,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected search to return tool error when store is closed")
 	}
 
-	updateRes, err := handleUpdate(StaticSelector(s))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
+	updateRes, err := handleUpdate(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0, "title": "new"}}})
 	if err != nil {
 		t.Fatalf("closed store update call: %v", err)
 	}
@@ -1272,7 +1272,7 @@ func TestMCPHandlersReturnErrorsWhenStoreClosed(t *testing.T) {
 		t.Fatalf("expected update to return tool error when store is closed")
 	}
 
-	deleteRes, err := handleDelete(StaticSelector(s))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
+	deleteRes, err := handleDelete(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"id": 1.0}}})
 	if err != nil {
 		t.Fatalf("closed store delete call: %v", err)
 	}
@@ -1461,7 +1461,7 @@ func TestHandleUpdateAcceptsAllOptionalFields(t *testing.T) {
 		t.Fatalf("add observation: %v", err)
 	}
 
-	res, err := handleUpdate(StaticSelector(s))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+	res, err := handleUpdate(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"id":        float64(id),
 		"title":     "Updated",
 		"content":   "Updated content",

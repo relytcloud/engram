@@ -421,7 +421,7 @@ Examples:
 					mcp.Description("New topic key (normalized internally)"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleUpdate(sel)),
+			queuedWriteHandler(writeQueue, handleUpdate(sel, cfg)),
 		)
 	}
 
@@ -490,7 +490,7 @@ Examples:
 					mcp.Description("If true, permanently deletes the observation"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleDelete(sel)),
+			queuedWriteHandler(writeQueue, handleDelete(sel, cfg)),
 		)
 	}
 
@@ -538,7 +538,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithNumber("id", mcp.Required(), mcp.Description("Observation ID to pin")),
 			),
-			handlePin(sel, true),
+			handlePin(sel, cfg, true),
 		)
 	}
 	if shouldRegister("mem_unpin", allowlist) {
@@ -553,7 +553,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithNumber("id", mcp.Required(), mcp.Description("Observation ID to unpin")),
 			),
-			handlePin(sel, false),
+			handlePin(sel, cfg, false),
 		)
 	}
 
@@ -949,7 +949,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 					mcp.Description("Your model identifier for provenance (e.g. \"claude-haiku-4-5\")"),
 				),
 			),
-			handleCompare(sel, activity),
+			handleCompare(sel, cfg, activity),
 		)
 	}
 }
@@ -1175,15 +1175,18 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 	}
 }
 
-func handlePin(sel BackendSelector, pinned bool) server.ToolHandlerFunc {
+func handlePin(sel BackendSelector, cfg MCPConfig, pinned bool) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
-		// Pin/unpin is addressed purely by observation id — no project is
-		// known or needed to pick a backend.
-		s := sel("")
+		// Pin/unpin is addressed purely by observation id, but the id may
+		// belong to a MemoryLake-enabled project — route through the
+		// cwd/process-detected project's backend (resolveByIDBackend) rather
+		// than always the project-unaware default. See resolveByIDBackend's
+		// doc comment for why this is safe and SQLite-behavior-neutral.
+		s, _, _ := resolveByIDBackend(sel, cfg)
 
 		var err error
 		if pinned {
@@ -1423,15 +1426,18 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 	}
 }
 
-func handleUpdate(sel BackendSelector) server.ToolHandlerFunc {
+func handleUpdate(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
-		// Update is addressed purely by observation id — no project is known
-		// or needed to pick a backend.
-		s := sel("")
+		// Update is addressed purely by observation id, but the id may belong
+		// to a MemoryLake-enabled project — route through the cwd/process-
+		// detected project's backend (resolveByIDBackend) rather than always
+		// the project-unaware default. See resolveByIDBackend's doc comment
+		// for why this is safe and SQLite-behavior-neutral.
+		s, detRes, detErr := resolveByIDBackend(sel, cfg)
 
 		update := store.UpdateObservationParams{}
 		if v, ok := req.GetArguments()["title"].(string); ok {
@@ -1469,8 +1475,9 @@ func handleUpdate(sel BackendSelector) server.ToolHandlerFunc {
 			msg += fmt.Sprintf("\n⚠ WARNING: Content was truncated from %d to %d chars. Consider splitting into smaller observations.", contentLen, s.MaxObservationLength())
 		}
 
-		// Auto-detect for envelope; tolerant — don't fail update on resolution error
-		detRes, detErr := resolveWriteProject()
+		// Tolerant for the envelope: don't fail an already-successful update
+		// on resolution error (detErr was already used to pick a fallback
+		// backend above).
 		if detErr != nil {
 			// Still return success for the update itself.
 			return mcp.NewToolResultText(msg), nil
@@ -1582,15 +1589,18 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	}
 }
 
-func handleDelete(sel BackendSelector) server.ToolHandlerFunc {
+func handleDelete(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
-		// Delete is addressed purely by observation id — no project is known
-		// or needed to pick a backend.
-		s := sel("")
+		// Delete is addressed purely by observation id, but the id may belong
+		// to a MemoryLake-enabled project — route through the cwd/process-
+		// detected project's backend (resolveByIDBackend) rather than always
+		// the project-unaware default. See resolveByIDBackend's doc comment
+		// for why this is safe and SQLite-behavior-neutral.
+		s, _, _ := resolveByIDBackend(sel, cfg)
 
 		hardDelete := boolArg(req, "hard_delete", false)
 		if err := s.DeleteObservation(id, hardDelete); err != nil {
@@ -1820,9 +1830,6 @@ func handleDoctor(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 
 func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Timeline is addressed by observation_id; project is only used for
-		// the response envelope, so the default backend is used throughout.
-		s := sel("")
 		observationID := int64(intArg(req, "observation_id", 0))
 		if observationID == 0 {
 			return mcp.NewToolResultError("observation_id is required"), nil
@@ -1831,7 +1838,14 @@ func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		after := intArg(req, "after", 5)
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
-		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
+		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314).
+		// Timeline is addressed by observation_id, but that id may belong to a
+		// MemoryLake-enabled project, so the resolved project also selects the
+		// backend below (not always the project-unaware default) — otherwise
+		// a MemoryLake observation id could never be found. factForID's
+		// project guard (see resolveByIDBackend's doc comment on the sibling
+		// by-id handlers) means a mismatched id still just reads as
+		// not-found, never a cross-project leak.
 		detRes, err := resolveReadProjectWithProcessOverride(sel, projectOverride, cfg.DefaultProject)
 		if err != nil {
 			var upe *unknownProjectError
@@ -1843,6 +1857,7 @@ func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 		}
+		s := sel(detRes.Project)
 
 		result, err := s.Timeline(observationID, before, after)
 		if err != nil {
@@ -1890,23 +1905,26 @@ func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 // handleGetObservation returns a tool handler function for mem_get_observation.
 func handleGetObservation(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Get-by-id is addressed purely by observation id — no project is
-		// known or needed to pick a backend.
-		s := sel("")
 		id := int64(intArg(req, "id", 0))
 		if id == 0 {
 			return mcp.NewToolResultError("id is required"), nil
 		}
+
+		// Get-by-id has no project argument, but the id may belong to a
+		// MemoryLake-enabled project — route through the cwd/process-detected
+		// project's backend (resolveByIDBackend) rather than always the
+		// project-unaware default, so those ids resolve. See
+		// resolveByIDBackend's doc comment for why this is safe and
+		// SQLite-behavior-neutral.
+		s, detRes, detErr := resolveByIDBackend(sel, cfg)
 
 		obs, err := s.GetObservation(id)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
 		}
 
-		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
-		// override possible for get-by-ID. Tolerant: don't fail the fetch on
-		// resolution error; degrade to plain text.
-		detRes, detErr := resolveReadProjectWithProcessOverride(sel, "", cfg.DefaultProject)
+		// Tolerant: don't fail the fetch on resolution error; degrade to
+		// plain text (detErr checked below, after formatting the result).
 
 		obsProject := ""
 		if obs.Project != nil {
@@ -2208,10 +2226,15 @@ func handleJudge(sel BackendSelector, activity *SessionActivity) server.ToolHand
 // "Persist a semantic verdict you have already judged externally into Engram.
 // Accepts int IDs for both observations, resolves them to sync_ids, then
 // calls JudgeBySemantic. Returns the persisted relation's sync_id."
-func handleCompare(sel BackendSelector, _ *SessionActivity) server.ToolHandlerFunc {
+func handleCompare(sel BackendSelector, cfg MCPConfig, _ *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		// Compare resolves both sides by observation id, not project.
-		s := sel("")
+		// Compare resolves both sides by observation id, not an explicit
+		// project argument — but the pair may live in a MemoryLake-enabled
+		// project, so route through the cwd/process-detected project's
+		// backend (resolveByIDBackend) rather than always the project-
+		// unaware default. See resolveByIDBackend's doc comment for why this
+		// is safe and SQLite-behavior-neutral.
+		s, _, _ := resolveByIDBackend(sel, cfg)
 		// --- required numeric IDs ---
 		rawA, okA := req.GetArguments()["memory_id_a"].(float64)
 		rawB, okB := req.GetArguments()["memory_id_b"].(float64)
@@ -2841,6 +2864,41 @@ func resolveReadProjectWithProcessOverride(sel BackendSelector, override, defaul
 		}
 	}
 	return resolveReadProject(sel, override)
+}
+
+// resolveByIDBackend resolves the backend used by by-id mem_* tools that have
+// no project argument of their own (mem_get_observation, mem_update,
+// mem_delete, mem_pin/mem_unpin, mem_compare). Their observation/relation ids
+// may belong to a MemoryLake-enabled project rather than the shared local
+// SQLite store, so — like mem_search/mem_save — routing must go through the
+// cwd/process-detected project (resolveReadProjectWithProcessOverride, the
+// same helper handleSearch/handleContext use), not sel(""). sel("") always
+// resolves to the plain, project-unaware default backend and can never see a
+// MemoryLake-enabled project's observations.
+//
+// Safety: this only affects WHICH backend answers the id lookup, never
+// whether it can succeed against the wrong project. Every affected
+// MemoryLakeBackend method resolves an id through factForID first, which
+// binds the id to the project it was minted for; an id belonging to a
+// different project reads as not-found on the wrong backend rather than
+// leaking (see memorylake.MemoryLakeBackend.factForID). So misdetecting the
+// project here can at worst turn a real hit into a false not-found — it can
+// never return or mutate another project's data.
+//
+// When detection fails (ambiguous cwd, detection error, ...) this degrades to
+// the project-unaware default backend (sel("")) instead of failing the call
+// outright — no panic, no new error surfaced. For a cwd whose project is not
+// MemoryLake-enabled, sel("") and sel(detected-project) resolve to the exact
+// same sqlite instance (see NewRoutingSelector: a project absent from, or not
+// enabled in, the enablement list always resolves to sqlite), so both the
+// success path and this degrade path are behavior-neutral for SQLite
+// projects — existing mem_* behavior is preserved byte-for-byte.
+func resolveByIDBackend(sel BackendSelector, cfg MCPConfig) (MemoryBackend, projectpkg.DetectionResult, error) {
+	detRes, err := resolveReadProjectWithProcessOverride(sel, "", cfg.DefaultProject)
+	if err != nil {
+		return sel(""), detRes, err
+	}
+	return sel(detRes.Project), detRes, nil
 }
 
 // resolveReadProject validates an explicit project override for existence.

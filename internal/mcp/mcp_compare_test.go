@@ -56,7 +56,7 @@ func TestHandleCompare_HappyPath(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"memory_id_a": float64(idA),
 		"memory_id_b": float64(idB),
@@ -92,7 +92,7 @@ func TestHandleCompare_NotConflict_NoRow(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"memory_id_a": float64(idA),
 		"memory_id_b": float64(idB),
@@ -128,7 +128,7 @@ func TestHandleCompare_MissingMemoryIDB(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, _ := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"memory_id_a": float64(idA),
 		// memory_id_b omitted
@@ -152,7 +152,7 @@ func TestHandleCompare_InvalidRelation(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"memory_id_a": float64(idA),
 		"memory_id_b": float64(idB),
@@ -176,7 +176,7 @@ func TestHandleCompare_NonExistentObservation(t *testing.T) {
 	s := newMCPTestStore(t)
 	_, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"memory_id_a": float64(9999),
 		"memory_id_b": float64(idB),
@@ -203,7 +203,7 @@ func TestHandleCompare_Idempotency(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// First call: supersedes
 	req1 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -257,7 +257,7 @@ func TestHandleCompare_ModelOptional(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"memory_id_a": float64(idA),
 		"memory_id_b": float64(idB),
