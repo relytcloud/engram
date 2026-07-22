@@ -888,7 +888,7 @@ func (b *MemoryLakeBackend) RecentSessions(project string, limit int) ([]store.S
 // passive.go) and ObservationsNeedingReview/MarkReviewed (see review.go) are
 // implemented in their own files.
 
-// ─── Tier B: projects / relations (first-cut) ────────────────────────────────
+// ─── Tier B: projects ─────────────────────────────────────────────────────────
 
 // MergeProjects is unsupported: MemoryLake owns project identity and engram
 // must not silently migrate facts across MemoryLake projects.
@@ -896,29 +896,9 @@ func (b *MemoryLakeBackend) MergeProjects(sources []string, canonical string) (*
 	return nil, errors.New("MemoryLake backend does not support merging projects")
 }
 
-// FindCandidates is a first-cut no-op returning no candidates.
-// TODO(spec §6.1): approximate via the V3 conflicts API.
-func (b *MemoryLakeBackend) FindCandidates(savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
-	return nil, nil
-}
-
-// GetRelationsForObservations is a first-cut no-op returning an empty map.
-// TODO(spec §6.1): map from the V3 conflicts API.
-func (b *MemoryLakeBackend) GetRelationsForObservations(syncIDs []string) (map[string]store.ObservationRelations, error) {
-	return map[string]store.ObservationRelations{}, nil
-}
-
-// JudgeRelation is a first-cut no-op returning no relation.
-// TODO(spec §6.1): map to the V3 conflict resolve endpoint.
-func (b *MemoryLakeBackend) JudgeRelation(p store.JudgeRelationParams) (*store.Relation, error) {
-	return nil, nil
-}
-
-// JudgeBySemantic is a first-cut no-op returning an empty verdict.
-// TODO(spec §6.1): map to the V3 conflict resolve endpoint.
-func (b *MemoryLakeBackend) JudgeBySemantic(p store.JudgeBySemanticParams) (string, error) {
-	return "", nil
-}
+// FindCandidates, GetRelationsForObservations, JudgeRelation and
+// JudgeBySemantic (the relation/conflict surface) are implemented in
+// conflict.go, mapped onto the V3 memory-conflict API (task 14).
 
 // ─── Fact HTTP helpers ───────────────────────────────────────────────────────
 
