@@ -524,7 +524,7 @@ func TestHandleSavePromptCaptureFailureIsNonFatal(t *testing.T) {
 	h := handleSave(StaticSelector(s), MCPConfig{}, activity)
 
 	originalAddPromptIfMissing := addPromptIfMissing
-	addPromptIfMissing = func(*store.Store, store.AddPromptParams) (int64, bool, error) {
+	addPromptIfMissing = func(MemoryBackend, store.AddPromptParams) (int64, bool, error) {
 		return 0, false, errors.New("forced prompt capture failure")
 	}
 	t.Cleanup(func() { addPromptIfMissing = originalAddPromptIfMissing })
@@ -1500,7 +1500,7 @@ func TestHandleContextWithSessionOnlyUsesNoneProjects(t *testing.T) {
 
 func TestHandleStatsReturnsErrorWhenLoaderFails(t *testing.T) {
 	prev := loadMCPStats
-	loadMCPStats = func(s *store.Store) (*store.Stats, error) {
+	loadMCPStats = func(s MemoryBackend) (*store.Stats, error) {
 		return nil, errors.New("stats unavailable")
 	}
 	t.Cleanup(func() {
