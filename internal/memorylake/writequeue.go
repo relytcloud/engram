@@ -3,6 +3,7 @@ package memorylake
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"net/url"
 	"time"
 
@@ -101,16 +102,27 @@ func (c *Client) listFacts(ws, projID string) ([]Fact, error) {
 	return out.Items, nil
 }
 
+// maxListAllFactsPages bounds how many pages listAllFacts will follow via
+// continuation_token before giving up. At the fixed page_size=200 this caps a
+// single call at 200,000 facts — generously beyond any project this backend
+// is designed for (see spec §11.5) — while guaranteeing the loop always
+// terminates even against a misbehaving/malicious server that never stops
+// returning a continuation_token. Mirrors BackfillFacts' bounded-wait
+// posture: hitting the cap is not treated as an error, it just stops early
+// and returns whatever was collected so far (task-12 hardening brief I2).
+const maxListAllFactsPages = 1000
+
 // listAllFacts fetches every fact MemoryLake has recorded for project projID
 // within workspace ws, following continuation_token across pages until the
-// server stops returning one. Used by read/aggregate paths that must count or
-// enumerate the whole project (Stats, CountObservationsForProject, Timeline,
-// FormatContext) rather than the bounded, single-page listFacts used by the
-// write path.
+// server stops returning one or maxListAllFactsPages is reached (see its doc
+// comment) — whichever comes first. Used by read/aggregate paths that must
+// count or enumerate the whole project (Stats, CountObservationsForProject,
+// Timeline, FormatContext) rather than the bounded, single-page listFacts
+// used by the write path.
 func (c *Client) listAllFacts(ws, projID string) ([]Fact, error) {
 	var all []Fact
 	token := ""
-	for {
+	for page := 0; page < maxListAllFactsPages; page++ {
 		path := "/api/v3/workspaces/" + ws + "/projects/" + projID + "/memories/facts?page_size=200"
 		if token != "" {
 			path += "&continuation_token=" + url.QueryEscape(token)
@@ -124,9 +136,13 @@ func (c *Client) listAllFacts(ws, projID string) ([]Fact, error) {
 		}
 		all = append(all, out.Items...)
 		if out.ContinuationToken == "" {
-			break
+			return all, nil
 		}
 		token = out.ContinuationToken
+		if page == maxListAllFactsPages-1 {
+			log.Printf("[memorylake] listAllFacts: reached maxListAllFactsPages=%d for project %s (ws %s); server keeps returning a continuation_token, stopping with %d facts collected so far",
+				maxListAllFactsPages, projID, ws, len(all))
+		}
 	}
 	return all, nil
 }
