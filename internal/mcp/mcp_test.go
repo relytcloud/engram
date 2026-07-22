@@ -5373,7 +5373,7 @@ func TestResolveReadProject_WithOverride(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	res, err := resolveReadProject(s, "known-project")
+	res, err := resolveReadProject(StaticSelector(s), "known-project")
 	if err != nil {
 		t.Fatalf("resolveReadProject: %v", err)
 	}
@@ -5393,7 +5393,7 @@ func TestResolveReadProject_UnknownOverride(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	_, err := resolveReadProject(s, "does-not-exist")
+	_, err := resolveReadProject(StaticSelector(s), "does-not-exist")
 	if err == nil {
 		t.Fatal("expected error for unknown project override")
 	}
@@ -5861,7 +5861,7 @@ func TestResolveReadProject_NormalizesOverride(t *testing.T) {
 	t.Chdir(dir)
 
 	// Pass mixed-case and padded override — must normalize to "myapp".
-	res, err := resolveReadProject(s, "  MyApp  ")
+	res, err := resolveReadProject(StaticSelector(s), "  MyApp  ")
 	if err != nil {
 		t.Fatalf("resolveReadProject with mixed-case override: %v", err)
 	}
@@ -6840,7 +6840,7 @@ func TestProcessOverrideReadResolutionBeforeCWD(t *testing.T) {
 	t.Chdir(parent)
 
 	s := newMCPTestStore(t)
-	res, err := resolveReadProjectWithProcessOverride(s, "", "Trusted Project")
+	res, err := resolveReadProjectWithProcessOverride(StaticSelector(s), "", "Trusted Project")
 	if err != nil {
 		t.Fatalf("resolve read with process override: %v", err)
 	}
@@ -6851,7 +6851,7 @@ func TestProcessOverrideReadResolutionBeforeCWD(t *testing.T) {
 
 func TestProcessOverrideReadKeepsPerCallValidation(t *testing.T) {
 	s := newMCPTestStore(t)
-	_, err := resolveReadProjectWithProcessOverride(s, "missing-project", "trusted-project")
+	_, err := resolveReadProjectWithProcessOverride(StaticSelector(s), "missing-project", "trusted-project")
 	if err == nil {
 		t.Fatal("expected unknown project error for per-call override")
 	}

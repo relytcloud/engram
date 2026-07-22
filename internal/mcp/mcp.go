@@ -1016,7 +1016,7 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 			detRes = projectpkg.DetectionResult{Source: projectpkg.SourceAllProjects}
 		} else {
 			// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
-			res, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+			res, err := resolveReadProjectWithProcessOverride(sel, projectOverride, cfg.DefaultProject)
 			if err != nil {
 				var upe *unknownProjectError
 				if errors.As(err, &upe) {
@@ -1492,7 +1492,7 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 			detRes := projectpkg.DetectionResult{Project: projectFilter, Source: projectpkg.SourceAllProjects}
 			if strings.TrimSpace(projectFilter) != "" {
 				var err error
-				detRes, err = resolveReadProject(s, projectFilter)
+				detRes, err = resolveReadProject(sel, projectFilter)
 				if err != nil {
 					var upe *unknownProjectError
 					if errors.As(err, &upe) {
@@ -1504,7 +1504,7 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 					return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 				}
 				projectFilter = detRes.Project
-			} else if res, err := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject); err == nil {
+			} else if res, err := resolveReadProjectWithProcessOverride(sel, "", cfg.DefaultProject); err == nil {
 				detRes = res
 				detRes.Source = projectpkg.SourceAllProjects
 			}
@@ -1570,7 +1570,7 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 			if obs.ReviewAfter != nil {
 				extra["review_after"] = *obs.ReviewAfter
 			}
-			detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+			detRes, detErr := resolveReadProjectWithProcessOverride(sel, "", cfg.DefaultProject)
 			msg := fmt.Sprintf("Memory marked reviewed: #%d %q (%s)", obs.ID, obs.Title, obs.Type)
 			if detErr != nil {
 				out, _ := jsonMarshal(map[string]any{"result": msg, "id": obs.ID, "sync_id": obs.SyncID, "state": obs.State()})
@@ -1664,7 +1664,7 @@ func handleContext(sel BackendSelector, cfg MCPConfig, activity *SessionActivity
 		scope, _ := req.GetArguments()["scope"].(string)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+		detRes, err := resolveReadProjectWithProcessOverride(sel, projectOverride, cfg.DefaultProject)
 		if err != nil {
 			var upe *unknownProjectError
 			if errors.As(err, &upe) {
@@ -1728,7 +1728,7 @@ func handleStats(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+		detRes, err := resolveReadProjectWithProcessOverride(sel, projectOverride, cfg.DefaultProject)
 		if err != nil {
 			var upe *unknownProjectError
 			if errors.As(err, &upe) {
@@ -1776,7 +1776,7 @@ func handleDoctor(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		s := sel("")
 		projectOverride, _ := req.GetArguments()["project"].(string)
 		check, _ := req.GetArguments()["check"].(string)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+		detRes, err := resolveReadProjectWithProcessOverride(sel, projectOverride, cfg.DefaultProject)
 		if err != nil {
 			var upe *unknownProjectError
 			if errors.As(err, &upe) {
@@ -1831,7 +1831,7 @@ func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		projectOverride, _ := req.GetArguments()["project"].(string)
 
 		// Resolve project: validate override or auto-detect (REQ-310, REQ-311, REQ-314)
-		detRes, err := resolveReadProjectWithProcessOverride(s, projectOverride, cfg.DefaultProject)
+		detRes, err := resolveReadProjectWithProcessOverride(sel, projectOverride, cfg.DefaultProject)
 		if err != nil {
 			var upe *unknownProjectError
 			if errors.As(err, &upe) {
@@ -1905,7 +1905,7 @@ func handleGetObservation(sel BackendSelector, cfg MCPConfig) server.ToolHandler
 		// Resolve project from process override/cwd (REQ-310, REQ-314). No per-call
 		// override possible for get-by-ID. Tolerant: don't fail the fetch on
 		// resolution error; degrade to plain text.
-		detRes, detErr := resolveReadProjectWithProcessOverride(s, "", cfg.DefaultProject)
+		detRes, detErr := resolveReadProjectWithProcessOverride(sel, "", cfg.DefaultProject)
 
 		obsProject := ""
 		if obs.Project != nil {
@@ -2833,21 +2833,33 @@ func resolveAmbiguousChoicePath(ambiguousParent, choice string) string {
 // If override is empty, falls back to auto-detection from cwd.
 // JW2: normalizes the override (lowercase+trim) before ProjectExists lookup so
 // that e.g. "MyApp" and "  myapp  " both resolve to the stored "myapp".
-func resolveReadProjectWithProcessOverride(s MemoryBackend, override, defaultProject string) (projectpkg.DetectionResult, error) {
+func resolveReadProjectWithProcessOverride(sel BackendSelector, override, defaultProject string) (projectpkg.DetectionResult, error) {
 	if strings.TrimSpace(override) == "" {
 		if res, ok := processProjectResult(defaultProject); ok {
 			return res, nil
 		}
 	}
-	return resolveReadProject(s, override)
+	return resolveReadProject(sel, override)
 }
 
-func resolveReadProject(s MemoryBackend, override string) (projectpkg.DetectionResult, error) {
+// resolveReadProject validates an explicit project override for existence.
+//
+// The existence check must run against the *target project's* backend, not a
+// project-unaware default. Callers pass sel (the routing selector) rather than
+// a single already-resolved backend so the check can be issued to sel(project)
+// once the override is normalized. A MemoryLake-enabled project has no row in
+// the local SQLite store, so validating it against the sqlite backend would
+// wrongly report unknown_project; resolving through sel routes the check to
+// that project's MemoryLakeBackend (whose ProjectExists reports true). Projects
+// that are not MemoryLake-enabled still resolve to sqlite, so their validation
+// — and error behavior — is unchanged.
+func resolveReadProject(sel BackendSelector, override string) (projectpkg.DetectionResult, error) {
 	override = strings.TrimSpace(override)
 	if override == "" {
 		return resolveWriteProject()
 	}
 	normalized, _ := store.NormalizeProject(override)
+	s := sel(normalized)
 	exists, err := s.ProjectExists(normalized)
 	if err != nil {
 		return projectpkg.DetectionResult{}, err
