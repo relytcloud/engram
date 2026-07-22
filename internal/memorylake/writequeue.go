@@ -67,7 +67,26 @@ func (c *Client) ensureConversation(ws, projID, customID, actorID string) (strin
 		"rw_project_ids": []string{projID},
 	}
 	if err := c.doJSON("POST", "/api/v3/workspaces/"+ws+"/memories/conversations", body, &conv); err != nil {
-		return "", err
+		// A conversation with this custom_id already exists (409): the create
+		// endpoint is NOT idempotent — it rejects duplicate custom_ids rather
+		// than returning the existing row. This is the normal case for every
+		// mem_save after the first within a session. Recover by fetching the
+		// existing conversation by custom_id.
+		if apiErr, ok := err.(*APIError); !ok || apiErr.Code != "CUSTOM_ID_CONFLICT" {
+			return "", err
+		}
+		var existing struct {
+			ID string `json:"id"`
+		}
+		getPath := "/api/v3/workspaces/" + ws + "/memories/conversations/" +
+			url.PathEscape(customID) + "?by_custom_id=true"
+		if gErr := c.doJSON("GET", getPath, nil, &existing); gErr != nil {
+			return "", gErr
+		}
+		if existing.ID == "" {
+			return "", err
+		}
+		return existing.ID, nil
 	}
 	return conv.ID, nil
 }

@@ -19,7 +19,7 @@ type wsItem struct {
 // one page must still be resolvable by ResolveWorkspaceID.
 func (c *Client) listAllWorkspaces() ([]wsItem, error) {
 	return listAllPages[wsItem](c, maxPaginationPages, "listAllWorkspaces", func(token string) string {
-		path := "/api/v3/workspaces?page_size=200"
+		path := "/api/v3/workspaces?page_size=100"
 		if token != "" {
 			path += "&continuation_token=" + url.QueryEscape(token)
 		}
@@ -62,7 +62,7 @@ type projItem struct {
 func (c *Client) listAllProjects(ws string) ([]projItem, error) {
 	what := fmt.Sprintf("listAllProjects for workspace %s", ws)
 	return listAllPages[projItem](c, maxPaginationPages, what, func(token string) string {
-		path := "/api/v3/workspaces/" + ws + "/projects?page_size=200"
+		path := "/api/v3/workspaces/" + ws + "/projects?page_size=100"
 		if token != "" {
 			path += "&continuation_token=" + url.QueryEscape(token)
 		}
@@ -106,7 +106,7 @@ type actorItem struct {
 // belonging to a custom_id that already exists.
 func (c *Client) listAllActors() ([]actorItem, error) {
 	return listAllPages[actorItem](c, maxPaginationPages, "listAllActors", func(token string) string {
-		path := "/api/v3/actors?page_size=200"
+		path := "/api/v3/actors?page_size=100"
 		if token != "" {
 			path += "&continuation_token=" + url.QueryEscape(token)
 		}
@@ -166,12 +166,15 @@ func (c *Client) EnsureActor(ws, customID, displayName string) (string, error) {
 		}
 	}
 
-	// Bind the actor to the workspace. Binding is documented as idempotent
-	// on the MemoryLake side, so no existence check is needed here — this
-	// runs the same way whether the actor was just created or recovered via
-	// the CUSTOM_ID_CONFLICT path above.
+	// Bind the actor to the workspace. Re-binding an already-bound actor
+	// returns 409 BINDING_ALREADY_EXISTS on the live MemoryLake side (the
+	// bind endpoint is not silently idempotent), so treat that specific
+	// conflict as success — the actor is already bound, which is exactly the
+	// post-condition we want. Any other error propagates.
 	if err := c.doJSON("POST", "/api/v3/workspaces/"+ws+"/actors", map[string]any{"actor_id": actorID}, nil); err != nil {
-		return "", err
+		if apiErr, ok := err.(*APIError); !ok || apiErr.Code != "BINDING_ALREADY_EXISTS" {
+			return "", err
+		}
 	}
 	return actorID, nil
 }
