@@ -42,8 +42,13 @@ type MemoryLakeBackend struct {
 	actorID string // resolved MemoryLake actor id
 	idmap   *IDMap
 	topics  *TopicIndex
-	poll    time.Duration
-	maxWait time.Duration
+	// sessions is the local sidecar recording session lifecycle fields
+	// (project/directory/started_at/ended_at/summary) that have no confirmed
+	// analogue on a MemoryLake conversation object — see SessionIndex's doc
+	// comment for why this can't just be a GET on the conversation itself.
+	sessions *SessionIndex
+	poll     time.Duration
+	maxWait  time.Duration
 
 	// writeMu serializes the write path (AddObservation) for this backend
 	// instance. AddObservation is a snapshot→append→backfill sequence:
@@ -97,16 +102,22 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 		return nil, err
 	}
 
+	sessions, err := LoadSessionIndex(sessionIndexPath(projID))
+	if err != nil {
+		return nil, err
+	}
+
 	return &MemoryLakeBackend{
-		client:  client,
-		cfg:     cfg,
-		ws:      wsID,
-		projID:  projID,
-		actorID: actorID,
-		idmap:   idmap,
-		topics:  topics,
-		poll:    time.Duration(cfg.ExtractPollMS) * time.Millisecond,
-		maxWait: time.Duration(cfg.ExtractMaxWaitMS) * time.Millisecond,
+		client:   client,
+		cfg:      cfg,
+		ws:       wsID,
+		projID:   projID,
+		actorID:  actorID,
+		idmap:    idmap,
+		topics:   topics,
+		sessions: sessions,
+		poll:     time.Duration(cfg.ExtractPollMS) * time.Millisecond,
+		maxWait:  time.Duration(cfg.ExtractMaxWaitMS) * time.Millisecond,
 	}, nil
 }
 
@@ -774,74 +785,108 @@ func (b *MemoryLakeBackend) ListProjectNames() ([]string, error) {
 	return names, nil
 }
 
-// ─── Tier B: sessions (first-cut) ────────────────────────────────────────────
+// ─── Tier B: sessions ─────────────────────────────────────────────────────────
+//
+// Session lifecycle (project/directory/started_at/ended_at/summary) is
+// tracked in the local SessionIndex sidecar rather than on the MemoryLake
+// conversation object itself — see SessionIndex's doc comment for why.
+// CreateSession is the one operation that also performs a real, tested
+// MemoryLake write (ensuring the session's conversation exists); the other
+// four operations below read/write the sidecar only.
 
-// CreateSession ensures a MemoryLake conversation keyed by the session id.
-// This is the one session operation with a real MemoryLake analogue
-// (session ↔ conversation), so it is implemented rather than stubbed.
+// CreateSession ensures a MemoryLake conversation keyed by the session id
+// (the one part of "session ↔ conversation" backed by a real, tested
+// MemoryLake write) and records the session's lifecycle fields in the local
+// SessionIndex sidecar (see its doc comment for why those fields can't live
+// on the conversation object itself).
 func (b *MemoryLakeBackend) CreateSession(id, project, directory string) error {
-	_, err := b.client.ensureConversation(b.ws, b.projID, id, b.actorID)
-	return err
+	project, _ = store.NormalizeProject(project)
+	if _, err := b.client.ensureConversation(b.ws, b.projID, id, b.actorID); err != nil {
+		return err
+	}
+	startedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+	return b.sessions.Create(id, project, directory, startedAt)
 }
 
-// GetSession is a first-cut no-op returning "not found".
-// TODO(spec §6): fetch the conversation and map it to store.Session.
+// GetSession reads the session's lifecycle fields from the local
+// SessionIndex sidecar. Returns a NOT_FOUND APIError (rather than nil,nil)
+// when id was never recorded, mirroring internal/store's GetSession
+// returning a non-nil error on sql.ErrNoRows — callers only branch on
+// err != nil (see internal/mcp's resolveSaveWriteProject), not on a specific
+// sentinel, so any descriptive error satisfies that contract.
 func (b *MemoryLakeBackend) GetSession(id string) (*store.Session, error) {
-	return nil, nil
+	rec, ok := b.sessions.Get(id)
+	if !ok {
+		return nil, &APIError{Code: "NOT_FOUND", Message: "no session recorded for id " + id}
+	}
+	return &store.Session{
+		ID:        id,
+		Project:   rec.Project,
+		Directory: rec.Directory,
+		StartedAt: rec.StartedAt,
+		EndedAt:   rec.EndedAt,
+		Summary:   rec.Summary,
+	}, nil
 }
 
-// EndSession is a first-cut no-op: MemoryLake conversations have no "end".
-// TODO(spec §6): record the summary as a conversation message or metadata.
+// EndSession records the session as ended with the given summary in the
+// local SessionIndex sidecar (a no-op, mirroring store.go's EndSession, when
+// id was never recorded), and — best-effort — also appends the summary as a
+// conversation message so MemoryLake retains a durable trace of the session
+// end. MemoryLake's conversation object has no confirmed "end"/"summary"
+// field to PATCH (see SessionIndex's doc comment), so a message is the only
+// tested write surface available for this; a failure appending it does not
+// fail EndSession, since the authoritative lifecycle record is the
+// SessionIndex sidecar, already persisted by the time the append is
+// attempted.
 func (b *MemoryLakeBackend) EndSession(id string, summary string) error {
+	if _, ok := b.sessions.Get(id); !ok {
+		return nil
+	}
+	endedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+	if err := b.sessions.End(id, endedAt, summary); err != nil {
+		return err
+	}
+	if summary != "" {
+		if _, err := b.client.AppendObservation(b.ws, b.projID, id, b.actorID, store.AddObservationParams{
+			SessionID: id,
+			Type:      "session_summary",
+			Title:     "Session summary",
+			Content:   summary,
+		}); err != nil {
+			log.Printf("[memorylake] EndSession: failed to append summary message for session %s: %v", id, err)
+		}
+	}
 	return nil
 }
 
-// MostRecentActiveSession is a first-cut no-op returning "no active session".
-// TODO(spec §6): derive from recent conversations.
+// MostRecentActiveSession resolves the most recently started, not-yet-ended
+// session for project from the local SessionIndex sidecar. See
+// SessionIndex.MostRecentActive's doc comment for the selection rules
+// mirrored from internal/store.
 func (b *MemoryLakeBackend) MostRecentActiveSession(project string) (string, bool, error) {
-	return "", false, nil
+	project, _ = store.NormalizeProject(project)
+	if project == "" {
+		return "", false, nil
+	}
+	id, ok := b.sessions.MostRecentActive(project)
+	return id, ok, nil
 }
 
-// RecentSessions is a first-cut no-op returning no sessions.
-// TODO(spec §6): list recent conversations and map to store.SessionSummary.
+// RecentSessions lists up to limit recent sessions for project from the
+// local SessionIndex sidecar. See SessionIndex.Recent's doc comment for the
+// ordering and for why ObservationCount is always 0 in this backend.
 func (b *MemoryLakeBackend) RecentSessions(project string, limit int) ([]store.SessionSummary, error) {
-	return nil, nil
+	project, _ = store.NormalizeProject(project)
+	if limit <= 0 {
+		limit = 5 // mirrors store.RecentSessions' own default, store.go:2123.
+	}
+	return b.sessions.Recent(project, limit), nil
 }
 
-// ─── Tier B: prompts / passive capture (first-cut) ──────────────────────────
-
-// AddPrompt is a first-cut no-op returning id 0.
-// TODO(spec §6): persist prompts (e.g. as conversation messages) if needed.
-func (b *MemoryLakeBackend) AddPrompt(p store.AddPromptParams) (int64, error) {
-	return 0, nil
-}
-
-// AddPromptIfMissing is a first-cut no-op returning id 0, inserted=false.
-// TODO(spec §6): mirror AddPrompt once prompt persistence is designed.
-func (b *MemoryLakeBackend) AddPromptIfMissing(p store.AddPromptParams) (int64, bool, error) {
-	return 0, false, nil
-}
-
-// PassiveCapture is a first-cut no-op reporting nothing captured.
-// TODO(spec §6): reuse store.ExtractLearnings + AddObservation to extract and
-// save structured learnings from p.Content.
-func (b *MemoryLakeBackend) PassiveCapture(p store.PassiveCaptureParams) (*store.PassiveCaptureResult, error) {
-	return &store.PassiveCaptureResult{}, nil
-}
-
-// ─── Tier B: review (first-cut) ──────────────────────────────────────────────
-
-// ObservationsNeedingReview is a first-cut no-op returning no observations.
-// TODO(spec §6): client-side decay by type + fact expiration_date.
-func (b *MemoryLakeBackend) ObservationsNeedingReview(project string, limit int) ([]store.Observation, error) {
-	return nil, nil
-}
-
-// MarkReviewed is a first-cut no-op.
-// TODO(spec §6): clear/refresh the client-side review marker for the fact.
-func (b *MemoryLakeBackend) MarkReviewed(id int64) error {
-	return nil
-}
+// AddPrompt, AddPromptIfMissing (see prompts.go) and PassiveCapture (see
+// passive.go) and ObservationsNeedingReview/MarkReviewed (see review.go) are
+// implemented in their own files.
 
 // ─── Tier B: projects / relations (first-cut) ────────────────────────────────
 

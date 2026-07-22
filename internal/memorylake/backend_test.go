@@ -75,16 +75,21 @@ func newTestBackend(t *testing.T, srvURL string) *MemoryLakeBackend {
 	if err != nil {
 		t.Fatalf("LoadTopicIndex: %v", err)
 	}
+	sessions, err := LoadSessionIndex(t.TempDir() + "/sessions.json")
+	if err != nil {
+		t.Fatalf("LoadSessionIndex: %v", err)
+	}
 	return &MemoryLakeBackend{
-		client:  NewClient(cfg),
-		cfg:     cfg,
-		ws:      "ws-1",
-		projID:  "proj-1",
-		actorID: "actor-1",
-		idmap:   idmap,
-		topics:  topics,
-		poll:    1 * time.Millisecond,
-		maxWait: 500 * time.Millisecond,
+		client:   NewClient(cfg),
+		cfg:      cfg,
+		ws:       "ws-1",
+		projID:   "proj-1",
+		actorID:  "actor-1",
+		idmap:    idmap,
+		topics:   topics,
+		sessions: sessions,
+		poll:     1 * time.Millisecond,
+		maxWait:  500 * time.Millisecond,
 	}
 }
 
