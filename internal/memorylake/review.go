@@ -131,7 +131,7 @@ func (b *MemoryLakeBackend) ObservationsNeedingReview(project string, limit int)
 	out := make([]store.Observation, 0, len(overdue))
 	for _, d := range overdue {
 		o := ObservationFromFact(d.f)
-		o.ID = b.idmap.IntFor(d.f.ID)
+		o.ID = b.idmap.IntFor(b.projID, d.f.ID)
 		o.CreatedAt = d.f.CreatedAt
 		o.UpdatedAt = d.f.UpdatedAt
 		reviewAfter := d.at.Format("2006-01-02 15:04:05")
@@ -150,7 +150,7 @@ func (b *MemoryLakeBackend) ObservationsNeedingReview(project string, limit int)
 // Types absent from decayReviewAfterMonths clear the override entirely,
 // mirroring store resetting review_after to NULL for untracked types.
 func (b *MemoryLakeBackend) MarkReviewed(id int64) error {
-	factID, ok := b.idmap.FactFor(id)
+	factID, ok := b.factForID(id)
 	if !ok {
 		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
 	}

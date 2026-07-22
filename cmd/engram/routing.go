@@ -64,7 +64,13 @@ var _ mcp.MemoryBackend = (*memorylake.MemoryLakeBackend)(nil)
 //     nil). A fallback to sqlite is left uncached so a transient failure is
 //     retried on the next call for that project — and the retry, too, is
 //     confined to that project's lock and never blocks others.
-func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *memorylake.Enablement) mcp.BackendSelector {
+// idmap is the process-global MemoryLake IDMap shared by every enabled project
+// (see memorylake.IDMap's doc comment): a single instance and single file so
+// the int64 observation ids handed out are globally unique across projects,
+// closing the by-id cross-project leak. It may be nil (e.g. the IDMap file was
+// unreadable) — in that case no project is routed to MemoryLake and everything
+// falls back to sqlite, since a backend cannot be constructed without one.
+func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *memorylake.Enablement, idmap *memorylake.IDMap) mcp.BackendSelector {
 	type projEntry struct {
 		mu      sync.Mutex        // serializes resolution for THIS project only
 		backend mcp.MemoryBackend // cached genuine MemoryLake backend; nil until resolved
@@ -110,7 +116,7 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 			return pe.backend
 		}
 
-		backend, ok := resolveMemoryLakeBackend(project, entry, cfg, enab, &gmu, sqlite)
+		backend, ok := resolveMemoryLakeBackend(project, entry, cfg, enab, &gmu, sqlite, idmap)
 		if ok {
 			// Only cache a genuine MemoryLake backend. A fallback to sqlite is
 			// left uncached so a transient failure is retried on the next call.
@@ -135,7 +141,13 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 // section that mutates and persists the shared enab.EnabledProjects map — and
 // released again — so backfilling one project's resolved id can never race
 // with, or stall, another project's routing.
-func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, gmu *sync.Mutex, sqlite mcp.MemoryBackend) (mcp.MemoryBackend, bool) {
+func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, gmu *sync.Mutex, sqlite mcp.MemoryBackend, idmap *memorylake.IDMap) (mcp.MemoryBackend, bool) {
+	// Without the shared IDMap a MemoryLake backend cannot mint globally-unique
+	// observation ids, so refuse to route to it (fall back to sqlite) rather
+	// than risk the per-project id collision the shared map exists to prevent.
+	if idmap == nil {
+		return sqlite, false
+	}
 	ws := cfg.Workspace
 	projID := entry.ProjID
 
@@ -179,8 +191,9 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 		}
 	}
 
-	// Network I/O — deliberately NOT under gmu.
-	backend, err := memorylake.NewBackend(cfg, ws, projID)
+	// Network I/O — deliberately NOT under gmu. The process-global idmap is
+	// passed so every backend shares one id space (globally-unique ids).
+	backend, err := memorylake.NewBackend(cfg, ws, projID, idmap)
 	if err != nil {
 		warnMemoryLakeFallback(project, "constructing backend", err)
 		return sqlite, false
@@ -209,7 +222,17 @@ func buildRoutingSelector(sqlite mcp.MemoryBackend) mcp.BackendSelector {
 		log.Printf("[engram] memorylake: failed to load enablement list (continuing with sqlite-only): %v", err)
 		enab = &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{}}
 	}
-	return NewRoutingSelector(sqlite, mlCfg, enab)
+	// Load the single, process-global IDMap once and share it across every
+	// MemoryLake backend this selector constructs, so their int64 observation
+	// ids are globally unique (see memorylake.IDMap). A load failure leaves
+	// idmap nil; NewRoutingSelector then keeps every project on sqlite rather
+	// than routing to a backend that cannot mint collision-free ids.
+	idmap, err := memorylake.LoadIDMap(memorylake.DefaultIDMapPath())
+	if err != nil {
+		log.Printf("[engram] memorylake: failed to load id map (continuing with sqlite-only): %v", err)
+		idmap = nil
+	}
+	return NewRoutingSelector(sqlite, mlCfg, enab, idmap)
 }
 
 // resolveCLIRoutingProject determines which project a CLI save/search call

@@ -60,7 +60,7 @@ func (b *MemoryLakeBackend) PassiveCapture(p store.PassiveCaptureParams) (*store
 
 	for _, learning := range learnings {
 		key := passiveDedupKey(p.Project, learning)
-		if _, ok := b.idmap.IntIfExists(key); ok {
+		if _, ok := b.idmap.IntIfExists(b.projID, key); ok {
 			result.Duplicates++
 			continue
 		}
@@ -83,7 +83,7 @@ func (b *MemoryLakeBackend) PassiveCapture(p store.PassiveCaptureParams) (*store
 		}
 		// Record as seen so a later identical learning (same normalized
 		// content, same project) dedupes instead of saving a second fact.
-		b.idmap.IntFor(key)
+		b.idmap.IntFor(b.projID, key)
 		result.Saved++
 	}
 

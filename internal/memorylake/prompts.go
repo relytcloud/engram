@@ -44,7 +44,7 @@ func (b *MemoryLakeBackend) appendPrompt(p store.AddPromptParams) (int64, error)
 	}); err != nil {
 		return 0, err
 	}
-	return b.idmap.IntFor(promptDedupKey(p.SessionID, p.Project, p.Content)), nil
+	return b.idmap.IntFor(b.projID, promptDedupKey(p.SessionID, p.Project, p.Content)), nil
 }
 
 // AddPrompt persists p as a MemoryLake conversation message. See
@@ -65,7 +65,7 @@ func (b *MemoryLakeBackend) AddPromptIfMissing(p store.AddPromptParams) (int64, 
 	defer b.writeMu.Unlock()
 
 	key := promptDedupKey(p.SessionID, p.Project, p.Content)
-	if id, ok := b.idmap.IntIfExists(key); ok {
+	if id, ok := b.idmap.IntIfExists(b.projID, key); ok {
 		return id, false, nil
 	}
 	id, err := b.appendPrompt(p)

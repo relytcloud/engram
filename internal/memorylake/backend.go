@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -67,11 +66,17 @@ type MemoryLakeBackend struct {
 }
 
 // NewBackend constructs a MemoryLakeBackend for the given workspace reference
-// (custom_id, name, or "ws-" id) and already-resolved MemoryLake project id.
-// It resolves the workspace id, ensures a HUMAN actor exists (keyed by
-// cfg.Actor, falling back to the machine hostname), and loads the per-project
-// IDMap from ~/.engram/memorylake-idmap-<projID>.json.
-func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
+// (custom_id, name, or "ws-" id) and already-resolved MemoryLake project id. It
+// resolves the workspace id and ensures a HUMAN actor exists (keyed by
+// cfg.Actor, falling back to the machine hostname).
+//
+// idmap is the PROCESS-GLOBAL IDMap shared by every enabled project (see
+// IDMap's doc comment and cmd/engram/routing.go, which constructs it once and
+// passes the same instance to every backend). It must be non-nil. Sharing one
+// instance is what makes the int64 observation ids this backend hands out
+// globally unique rather than per-project — the fix for the by-id
+// cross-project leak.
+func NewBackend(cfg Config, ws, projID string, idmap *IDMap) (*MemoryLakeBackend, error) {
 	client := NewClient(cfg)
 
 	wsID, err := client.ResolveWorkspaceID(ws)
@@ -88,11 +93,6 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 		}
 	}
 	actorID, err := client.EnsureActor(wsID, actorCustomID, actorCustomID)
-	if err != nil {
-		return nil, err
-	}
-
-	idmap, err := LoadIDMap(idmapPath(projID))
 	if err != nil {
 		return nil, err
 	}
@@ -121,11 +121,20 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 	}, nil
 }
 
-// idmapPath returns the per-project IDMap location:
-// ~/.engram/memorylake-idmap-<projID>.json.
-func idmapPath(projID string) string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".engram", "memorylake-idmap-"+projID+".json")
+// factForID resolves an engram int64 id to a MemoryLake fact id for THIS
+// backend's project. Because the IDMap is process-global (shared across every
+// enabled project so ids are globally unique), an id minted for a DIFFERENT
+// project must read as not-found here — it must never resolve to one of this
+// project's facts. That projID guard is what stops a by-id lookup (e.g. HTTP
+// GET /observations/{id} on a multi-project `engram serve`) from returning
+// another project's content. ok is false for both an unknown id and an id
+// owned by another project.
+func (b *MemoryLakeBackend) factForID(id int64) (string, bool) {
+	projID, factID, ok := b.idmap.FactFor(id)
+	if !ok || projID != b.projID {
+		return "", false
+	}
+	return factID, true
 }
 
 // ─── Observation CRUD (Tier A: core) ────────────────────────────────────────
@@ -233,7 +242,7 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 	if len(facts) > 0 {
 		var first int64
 		for i, f := range facts {
-			id := b.idmap.IntFor(f.ID)
+			id := b.idmap.IntFor(b.projID, f.ID)
 			if i == 0 {
 				first = id
 			}
@@ -254,7 +263,7 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 	if provisional == "" {
 		provisional = obsID
 	}
-	return b.idmap.IntFor(provisional), nil
+	return b.idmap.IntFor(b.projID, provisional), nil
 }
 
 // isValidTopicKeyHit reports whether fact f is actually eligible to be
@@ -322,14 +331,14 @@ func (b *MemoryLakeBackend) upsertTopicKeyFact(current Fact, p store.AddObservat
 	if _, err := b.patchFact(current.ID, map[string]any{"fact": p.Content, "metadata": md}); err != nil {
 		return 0, err
 	}
-	return b.idmap.IntFor(current.ID), nil
+	return b.idmap.IntFor(b.projID, current.ID), nil
 }
 
 // GetObservation resolves the int64 id through the IDMap to a MemoryLake fact
 // id, fetches the fact, and decodes it back into a store.Observation (Content
 // preferring the verbatim engram_raw metadata over MemoryLake's paraphrase).
 func (b *MemoryLakeBackend) GetObservation(id int64) (*store.Observation, error) {
-	factID, ok := b.idmap.FactFor(id)
+	factID, ok := b.factForID(id)
 	if !ok {
 		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
 	}
@@ -349,7 +358,7 @@ func (b *MemoryLakeBackend) GetObservation(id int64) (*store.Observation, error)
 // updated too (V3 FactUpdateRequest carries `content`) and engram_raw is kept in
 // sync so future reads return the verbatim edited text.
 func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservationParams) (*store.Observation, error) {
-	factID, ok := b.idmap.FactFor(id)
+	factID, ok := b.factForID(id)
 	if !ok {
 		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
 	}
@@ -434,7 +443,7 @@ func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservatio
 // this call's error.
 func (b *MemoryLakeBackend) DeleteObservation(id int64, hardDelete bool) error {
 	_ = hardDelete // MemoryLake only supports soft delete (forget); see doc comment.
-	factID, ok := b.idmap.FactFor(id)
+	factID, ok := b.factForID(id)
 	if !ok {
 		return nil
 	}
@@ -471,7 +480,7 @@ func (b *MemoryLakeBackend) UnpinObservation(id int64) error {
 
 // setPinned reads the fact, merges pinned=<v> into its metadata, and PATCHes it.
 func (b *MemoryLakeBackend) setPinned(id int64, pinned bool) error {
-	factID, ok := b.idmap.FactFor(id)
+	factID, ok := b.factForID(id)
 	if !ok {
 		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
 	}
@@ -504,7 +513,7 @@ func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*s
 		after = 5
 	}
 
-	anchorFactID, ok := b.idmap.FactFor(observationID)
+	anchorFactID, ok := b.factForID(observationID)
 	if !ok {
 		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
 	}
@@ -540,7 +549,7 @@ func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*s
 
 	toEntry := func(f Fact) store.TimelineEntry {
 		o := ObservationFromFact(f)
-		o.ID = b.idmap.IntFor(f.ID)
+		o.ID = b.idmap.IntFor(b.projID, f.ID)
 		return store.TimelineEntry{
 			ID:            o.ID,
 			Type:          o.Type,

@@ -383,7 +383,12 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	limit := queryInt(r, "limit", 5)
 
-	sessions, err := s.store.RecentSessions(project, limit)
+	// RecentSessions is part of mcp.MemoryBackend and the project is in the
+	// query string, so route it to the project's backend (sqlite or MemoryLake)
+	// like handleSearch/handleReviewList/handleContext — an enabled project's
+	// recent sessions must come from its MemoryLake session index, not sqlite.
+	routeProject, _ := store.NormalizeProject(project)
+	sessions, err := s.backendForProject(routeProject).RecentSessions(project, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return

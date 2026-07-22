@@ -306,7 +306,11 @@ func NewMemoryLakeBackend(t *testing.T, cfg memorylake.Config) (backend *memoryl
 		t.Fatalf("paritytest: EnsureProject(%q): %v", projName, err)
 	}
 
-	backend, err = memorylake.NewBackend(cfg, cfg.Workspace, projID)
+	idmap, err := memorylake.LoadIDMap(filepath.Join(t.TempDir(), "memorylake-idmap.json"))
+	if err != nil {
+		t.Fatalf("paritytest: memorylake.LoadIDMap: %v", err)
+	}
+	backend, err = memorylake.NewBackend(cfg, cfg.Workspace, projID, idmap)
 	if err != nil {
 		t.Fatalf("paritytest: memorylake.NewBackend: %v", err)
 	}

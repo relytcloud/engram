@@ -134,7 +134,7 @@ func TestFindCandidates_MapsUnresolvedConflictToCandidate(t *testing.T) {
 	}
 	b := newConflictBackend(t, s)
 
-	savedID := b.idmap.IntFor("fact-saved")
+	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
 	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{})
 	if err != nil {
@@ -166,7 +166,7 @@ func TestFindCandidates_ResolvedConflictExcluded(t *testing.T) {
 		Resolved: true,
 	}
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor("fact-saved")
+	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
 	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{})
 	if err != nil {
@@ -180,7 +180,7 @@ func TestFindCandidates_ResolvedConflictExcluded(t *testing.T) {
 func TestFindCandidates_NoConflicts_ReturnsEmptyNotError(t *testing.T) {
 	s := newConflictTestServer()
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor("fact-saved")
+	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
 	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{})
 	if err != nil {
@@ -217,7 +217,7 @@ func TestFindCandidates_ScopeFilter(t *testing.T) {
 		Metadata: map[string]any{metaScope: "project-a"},
 	}
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor("fact-saved")
+	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
 	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{Scope: "project-b"})
 	if err != nil {
@@ -238,7 +238,7 @@ func TestFindCandidates_LimitCaps(t *testing.T) {
 	s.facts["fact-b"] = Fact{ID: "fact-b"}
 	s.facts["fact-c"] = Fact{ID: "fact-c"}
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor("fact-saved")
+	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
 	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{Limit: 2})
 	if err != nil {

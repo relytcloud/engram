@@ -140,9 +140,9 @@ func TestBackend_AddObservation_ReturnsInt64ViaBackfill(t *testing.T) {
 	if !patched {
 		t.Fatal("expected backfill PATCH onto fact-1")
 	}
-	// The returned int must reverse-map back to fact-1.
-	if f, ok := b.idmap.FactFor(1); !ok || f != "fact-1" {
-		t.Fatalf("FactFor(1)=%q,%v; want fact-1,true", f, ok)
+	// The returned int must reverse-map back to (this project, fact-1).
+	if pid, f, ok := b.idmap.FactFor(1); !ok || pid != b.projID || f != "fact-1" {
+		t.Fatalf("FactFor(1)=%q/%q,%v; want %s/fact-1,true", pid, f, ok, b.projID)
 	}
 }
 
@@ -174,8 +174,8 @@ func TestBackend_AddObservation_TimeoutReturnsProvisional(t *testing.T) {
 	if id == 0 {
 		t.Fatal("expected a provisional non-zero id on extraction timeout")
 	}
-	if f, ok := b.idmap.FactFor(id); !ok || f != "msg-9" {
-		t.Fatalf("FactFor(%d)=%q,%v; want provisional msg-9,true", id, f, ok)
+	if pid, f, ok := b.idmap.FactFor(id); !ok || pid != b.projID || f != "msg-9" {
+		t.Fatalf("FactFor(%d)=%q/%q,%v; want %s/provisional msg-9,true", id, pid, f, ok, b.projID)
 	}
 }
 
@@ -411,7 +411,7 @@ func TestBackend_GetObservation_ViaIDMap(t *testing.T) {
 	defer srv.Close()
 
 	b := newTestBackend(t, srv.URL)
-	id := b.idmap.IntFor("fact-7") // seed mapping (id=1)
+	id := b.idmap.IntFor(b.projID, "fact-7") // seed mapping (id=1)
 
 	obs, err := b.GetObservation(id)
 	if err != nil {
@@ -461,7 +461,7 @@ func TestBackend_UpdateObservation(t *testing.T) {
 	defer srv.Close()
 
 	b := newTestBackend(t, srv.URL)
-	id := b.idmap.IntFor("fact-2")
+	id := b.idmap.IntFor(b.projID, "fact-2")
 
 	newTitle := "new title"
 	newContent := "new content"
@@ -501,7 +501,7 @@ func TestBackend_DeleteObservation_CallsForget(t *testing.T) {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}))
 		b := newTestBackend(t, srv.URL)
-		id := b.idmap.IntFor("fact-3")
+		id := b.idmap.IntFor(b.projID, "fact-3")
 		if err := b.DeleteObservation(id, hard); err != nil {
 			t.Fatalf("DeleteObservation(hard=%v): %v", hard, err)
 		}
@@ -560,7 +560,7 @@ func TestBackend_PinObservation_PatchesMetadataPinned(t *testing.T) {
 	defer srv.Close()
 
 	b := newTestBackend(t, srv.URL)
-	id := b.idmap.IntFor("fact-4")
+	id := b.idmap.IntFor(b.projID, "fact-4")
 	if err := b.PinObservation(id); err != nil {
 		t.Fatalf("PinObservation: %v", err)
 	}
@@ -617,7 +617,11 @@ func TestNewBackend(t *testing.T) {
 		BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000,
 		Actor: "cli-machine", ExtractPollMS: 2000, ExtractMaxWaitMS: 30000,
 	}
-	b, err := NewBackend(cfg, "ws-1", "proj-42")
+	idmap, err := LoadIDMap(t.TempDir() + "/idmap.json")
+	if err != nil {
+		t.Fatalf("LoadIDMap: %v", err)
+	}
+	b, err := NewBackend(cfg, "ws-1", "proj-42", idmap)
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
@@ -686,7 +690,7 @@ func TestBackend_AddObservation_TopicKeyUpsertHit_PatchesInPlace(t *testing.T) {
 	if appendCount != 0 {
 		t.Fatalf("append count=%d, want 0 (must not append on upsert hit)", appendCount)
 	}
-	if id != b.idmap.IntFor("fact-topic") {
+	if id != b.idmap.IntFor(b.projID, "fact-topic") {
 		t.Fatalf("id=%d, want the int64 mapped to fact-topic", id)
 	}
 
@@ -753,7 +757,7 @@ func TestBackend_AddObservation_TopicKeyUpsertMiss_RecordsIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddObservation: %v", err)
 	}
-	if id != b.idmap.IntFor("fact-new") {
+	if id != b.idmap.IntFor(b.projID, "fact-new") {
 		t.Fatalf("id=%d, want the int64 mapped to fact-new", id)
 	}
 
@@ -988,7 +992,7 @@ func TestBackend_Timeline_OrdersByCreatedAtAndExcludesExpiredNeighbors(t *testin
 	}))
 	defer srv.Close()
 	b := newTestBackend(t, srv.URL)
-	anchorID := b.idmap.IntFor("fact-c")
+	anchorID := b.idmap.IntFor(b.projID, "fact-c")
 
 	res, err := b.Timeline(anchorID, 5, 5)
 	if err != nil {
@@ -1171,7 +1175,7 @@ func TestBackend_AddObservation_TopicKeyUpsert_ExpiredHitFallsThroughAndRecreate
 	if patchedExpired != 0 {
 		t.Fatal("expired fact was PATCHed (revived)")
 	}
-	if id != b.idmap.IntFor("fact-new") {
+	if id != b.idmap.IntFor(b.projID, "fact-new") {
 		t.Fatalf("id=%d, want the int64 mapped to fact-new (a fresh fact, not the expired one)", id)
 	}
 	// Self-heal: the index must now point at the new fact, not the expired one.
@@ -1395,7 +1399,7 @@ func TestBackend_UpdateObservation_ScopeChange_PurgesTopicIndex(t *testing.T) {
 	defer srv.Close()
 
 	b := newTestBackend(t, srv.URL)
-	id := b.idmap.IntFor("fact-1")
+	id := b.idmap.IntFor(b.projID, "fact-1")
 	if err := b.topics.Put("proj", "global", "arch/db", "fact-1"); err != nil {
 		t.Fatalf("seed TopicIndex: %v", err)
 	}
@@ -1459,5 +1463,44 @@ func TestListAllFacts_TerminatesAgainstInfiniteContinuationToken(t *testing.T) {
 	}
 	if stats.TotalObservations != maxListAllFactsPages {
 		t.Fatalf("TotalObservations=%d, want %d (one fact per page, capped)", stats.TotalObservations, maxListAllFactsPages)
+	}
+}
+
+// TestBackend_FactForID_RejectsOtherProject is the backend-layer regression for
+// the Task-15 Critical: two backends bound to DIFFERENT projects but sharing the
+// one process-global IDMap must never resolve each other's ids. An id minted for
+// project A reads as not-found on B's backend (and vice versa), so a by-id call
+// (GetObservation/Update/Delete/Pin/Timeline/MarkReviewed) can never cross the
+// project boundary — the guard in factForID.
+func TestBackend_FactForID_RejectsOtherProject(t *testing.T) {
+	idmap, err := LoadIDMap(t.TempDir() + "/idmap.json")
+	if err != nil {
+		t.Fatalf("LoadIDMap: %v", err)
+	}
+	a := &MemoryLakeBackend{projID: "proj-1", idmap: idmap}
+	b := &MemoryLakeBackend{projID: "proj-2", idmap: idmap}
+
+	idA := idmap.IntFor("proj-1", "fact-a")
+	idB := idmap.IntFor("proj-2", "fact-b")
+	if idA == idB {
+		t.Fatalf("distinct projects must get distinct global ids, both got %d", idA)
+	}
+
+	if f, ok := a.factForID(idA); !ok || f != "fact-a" {
+		t.Fatalf("a.factForID(idA)=%q,%v want fact-a,true", f, ok)
+	}
+	if _, ok := b.factForID(idA); ok {
+		t.Fatal("b (proj-2) must not resolve proj-1's id")
+	}
+	if f, ok := b.factForID(idB); !ok || f != "fact-b" {
+		t.Fatalf("b.factForID(idB)=%q,%v want fact-b,true", f, ok)
+	}
+	if _, ok := a.factForID(idB); ok {
+		t.Fatal("a (proj-1) must not resolve proj-2's id")
+	}
+	// GetObservation surfaces the guard as a NOT_FOUND rather than another
+	// project's content — and crucially without any HTTP call.
+	if _, err := b.GetObservation(idA); err == nil {
+		t.Fatal("GetObservation of another project's id must return NOT_FOUND, not leak content")
 	}
 }

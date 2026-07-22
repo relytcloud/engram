@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
@@ -25,10 +26,34 @@ type stubMLBackend struct {
 	sessions          map[string]*store.Session
 	obs               map[int64]*store.Observation
 	nextID            int64
+	// shared, when non-nil, is a process-global id counter shared with other
+	// stub backends — mimicking the real MemoryLake IDMap that hands out
+	// globally-unique observation ids across projects. When nil, ids come from
+	// this stub's own nextID (starting at 1), the pre-fix per-project behavior.
+	shared *int64
 }
 
 func newStubMLBackend() *stubMLBackend {
 	return &stubMLBackend{sessions: map[string]*store.Session{}, obs: map[int64]*store.Observation{}}
+}
+
+// newStubMLBackendShared builds a stub whose AddObservation draws ids from the
+// shared counter, so two such stubs never mint the same id — the invariant the
+// global IDMap guarantees for real MemoryLake backends.
+func newStubMLBackendShared(counter *int64) *stubMLBackend {
+	b := newStubMLBackend()
+	b.shared = counter
+	return b
+}
+
+func (b *stubMLBackend) RecentSessions(project string, limit int) ([]store.SessionSummary, error) {
+	var out []store.SessionSummary
+	for _, s := range b.sessions {
+		if s.Project == project {
+			out = append(out, store.SessionSummary{ID: s.ID, Project: s.Project})
+		}
+	}
+	return out, nil
 }
 
 func (b *stubMLBackend) CreateSession(id, project, directory string) error {
@@ -54,8 +79,13 @@ func (b *stubMLBackend) EndSession(id string, summary string) error {
 }
 
 func (b *stubMLBackend) AddObservation(p store.AddObservationParams) (int64, error) {
-	b.nextID++
-	id := b.nextID
+	var id int64
+	if b.shared != nil {
+		id = atomic.AddInt64(b.shared, 1)
+	} else {
+		b.nextID++
+		id = b.nextID
+	}
 	proj := p.Project
 	b.obs[id] = &store.Observation{ID: id, Type: p.Type, Title: p.Title, Content: p.Content, Project: &proj, Scope: p.Scope}
 	return id, nil
@@ -250,5 +280,130 @@ func TestServer_NoSelectorConfigured_UsesStoreDirectly(t *testing.T) {
 	h.ServeHTTP(getRec, getReq)
 	if getRec.Code != http.StatusOK {
 		t.Fatalf("get session: expected 200, got %d body=%s", getRec.Code, getRec.Body.String())
+	}
+}
+
+// TestServer_TwoEnabledProjects_ByIDObservationDoesNotLeak is the regression for
+// the Task-15 Critical: a single `engram serve` process routing TWO enabled
+// MemoryLake projects must never let GET /observations/{id} return the wrong
+// project's content. With the global IDMap, each project's first observation
+// gets a DISTINCT id, so the server's per-id routing cache can never collide —
+// GET /observations/<A's id> returns A's content and <B's id> returns B's,
+// never crossed. (Pre-fix, both first observations were id=1, and the by-id
+// cache silently pointed id=1 at whichever project wrote last.)
+func TestServer_TwoEnabledProjects_ByIDObservationDoesNotLeak(t *testing.T) {
+	sqlite := newServerTestStore(t)
+	var globalIDs int64 // shared counter → globally-unique ids across both stubs
+	mlA := newStubMLBackendShared(&globalIDs)
+	mlB := newStubMLBackendShared(&globalIDs)
+
+	srv := New(sqlite, 0)
+	srv.SetBackendSelector(func(project string) mcp.MemoryBackend {
+		switch project {
+		case "proj-a":
+			return mlA
+		case "proj-b":
+			return mlB
+		default:
+			return sqlite
+		}
+	})
+	h := srv.Handler()
+
+	// Sessions for each project (validateSessionProject needs them present).
+	for _, tc := range []struct{ sess, proj string }{{"sess-a", "proj-a"}, {"sess-b", "proj-b"}} {
+		req := httptest.NewRequest(http.MethodPost, "/sessions",
+			strings.NewReader(fmt.Sprintf(`{"id":%q,"project":%q,"directory":"/w"}`, tc.sess, tc.proj)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create session %s: expected 201, got %d body=%s", tc.sess, rec.Code, rec.Body.String())
+		}
+	}
+
+	addObs := func(sess, proj, title, content string) int64 {
+		req := httptest.NewRequest(http.MethodPost, "/observations",
+			strings.NewReader(fmt.Sprintf(`{"session_id":%q,"type":"note","title":%q,"content":%q,"project":%q}`, sess, title, content, proj)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("add obs (%s): expected 201, got %d body=%s", proj, rec.Code, rec.Body.String())
+		}
+		var created map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return int64(created["id"].(float64))
+	}
+
+	idA := addObs("sess-a", "proj-a", "title-A", "content-A")
+	idB := addObs("sess-b", "proj-b", "title-B", "content-B")
+	if idA == idB {
+		t.Fatalf("two projects' first observations must get distinct global ids, both got %d", idA)
+	}
+
+	getTitle := func(id int64) string {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/observations/%d", id), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get observation %d: expected 200, got %d body=%s", id, rec.Code, rec.Body.String())
+		}
+		var got map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode obs %d: %v", id, err)
+		}
+		return got["title"].(string)
+	}
+
+	if got := getTitle(idA); got != "title-A" {
+		t.Fatalf("GET /observations/%d (proj-a) returned %q; leaked wrong project", idA, got)
+	}
+	if got := getTitle(idB); got != "title-B" {
+		t.Fatalf("GET /observations/%d (proj-b) returned %q; leaked wrong project", idB, got)
+	}
+	// The observation truly lives only on its own backend, never the other's.
+	if _, ok := mlA.obs[idB]; ok {
+		t.Fatalf("proj-b's observation id=%d must not exist on proj-a's backend", idB)
+	}
+	if _, ok := mlB.obs[idA]; ok {
+		t.Fatalf("proj-a's observation id=%d must not exist on proj-b's backend", idA)
+	}
+}
+
+// TestServer_EnabledProject_RecentSessions_RoutesToMemoryLake is the regression
+// for the Task-15 Important: GET /sessions/recent?project=<enabled> must serve
+// the project's MemoryLake session index, not the local sqlite store (which
+// never saw that session).
+func TestServer_EnabledProject_RecentSessions_RoutesToMemoryLake(t *testing.T) {
+	sqlite := newServerTestStore(t)
+	ml := newStubMLBackend()
+	srv := New(sqlite, 0)
+	srv.SetBackendSelector(selectorFor("enabled-proj", ml, sqlite))
+	h := srv.Handler()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/sessions",
+		strings.NewReader(`{"id":"sess-ml","project":"enabled-proj","directory":"/work"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	h.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create session: expected 201, got %d body=%s", createRec.Code, createRec.Body.String())
+	}
+
+	recentReq := httptest.NewRequest(http.MethodGet, "/sessions/recent?project=enabled-proj", nil)
+	recentRec := httptest.NewRecorder()
+	h.ServeHTTP(recentRec, recentReq)
+	if recentRec.Code != http.StatusOK {
+		t.Fatalf("recent sessions: expected 200, got %d body=%s", recentRec.Code, recentRec.Body.String())
+	}
+	var sessions []map[string]any
+	if err := json.Unmarshal(recentRec.Body.Bytes(), &sessions); err != nil {
+		t.Fatalf("decode recent: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0]["id"] != "sess-ml" {
+		t.Fatalf("expected recent sessions from the MemoryLake stub, got %#v", sessions)
 	}
 }

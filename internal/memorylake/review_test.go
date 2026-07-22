@@ -144,7 +144,7 @@ func TestBackend_MarkReviewed_ResetsDecayClock(t *testing.T) {
 	}))
 	defer srv.Close()
 	b := newTestBackend(t, srv.URL)
-	id := b.idmap.IntFor("fact-1")
+	id := b.idmap.IntFor(b.projID, "fact-1")
 
 	if err := b.MarkReviewed(id); err != nil {
 		t.Fatalf("MarkReviewed: %v", err)

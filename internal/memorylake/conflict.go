@@ -243,10 +243,11 @@ func isValidConflictRelationVerb(v string) bool {
 // metadata doesn't match are filtered out client-side, mirroring the local
 // store's scope-filtered FTS5 query.
 func (b *MemoryLakeBackend) FindCandidates(savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
-	factID, ok := b.idmap.FactFor(savedID)
+	factID, ok := b.factForID(savedID)
 	if !ok {
 		// No fact mapped yet for this id (e.g. a still-pending provisional id
-		// from AddObservation) — fail-safe: nothing to find candidates for.
+		// from AddObservation), or an id owned by another project — fail-safe:
+		// nothing to find candidates for.
 		return nil, nil
 	}
 
@@ -286,7 +287,7 @@ func (b *MemoryLakeBackend) FindCandidates(savedID int64, opts store.CandidateOp
 				continue
 			}
 			candidates = append(candidates, store.Candidate{
-				ID:       b.idmap.IntFor(otherID),
+				ID:       b.idmap.IntFor(b.projID, otherID),
 				SyncID:   otherID,
 				Title:    obs.Title,
 				Type:     obs.Type,
@@ -404,8 +405,8 @@ func (b *MemoryLakeBackend) relationFromConflict(c conflictItem, srcID, tgtID st
 		Relation:       store.RelationConflictsWith,
 		Reason:         reason,
 		JudgmentStatus: status,
-		SourceIntID:    b.idmap.IntFor(srcID),
-		TargetIntID:    b.idmap.IntFor(tgtID),
+		SourceIntID:    b.idmap.IntFor(b.projID, srcID),
+		TargetIntID:    b.idmap.IntFor(b.projID, tgtID),
 		CreatedAt:      c.CreatedAt,
 		UpdatedAt:      c.UpdatedAt,
 	}

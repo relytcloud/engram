@@ -23,6 +23,18 @@ type stubBackend struct {
 	name string
 }
 
+// mustTestIDMap returns a fresh, temp-file-backed process-global IDMap for a
+// NewRoutingSelector call. Each test gets its own file so id allocation never
+// bleeds across tests.
+func mustTestIDMap(t *testing.T) *memorylake.IDMap {
+	t.Helper()
+	m, err := memorylake.LoadIDMap(t.TempDir() + "/memorylake-idmap.json")
+	if err != nil {
+		t.Fatalf("LoadIDMap: %v", err)
+	}
+	return m
+}
+
 func TestNewRoutingSelector_EnvOverrideForcesSQLite(t *testing.T) {
 	t.Setenv("ENGRAM_BACKEND", "sqlite")
 
@@ -31,7 +43,7 @@ func TestNewRoutingSelector_EnvOverrideForcesSQLite(t *testing.T) {
 		"myproj": {ProjID: "proj-1"},
 	}}
 
-	sel := NewRoutingSelector(sqlite, memorylake.Config{}, enab)
+	sel := NewRoutingSelector(sqlite, memorylake.Config{}, enab, mustTestIDMap(t))
 	got := sel("myproj")
 	if got != mcp.MemoryBackend(sqlite) {
 		t.Fatalf("expected sqlite fallback when ENGRAM_BACKEND=sqlite, got %T", got)
@@ -42,7 +54,7 @@ func TestNewRoutingSelector_NotEnabledUsesSQLite(t *testing.T) {
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{}}
 
-	sel := NewRoutingSelector(sqlite, memorylake.Config{}, enab)
+	sel := NewRoutingSelector(sqlite, memorylake.Config{}, enab, mustTestIDMap(t))
 	got := sel("unknown-project")
 	if got != mcp.MemoryBackend(sqlite) {
 		t.Fatalf("expected sqlite for non-enabled project, got %T", got)
@@ -70,7 +82,7 @@ func TestNewRoutingSelector_EnabledWithProjIDRoutesToMemoryLake(t *testing.T) {
 		"myproj": {ProjID: "proj-42"},
 	}}
 
-	sel := NewRoutingSelector(sqlite, cfg, enab)
+	sel := NewRoutingSelector(sqlite, cfg, enab, mustTestIDMap(t))
 	got := sel("myproj")
 	if _, ok := got.(*memorylake.MemoryLakeBackend); !ok {
 		t.Fatalf("expected *memorylake.MemoryLakeBackend for enabled project, got %T", got)
@@ -113,7 +125,7 @@ func TestNewRoutingSelector_EnabledEmptyProjIDResolvesAndSaves(t *testing.T) {
 		"myproj": {ProjID: ""},
 	}}
 
-	sel := NewRoutingSelector(sqlite, cfg, enab)
+	sel := NewRoutingSelector(sqlite, cfg, enab, mustTestIDMap(t))
 	got := sel("myproj")
 	if _, ok := got.(*memorylake.MemoryLakeBackend); !ok {
 		t.Fatalf("expected *memorylake.MemoryLakeBackend once projID resolved, got %T", got)
@@ -149,7 +161,7 @@ func TestNewRoutingSelector_ResolutionFailureFallsBackToSQLite(t *testing.T) {
 		"myproj": {ProjID: ""},
 	}}
 
-	sel := NewRoutingSelector(sqlite, cfg, enab)
+	sel := NewRoutingSelector(sqlite, cfg, enab, mustTestIDMap(t))
 	got := sel("myproj")
 	if got != mcp.MemoryBackend(sqlite) {
 		t.Fatalf("expected sqlite fallback on resolution failure, got %T", got)
@@ -202,7 +214,7 @@ func TestNewRoutingSelector_TransientFailureIsNotCachedAndRetries(t *testing.T) 
 		"myproj": {ProjID: ""},
 	}}
 
-	sel := NewRoutingSelector(sqlite, cfg, enab)
+	sel := NewRoutingSelector(sqlite, cfg, enab, mustTestIDMap(t))
 
 	// First call: server is down → transient failure → sqlite fallback.
 	if got := sel("myproj"); got != mcp.MemoryBackend(sqlite) {
@@ -268,7 +280,7 @@ func TestNewRoutingSelector_ConcurrentEnabledUnresolvedProjectsNoDataRace(t *tes
 		enab.EnabledProjects[fmt.Sprintf("concurrent-proj-%d", i)] = memorylake.ProjectEntry{}
 	}
 
-	sel := NewRoutingSelector(sqlite, cfg, enab)
+	sel := NewRoutingSelector(sqlite, cfg, enab, mustTestIDMap(t))
 
 	results := make([]mcp.MemoryBackend, numProjects)
 	var wg sync.WaitGroup
@@ -346,7 +358,7 @@ func TestNewRoutingSelector_SlowProjectDoesNotBlockOthers(t *testing.T) {
 		"fast-proj": {ProjID: ""},
 	}}
 
-	sel := NewRoutingSelector(sqlite, cfg, enab)
+	sel := NewRoutingSelector(sqlite, cfg, enab, mustTestIDMap(t))
 
 	// Wedge slow-proj mid-resolution in the background.
 	go sel("slow-proj")
@@ -421,7 +433,7 @@ func TestNewRoutingSelector_SameProjectConcurrentFirstCallsResolveOnce(t *testin
 		"solo": {ProjID: ""},
 	}}
 
-	sel := NewRoutingSelector(sqlite, cfg, enab)
+	sel := NewRoutingSelector(sqlite, cfg, enab, mustTestIDMap(t))
 
 	const n = 16
 	results := make([]mcp.MemoryBackend, n)
