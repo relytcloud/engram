@@ -121,13 +121,28 @@ func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64,
 	// can be traced back to the message that produced it.
 	obsID := contentHash(p.Content)
 
+	// Snapshot the project's existing fact ids *before* appending this message
+	// so BackfillFacts only claims facts that appear afterward. MemoryLake
+	// extraction is asynchronous and bounded here by maxWait, so earlier saves
+	// can leave unmarked facts behind; without this snapshot, this save would
+	// claim one of those stale facts and overwrite its engram_raw with the
+	// wrong observation's text (data corruption on read-back). See BackfillFacts.
+	known, err := b.client.listFacts(b.ws, b.projID)
+	if err != nil {
+		return 0, err
+	}
+	knownFactIDs := make(map[string]bool, len(known))
+	for _, f := range known {
+		knownFactIDs[f.ID] = true
+	}
+
 	msgID, err := b.client.AppendObservation(b.ws, b.projID, convCustomID, b.actorID, p)
 	if err != nil {
 		return 0, err
 	}
 
 	md := FactMetadata(p, obsID, p.Content)
-	facts, err := b.client.BackfillFacts(b.ws, b.projID, md, b.poll, b.maxWait)
+	facts, err := b.client.BackfillFacts(b.ws, b.projID, md, knownFactIDs, b.poll, b.maxWait)
 	if err != nil {
 		return 0, err
 	}

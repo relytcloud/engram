@@ -119,6 +119,18 @@ func (c *Client) patchFactMetadata(ws, projID, factID string, md map[string]any)
 // finds so engram can reconstruct the originating Observation from it later
 // (see FactMetadata / ObservationFromFact).
 //
+// knownFactIDs is a snapshot of the project's fact ids taken *before* the
+// message this backfill belongs to was appended (see AddObservation). Any
+// fact whose id is in that snapshot pre-dates this write and must never be
+// claimed by it: MemoryLake's extraction is asynchronous, so a previous save
+// may have appended a message whose fact had not yet materialized (or whose
+// own bounded backfill timed out), leaving an unmarked fact behind. Without
+// this guard, the next save would "claim" that stale unmarked fact and PATCH
+// *this* observation's engram_raw onto it, corrupting the earlier observation
+// so mem_get/mem_search read back the wrong verbatim text. Restricting the
+// scan to facts absent from the snapshot keeps each save associated only with
+// facts that appeared after its own message was appended.
+//
 // BackfillFacts returns once a poll finds no additional un-backfilled facts
 // and at least one fact has been backfilled so far (the set has
 // "stabilized"), or once maxWait elapses — whichever comes first. Timing out
@@ -130,7 +142,7 @@ func (c *Client) patchFactMetadata(ws, projID, factID string, md map[string]any)
 // poll and maxWait are caller-supplied rather than hardcoded so tests can
 // drive this loop with millisecond-scale timings instead of waiting on
 // production-scale polling intervals.
-func (c *Client) BackfillFacts(ws, projID string, md map[string]any, poll, maxWait time.Duration) ([]Fact, error) {
+func (c *Client) BackfillFacts(ws, projID string, md map[string]any, knownFactIDs map[string]bool, poll, maxWait time.Duration) ([]Fact, error) {
 	var backfilled []Fact
 	seen := map[string]bool{}
 
@@ -141,6 +153,12 @@ func (c *Client) BackfillFacts(ws, projID string, md map[string]any, poll, maxWa
 		}
 		for _, f := range facts {
 			if seen[f.ID] {
+				continue
+			}
+			if knownFactIDs[f.ID] {
+				// Pre-existing before this write's message was appended — it
+				// belongs to an earlier observation (possibly one whose own
+				// backfill timed out) and must not be claimed here.
 				continue
 			}
 			if _, alreadyBackfilled := f.Metadata[metaObsID]; alreadyBackfilled {

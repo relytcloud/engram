@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,18 +87,24 @@ func newTestBackend(t *testing.T, srvURL string) *MemoryLakeBackend {
 // fact, and AddObservation returns the int64 the IDMap assigns that fact id.
 func TestBackend_AddObservation_ReturnsInt64ViaBackfill(t *testing.T) {
 	var patched bool
+	var appended int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
 		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.StoreInt32(&appended, 1)
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
 		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
-				"items": []map[string]any{
+			// The pre-append snapshot GET must see an empty project so fact-1
+			// (extracted from *this* message) is treated as new, not stale.
+			var items []map[string]any
+			if atomic.LoadInt32(&appended) == 1 {
+				items = []map[string]any{
 					{"id": "fact-1", "fact": "extracted", "metadata": map[string]any{}},
-				},
-			}})
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
 		case r.Method == "PATCH" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-1":
 			patched = true
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
@@ -158,6 +165,66 @@ func TestBackend_AddObservation_TimeoutReturnsProvisional(t *testing.T) {
 	}
 	if f, ok := b.idmap.FactFor(id); !ok || f != "msg-9" {
 		t.Fatalf("FactFor(%d)=%q,%v; want provisional msg-9,true", id, f, ok)
+	}
+}
+
+// TestBackend_AddObservation_DoesNotClaimPreExistingUnmarkedFact is the FIX #1
+// regression: MemoryLake extraction is asynchronous and bounded here, so an
+// earlier save can leave an unmarked fact behind (its own backfill timed out).
+// A later AddObservation must NOT claim that stale unmarked fact and stamp its
+// own engram_raw onto it (which would corrupt the earlier observation on
+// read-back). AddObservation snapshots the project's fact ids before appending
+// its message, and BackfillFacts only claims facts absent from that snapshot.
+//
+// Scenario: the project already has one leftover unmarked fact ("stale-fact")
+// at snapshot time; after this message is appended a new fact ("new-fact") is
+// extracted. Only new-fact must be PATCHed with this call's metadata.
+func TestBackend_AddObservation_DoesNotClaimPreExistingUnmarkedFact(t *testing.T) {
+	var appended int32
+	var patchedIDs []string
+	staleFact := map[string]any{"id": "stale-fact", "fact": "an earlier observation, unmarked", "metadata": map[string]any{}}
+	newFact := map[string]any{"id": "new-fact", "fact": "this observation", "metadata": map[string]any{}}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.StoreInt32(&appended, 1)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			// Before append: only the stale leftover fact exists (the snapshot).
+			// After append: MemoryLake has extracted the new fact too.
+			items := []map[string]any{staleFact}
+			if atomic.LoadInt32(&appended) == 1 {
+				items = []map[string]any{staleFact, newFact}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/"):
+			id := strings.TrimPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/")
+			patchedIDs = append(patchedIDs, id)
+			var body struct {
+				Metadata map[string]any `json:"metadata"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": id, "fact": "this observation", "metadata": body.Metadata,
+			}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	_, err := b.AddObservation(store.AddObservationParams{
+		SessionID: "sess-1", Type: "decision", Title: "t", Content: "this observation, verbatim", Scope: "global",
+	})
+	if err != nil {
+		t.Fatalf("AddObservation: %v", err)
+	}
+	if len(patchedIDs) != 1 || patchedIDs[0] != "new-fact" {
+		t.Fatalf("patchedIDs=%v, want exactly [new-fact] (stale-fact must not be claimed)", patchedIDs)
 	}
 }
 

@@ -198,7 +198,7 @@ func TestBackfillFacts_PollsUntilNewFactAppearsThenBackfills(t *testing.T) {
 		metaObsID: "42",
 	}
 
-	facts, err := c.BackfillFacts("ws-1", "proj-1", md, 5*time.Millisecond, 200*time.Millisecond)
+	facts, err := c.BackfillFacts("ws-1", "proj-1", md, nil, 5*time.Millisecond, 200*time.Millisecond)
 	if err != nil {
 		t.Fatalf("BackfillFacts: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestBackfillFacts_TimesOutReturningPartialResults(t *testing.T) {
 	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
 
 	start := time.Now()
-	facts, err := c.BackfillFacts("ws-1", "proj-1", map[string]any{}, 5*time.Millisecond, 30*time.Millisecond)
+	facts, err := c.BackfillFacts("ws-1", "proj-1", map[string]any{}, nil, 5*time.Millisecond, 30*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if err != nil {
