@@ -26,7 +26,15 @@
 
 > 连带红利:删掉同步回填后,之前"存一条卡几十秒"的问题消失;删掉 idmap 后,跨项目 id 泄露、跨机句柄、全局唯一那一整套复杂度与其 bug 面全部消失。
 
-## 3. `id` 类型放宽(A1 的核心机械改动)
+## 3. by-id 键改用已有的 `sync_id`(A1′ —— 定稿方案,取代原 A1)
+
+> **定稿为 A1′**:不 retype `store.Observation.ID`(那会波及 ~100 处含 cloud 同步层,高危)。改为**复用 Engram 已有的字符串 id `SyncID`(`obs-<hex>`,已在工具响应暴露)**作为 by-id 工具的键。`store.Observation.ID int64` 与 cloud/tui/server **完全不动**。
+> - **MemoryLake**:`SyncID = fact-id`(无需 idmap)。
+> - **SQLite**:后端内部用**已存在的** `store.GetObservationBySyncID(syncID)`(store.go:4317)把 sync_id→int64 再调既有 int64 方法;store 无需改。
+> - **MCP by-id 工具**:`id` 参数 `WithNumber`→`WithString`,值 = sync_id(search/save 响应已返回 sync_id 作为 handle)。
+> - `MemoryBackend` 接口 by-id 方法参数 `int64`→`string`(sync_id);`*store.Store` 不再直接实现接口,新增薄 `sqliteBackend` 适配器(sync_id→int64 转译)。
+
+### (历史备选,不采用)A1-full:直接 retype `store.Observation.ID int64→string`
 
 把 **`MemoryBackend` 接口的 by-id 方法参数从 `int64` 改为 `string`**,统一为不透明 id:
 
