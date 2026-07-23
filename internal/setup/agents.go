@@ -57,7 +57,7 @@ func agentAdapters() []agentAdapter {
 				"Verify ~/.codex/config.toml has [mcp_servers.engram]",
 				"Verify model_instructions_file + experimental_compact_prompt_file are set",
 				"Verify plugin is installed with: codex plugin list",
-				"If codex CLI was absent during setup, install manually: codex plugin marketplace add Gentleman-Programming/engram --ref main && codex plugin add engram@engram",
+				"If codex CLI was absent during setup, install manually: codex plugin marketplace add relytcloud/engram --ref main && codex plugin add engram@engram",
 			},
 		},
 		{

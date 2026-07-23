@@ -78,8 +78,8 @@ type Result struct {
 	TUIPluginEnabled bool
 }
 
-const claudeCodeMarketplace = "Gentleman-Programming/engram"
-const codexMarketplace = "Gentleman-Programming/engram"
+const claudeCodeMarketplace = "relytcloud/engram"
+const codexMarketplace = "relytcloud/engram"
 
 const openCodeSubagentStatuslinePlugin = "opencode-subagent-statusline"
 

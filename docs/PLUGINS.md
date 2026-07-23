@@ -80,8 +80,8 @@ For [Claude Code](https://docs.anthropic.com/en/docs/claude-code) users, a plugi
 
 ```bash
 # Install via Claude Code marketplace (recommended)
-claude plugin marketplace add Gentleman-Programming/engram
-claude plugin install engram
+claude plugin marketplace add relytcloud/engram
+claude plugin install engram@engram
 
 # Or via engram binary (works from Homebrew or binary install)
 engram setup claude-code
