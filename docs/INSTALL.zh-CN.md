@@ -1,0 +1,236 @@
+# Engram 安装与接入指南(中文)
+
+Engram 是给 AI 编码 agent 用的**持久记忆**服务:单个 Go 二进制,内置 SQLite(默认、真源)+ 可选 MemoryLake 后端,通过 MCP(stdio)、CLI、HTTP、TUI 四种接口对外。本文覆盖 **macOS 和 Linux** 的安装,以及**如何把它接入 Claude Code 作为插件**。
+
+> 版本:以 [Releases](https://github.com/relytcloud/engram/releases) 页最新的 `vX.Y.Z` 为准,下文示例用 `v0.1.0`。
+
+---
+
+## 一、安装二进制
+
+有两种方式:**下载预编译包(推荐)** 或 **从源码编译**。
+
+### 方式 A:下载预编译 release 包(推荐)
+
+release 包对每个平台都是一个**静态链接、无依赖**的二进制(`CGO_ENABLED=0`,纯 Go SQLite),下载解压即用。
+
+先确认你的系统架构:
+
+```bash
+uname -sm
+# Darwin arm64  → macOS Apple Silicon (M 系列)
+# Darwin x86_64 → macOS Intel
+# Linux  x86_64 → Linux amd64
+# Linux  aarch64→ Linux arm64
+```
+
+对照下表选择包名(`<os>_<arch>`):
+
+| 系统 | 架构 | 包名 |
+|---|---|---|
+| macOS Apple Silicon | `Darwin arm64` | `engram_0.1.0_darwin_arm64.tar.gz` |
+| macOS Intel | `Darwin x86_64` | `engram_0.1.0_darwin_amd64.tar.gz` |
+| Linux x86_64 | `Linux x86_64` | `engram_0.1.0_linux_amd64.tar.gz` |
+| Linux ARM64 | `Linux aarch64` | `engram_0.1.0_linux_arm64.tar.gz` |
+
+#### macOS(Apple Silicon 示例)
+
+```bash
+cd /tmp
+VER=0.1.0
+curl -fsSL -o engram.tar.gz \
+  "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_darwin_arm64.tar.gz"
+tar -xzf engram.tar.gz engram
+mkdir -p ~/.local/bin
+install -m 0755 engram ~/.local/bin/engram
+
+# macOS 二进制是 ad-hoc 签名(未公证),首次运行如被 Gatekeeper 拦截:
+xattr -d com.apple.quarantine ~/.local/bin/engram 2>/dev/null || true
+```
+
+> Intel Mac 把上面的 `darwin_arm64` 换成 `darwin_amd64`。
+
+#### Linux(amd64 示例)
+
+```bash
+cd /tmp
+VER=0.1.0
+curl -fsSL -o engram.tar.gz \
+  "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_linux_amd64.tar.gz"
+tar -xzf engram.tar.gz engram
+mkdir -p ~/.local/bin
+install -m 0755 engram ~/.local/bin/engram
+```
+
+> ARM64 机器(如树莓派 / 云 ARM 实例)把 `linux_amd64` 换成 `linux_arm64`。
+> 想装到系统级 `/usr/local/bin` 就把 `~/.local/bin` 换成 `/usr/local/bin` 并加 `sudo`。
+
+#### (可选)校验完整性
+
+```bash
+curl -fsSL -O "https://github.com/relytcloud/engram/releases/download/v${VER}/checksums.txt"
+shasum -a 256 -c checksums.txt --ignore-missing   # macOS
+# sha256sum -c checksums.txt --ignore-missing      # Linux
+```
+
+### 方式 B:从源码编译
+
+需要 Go 1.25+。产物与 release 包一致(纯 Go,无需 CGO)。
+
+```bash
+git clone https://github.com/relytcloud/engram.git
+cd engram
+CGO_ENABLED=0 go build -o ~/.local/bin/engram ./cmd/engram
+```
+
+> 一份源码可交叉编译到所有平台,例如为 Linux amd64 出包:
+> `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o engram-linux-amd64 ./cmd/engram`
+
+---
+
+## 二、把 `~/.local/bin` 加入 PATH 并验证
+
+```bash
+# 若还没加过,按你的 shell 追加一次(zsh 是 macOS 默认):
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # zsh
+# echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # bash
+exec $SHELL          # 或重开终端
+
+# 验证:
+engram version       # 应打印 0.1.0
+which engram         # 应指向 ~/.local/bin/engram
+```
+
+首次运行任何命令会自动在 `~/.engram/engram.db` 创建本地数据库,这就是你的记忆真源。
+
+---
+
+## 三、接入 Claude Code(创建插件)
+
+Engram 以 **Claude Code 原生插件**形式接入:一条命令帮你完成「注册插件市场 → 安装插件 → 写入 MCP 配置」。插件带来的能力:
+
+- **MCP 记忆工具**(`mem_save` / `mem_search` / `mem_context` 等)——agent 直接调用;
+- **hooks**:会话开始自动加载记忆协议、压缩(compaction)后自动恢复上下文;
+- **skills**:记忆使用规范。
+
+### 前置条件
+
+已安装 Claude Code CLI(命令 `claude` 在 PATH 中)。没有的话先装:<https://docs.anthropic.com/en/docs/claude-code>
+
+### 一键接入(推荐)
+
+```bash
+engram setup claude-code
+```
+
+它会自动做三件事:
+
+1. `claude plugin marketplace add relytcloud/engram`(注册插件市场,幂等);
+2. `claude plugin install engram@engram`(安装插件:hooks + skills);
+3. 写入用户级 MCP 配置 `~/.claude/mcp/engram.json`,内容形如:
+
+   ```json
+   {
+     "command": "/Users/you/.local/bin/engram",
+     "args": ["mcp", "--tools=agent"]
+   }
+   ```
+
+   这里用的是**二进制绝对路径**(而非 PATH 查找),所以即使 PATH 没传到 MCP 子进程(Windows 常见)也能启动;二进制移动位置后**重跑 `engram setup claude-code`** 即可修正。
+
+完成后**重启 Claude Code**,让它加载插件与 MCP。
+
+### 验证插件已生效
+
+新开一个 Claude Code 会话,确认能看到 `mem_*` 工具(如让它调用 `mem_context`)。或用 CLI 侧验证记忆链路本身正常:
+
+```bash
+engram save "第一条测试记忆" --project demo
+engram search "测试" --project demo
+```
+
+### 手动接入(不想用市场插件时)
+
+只想要 MCP 记忆工具、不装 hooks/skills,可以直接注册 MCP server:
+
+```bash
+# 用 Claude Code 内置命令注册(用户级),注意 engram 换成绝对路径更稳:
+claude mcp add engram -- "$(which engram)" mcp --tools=agent
+```
+
+或手写 `~/.claude/mcp/engram.json`(内容同上一节的 JSON)。
+
+### 移除
+
+```bash
+claude plugin uninstall engram        # 卸插件
+rm -f ~/.claude/mcp/engram.json       # 删 MCP 配置
+```
+
+---
+
+## 四、(可选)启用 MemoryLake 后端
+
+默认所有 project 都用**本地 SQLite**。只有你**显式 enable** 的 project 才会改用 MemoryLake(记忆以 V3 fact 形式存到 MemoryLake 的 `engram` workspace),其余 project 完全不受影响。二者可在同一台机器上并存。
+
+### 1) 配置连接(环境变量)
+
+写进你的 shell 配置(`~/.zshrc` / `~/.bashrc`),这样 CLI 和 Claude Code 拉起的 MCP 子进程都能读到:
+
+```bash
+# 必填:
+export ENGRAM_MEMORYLAKE_BASE_URL="https://app.memorylake.ai/openapi/memorylake"
+export ENGRAM_MEMORYLAKE_API_KEY="sk-你的APIKey"
+
+# 可选:
+export ENGRAM_MEMORYLAKE_WORKSPACE="engram"     # 默认 engram
+export ENGRAM_MEMORYLAKE_ACTOR="$(hostname)"    # 多人共享 project 时区分贡献者;默认取主机名
+```
+
+> API key 决定了写入的租户(tenant),Engram 代码里没有独立的 "org" 概念。
+> `ENGRAM_MEMORYLAKE_BASE_URL` 必须带 `/openapi/memorylake` 前缀,客户端会在其后拼 `/api/v3/...`。
+
+### 2) 对某个 project 启用 / 关闭 / 查看
+
+```bash
+engram memorylake enable  --project <project名>   # 该 project 改用 MemoryLake
+engram memorylake disable --project <project名>   # 改回本地 SQLite
+engram memorylake status                          # 列出所有已知 project 及其当前后端
+```
+
+enable 信息记录在 `~/.engram/memorylake.json`;首次对该 project 做 `mem_save` 时会在 `engram` workspace 下按需创建对应 MemoryLake project(多人并发创建有 409 恢复,不会冲突)。
+
+### 3) 全局安全阀
+
+临时想让**所有** project 都强制走 SQLite(无视 enable 列表),设一个环境变量即可,便于回退排查:
+
+```bash
+export ENGRAM_BACKEND=sqlite
+```
+
+### MemoryLake 后端的已知差异
+
+- `mem_save` 走 MemoryLake 时是**追加即返回、异步抽取**:内容作为对话消息提交,由 MemoryLake 的抽取管线异步转成 fact,不阻塞等待。刚存的内容要过一会儿才在检索里出现。
+- 搜索是**纯语义**(向量),不再是 SQLite 的 FTS5/BM25 精确匹配;内容也会被 MemoryLake 抽取/改写,而非逐字保真。
+- 去重、更新、冲突检测、遗忘等由 MemoryLake 自身能力接管。
+
+---
+
+## 五、常见问题
+
+| 现象 | 处理 |
+|---|---|
+| `engram: command not found` | `~/.local/bin` 没进 PATH,见第二节;或重开终端 |
+| macOS 提示「无法验证开发者 / 已损坏」 | `xattr -d com.apple.quarantine ~/.local/bin/engram`,或右键→打开 |
+| `engram setup claude-code` 报 `claude CLI not found` | 先装 Claude Code 并确保 `claude` 在 PATH |
+| Claude Code 里看不到 `mem_*` 工具 | 重启 Claude Code;检查 `~/.claude/mcp/engram.json` 里的 `command` 是否为有效绝对路径;二进制移动过就重跑 setup |
+| 启用 MemoryLake 后存进去搜不到 | 抽取是异步的,稍等;或用 `ENGRAM_BACKEND=sqlite` 对比验证链路 |
+| 想彻底回到本地存储 | `engram memorylake disable --project <名>`,或全局 `export ENGRAM_BACKEND=sqlite` |
+
+---
+
+## 参考
+
+- 完整 API / Schema / CLI / 环境变量:仓库根 `DOCS.md`(MemoryLake 一节)
+- 发布流程:`RELEASING.md`
+- 架构总览:`docs/ARCHITECTURE.md`、`docs/CODEBASE-GUIDE.md`
