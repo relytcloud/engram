@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -140,117 +139,37 @@ func TestAppendObservation_SameContentIsIdempotentViaCustomID(t *testing.T) {
 	}
 }
 
-// TestBackfillFacts_PollsUntilNewFactAppearsThenBackfills is the scenario
-// from the task-7 brief: GET .../facts is empty for the first two polls,
-// then on the third returns a single newly-extracted fact. BackfillFacts
-// must keep polling (on the caller-supplied interval, not a hardcoded one),
-// notice the fact once it appears, PATCH engram's metadata onto it exactly
-// once, and return it without waiting the full maxWait.
-func TestBackfillFacts_PollsUntilNewFactAppearsThenBackfills(t *testing.T) {
-	var getCount int32
-	var patchCount int32
-	var lastPatchMetadata map[string]any
-
-	fact := Fact{
-		ID:        "fact-1",
-		Fact:      "user prefers dark mode",
-		Metadata:  map[string]any{},
-		CreatedAt: "2026-07-22T00:00:00Z",
-	}
-
+// TestPatchFactMetadata_OverwritesMetadata verifies the PATCH-metadata helper
+// still used by PinObservation/UnpinObservation/MarkReviewed (the surviving
+// explicit-write paths under the Option A thin adapter — see backend.go's
+// doc comment on what AddObservation itself no longer does).
+func TestPatchFactMetadata_OverwritesMetadata(t *testing.T) {
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
-			n := atomic.AddInt32(&getCount, 1)
-			var items []Fact
-			if n >= 3 {
-				items = []Fact{fact}
-			}
-			json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data":    map[string]any{"items": items},
-			})
-		case r.Method == "PATCH" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-1":
-			atomic.AddInt32(&patchCount, 1)
-			var body struct {
-				Metadata map[string]any `json:"metadata"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			lastPatchMetadata = body.Metadata
-			// Real MemoryLake would persist the patched metadata; simulate
-			// that so the next GET reflects it (and BackfillFacts sees the
-			// fact as already-backfilled, letting the poll loop stabilize).
-			fact.Metadata = body.Metadata
-			json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data":    fact,
-			})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		if r.Method == "PATCH" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-1" {
+			json.NewDecoder(r.Body).Decode(&gotBody)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "fact-1", "fact": "f", "metadata": gotBody["metadata"],
+			}})
+			return
 		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
 	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
-
-	md := map[string]any{
-		metaRaw:   "user prefers dark mode, verbatim",
-		metaObsID: "42",
-	}
-
-	facts, err := c.BackfillFacts("ws-1", "proj-1", md, nil, 5*time.Millisecond, 200*time.Millisecond)
+	updated, err := c.patchFactMetadata("ws-1", "proj-1", "fact-1", map[string]any{"pinned": true})
 	if err != nil {
-		t.Fatalf("BackfillFacts: %v", err)
+		t.Fatalf("patchFactMetadata: %v", err)
 	}
-	if len(facts) != 1 {
-		t.Fatalf("got %d facts, want 1", len(facts))
+	if updated.Metadata["pinned"] != true {
+		t.Fatalf("updated.Metadata=%v, want pinned=true", updated.Metadata)
 	}
-	if facts[0].ID != "fact-1" {
-		t.Fatalf("fact id=%q, want fact-1", facts[0].ID)
+	md, _ := gotBody["metadata"].(map[string]any)
+	if md["pinned"] != true {
+		t.Fatalf("PATCH body metadata=%v, want pinned=true", md)
 	}
-	if got := atomic.LoadInt32(&getCount); got < 3 {
-		t.Fatalf("getCount=%d, want at least 3 (2 empty polls + 1 with the fact)", got)
-	}
-	if got := atomic.LoadInt32(&patchCount); got != 1 {
-		t.Fatalf("patchCount=%d, want exactly 1 (must not re-PATCH once backfilled)", got)
-	}
-	if lastPatchMetadata[metaRaw] != "user prefers dark mode, verbatim" {
-		t.Fatalf("PATCH metadata missing engram_raw: %+v", lastPatchMetadata)
-	}
-	if lastPatchMetadata[metaObsID] != "42" {
-		t.Fatalf("PATCH metadata missing engram_obs_id: %+v", lastPatchMetadata)
-	}
-}
-
-// TestBackfillFacts_TimesOutReturningPartialResults verifies the timeout
-// path: if no fact ever shows up, BackfillFacts must give up after maxWait
-// and return an empty (not nil-error) result — a timeout is not a failure,
-// since MemoryLake's extraction may simply not have run yet.
-func TestBackfillFacts_TimesOutReturningPartialResults(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"success": true,
-			"data":    map[string]any{"items": []Fact{}},
-		})
-	}))
-	defer srv.Close()
-
-	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
-
-	start := time.Now()
-	facts, err := c.BackfillFacts("ws-1", "proj-1", map[string]any{}, nil, 5*time.Millisecond, 30*time.Millisecond)
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("BackfillFacts: %v, want nil (timeout is not an error)", err)
-	}
-	if len(facts) != 0 {
-		t.Fatalf("got %d facts, want 0 (nothing ever appeared)", len(facts))
-	}
-	if elapsed < 30*time.Millisecond {
-		t.Fatalf("returned after %v, want >= maxWait (30ms)", elapsed)
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("returned after %v, want reasonably close to maxWait (30ms)", elapsed)
+	if _, hasFact := gotBody["fact"]; hasFact {
+		t.Fatalf("patchFactMetadata must only send metadata, not fact: %v", gotBody)
 	}
 }

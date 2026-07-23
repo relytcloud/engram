@@ -41,9 +41,8 @@ type sessionRecord struct {
 // task brief asks us not to do.
 //
 // Instead this index tracks the fields engram's callers actually need
-// locally — the same accepted pattern IDMap and TopicIndex already use for
-// information MemoryLake can't (or isn't confirmed to) answer (see their doc
-// comments). CreateSession still calls ensureConversation (the one part of
+// locally — an in-process/on-disk sidecar for information MemoryLake can't
+// (or isn't confirmed to) answer. CreateSession still calls ensureConversation (the one part of
 // "session ↔ conversation" that IS a real, tested MemoryLake write), so the
 // conversation genuinely exists in MemoryLake; this index is what supplies
 // the rest of store.Session's shape on every subsequent read.

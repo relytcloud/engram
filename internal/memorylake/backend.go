@@ -3,10 +3,8 @@ package memorylake
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,50 +32,70 @@ const defaultConversationCustomID = "engram-default"
 // Engram's SQLite store remains the source of truth for projects that have not
 // opted in; this backend is only constructed for projects explicitly enabled
 // for MemoryLake.
+//
+// Option A thin adapter (Phase 3, see docs/superpowers/specs/2026-07-23-
+// memorylake-thin-adapter-design.md): this type used to also own an IDMap
+// (process-global int64↔fact-id registry) and a TopicIndex (project+scope+
+// topic_key → fact-id cache backing a synchronous upsert path), both driving
+// a synchronous snapshot→append→backfill write sequence in AddObservation.
+// Both are retired: by-id methods take the MemoryLake fact id directly as
+// their string sync_id (no id-mapping layer needed — a fact id is already
+// globally unique), and AddObservation no longer waits on or claims
+// extracted facts at all (mem0's own pipeline owns dedup/upsert/conflict
+// merging asynchronously, off the request path — see AddObservation's doc
+// comment).
 type MemoryLakeBackend struct {
 	client  *Client
 	cfg     Config
 	ws      string // resolved workspace id ("ws-...")
 	projID  string // resolved MemoryLake project id
 	actorID string // resolved MemoryLake actor id
-	idmap   *IDMap
-	topics  *TopicIndex
 	// sessions is the local sidecar recording session lifecycle fields
 	// (project/directory/started_at/ended_at/summary) that have no confirmed
 	// analogue on a MemoryLake conversation object — see SessionIndex's doc
 	// comment for why this can't just be a GET on the conversation itself.
 	sessions *SessionIndex
-	poll     time.Duration
-	maxWait  time.Duration
 
-	// writeMu serializes the write path (AddObservation) for this backend
-	// instance. AddObservation is a snapshot→append→backfill sequence:
-	// BackfillFacts claims any fact that is both absent from the pre-append
-	// snapshot and not yet stamped with engram metadata. Two concurrent
-	// AddObservation calls on the same project could each snapshot before the
-	// other appends, so each would see the other's freshly-extracted fact as
-	// "new and unmarked" and race to claim it — one save stamping its own
-	// engram_raw onto the fact that belongs to the other (data corruption on
-	// read-back). Serializing the whole sequence per backend closes that
-	// window. Because routing caches a single backend instance per project,
-	// this mutex is naturally per-project: distinct projects hold distinct
-	// instances and never contend. Read paths (Get/Search/Timeline/...) are
-	// deliberately NOT guarded — only the write path needs ordering.
+	// writeMu serializes AddObservation/AddPrompt/AddPromptIfMissing for this
+	// backend instance. With the sync backfill retired, the write path itself
+	// (ensureConversation + append) has no cross-goroutine hazard of its own —
+	// this mutex remains mainly so the in-process prompt/passive dedup caches
+	// below (a check-then-append-then-record sequence) are observed
+	// atomically rather than racing two concurrent identical saves into a
+	// double append. Because routing caches a single backend instance per
+	// project, this mutex is naturally per-project: distinct projects hold
+	// distinct instances and never contend. Read paths (Get/Search/Timeline/
+	// ...) are deliberately NOT guarded — only the write path needs ordering.
 	writeMu sync.Mutex
+
+	// promptMu guards promptIDs: an in-process, non-persisted cache mapping
+	// AddPromptIfMissing's dedup key (see prompts.go's promptDedupKey) to the
+	// sync_id (MemoryLake message id) returned for it, so a second call with
+	// byte-identical session_id+project+content within this backend's
+	// lifetime skips the MemoryLake round trip entirely and reports
+	// inserted=false. This replaces the retired process-global IDMap's
+	// IntFor/IntIfExists, which served the same purpose across process
+	// restarts (persisted to disk); this cache does not persist and resets
+	// per process, which is acceptable since MemoryLake's own message
+	// idempotency (content-hash custom_id, see AppendObservation) already
+	// guarantees no duplicate message is created even on a cache miss — this
+	// is purely a network-round-trip optimization, not a correctness
+	// requirement.
+	promptMu  sync.Mutex
+	promptIDs map[string]string
+
+	// passiveMu guards passiveSeen: the PassiveCapture analogue of promptIDs
+	// above (see passive.go's passiveDedupKey) — an in-process, non-persisted
+	// set of already-saved learning dedup keys for this backend's lifetime.
+	passiveMu   sync.Mutex
+	passiveSeen map[string]bool
 }
 
 // NewBackend constructs a MemoryLakeBackend for the given workspace reference
 // (custom_id, name, or "ws-" id) and already-resolved MemoryLake project id. It
 // resolves the workspace id and ensures a HUMAN actor exists (keyed by
 // cfg.Actor, falling back to the machine hostname).
-//
-// idmap is the PROCESS-GLOBAL IDMap shared by every enabled project (see
-// IDMap's doc comment and cmd/engram/routing.go, which constructs it once and
-// passes the same instance to every backend). It must be non-nil. Sharing one
-// instance is what makes the int64 observation ids this backend hands out
-// globally unique rather than per-project — the fix for the by-id
-// cross-project leak.
-func NewBackend(cfg Config, ws, projID string, idmap *IDMap) (*MemoryLakeBackend, error) {
+func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 	client := NewClient(cfg)
 
 	wsID, err := client.ResolveWorkspaceID(ws)
@@ -98,11 +116,6 @@ func NewBackend(cfg Config, ws, projID string, idmap *IDMap) (*MemoryLakeBackend
 		return nil, err
 	}
 
-	topics, err := LoadTopicIndex(topicIndexPath(projID))
-	if err != nil {
-		return nil, err
-	}
-
 	sessions, err := LoadSessionIndex(sessionIndexPath(projID))
 	if err != nil {
 		return nil, err
@@ -114,218 +127,61 @@ func NewBackend(cfg Config, ws, projID string, idmap *IDMap) (*MemoryLakeBackend
 		ws:       wsID,
 		projID:   projID,
 		actorID:  actorID,
-		idmap:    idmap,
-		topics:   topics,
 		sessions: sessions,
-		poll:     time.Duration(cfg.ExtractPollMS) * time.Millisecond,
-		maxWait:  time.Duration(cfg.ExtractMaxWaitMS) * time.Millisecond,
 	}, nil
-}
-
-// factForID resolves an engram int64 id to a MemoryLake fact id for THIS
-// backend's project. Because the IDMap is process-global (shared across every
-// enabled project so ids are globally unique), an id minted for a DIFFERENT
-// project must read as not-found here — it must never resolve to one of this
-// project's facts. That projID guard is what stops a by-id lookup (e.g. HTTP
-// GET /observations/{id} on a multi-project `engram serve`) from returning
-// another project's content. ok is false for both an unknown id and an id
-// owned by another project.
-func (b *MemoryLakeBackend) factForID(id int64) (string, bool) {
-	projID, factID, ok := b.idmap.FactFor(id)
-	if !ok || projID != b.projID {
-		return "", false
-	}
-	return factID, true
-}
-
-// parseSyncID decodes the string sync_id MemoryBackend's by-id methods now
-// accept (see internal/mcp/backend.go's Phase 3 Task 1+2 sync_id migration)
-// back into the int64 IDMap key this backend's methods use internally. This
-// is an interim shim: for a MemoryLakeBackend, sync_id is presently just the
-// decimal string form of the IDMap int64 id (see AddObservation) rather than
-// the MemoryLake fact id directly — Phase 3B (Task 6) drops the IDMap
-// entirely and makes sync_id the fact id, at which point this shim goes
-// away. ok is false for a malformed (non-numeric) sync_id.
-func parseSyncID(syncID string) (int64, bool) {
-	id, err := strconv.ParseInt(syncID, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	return id, true
 }
 
 // ─── Observation CRUD (Tier A: core) ────────────────────────────────────────
 
-// AddObservation writes an observation to MemoryLake and returns a stable
-// int64 id.
+// AddObservation appends the observation's content as a MemoryLake
+// conversation message and returns immediately — it does not wait for, or
+// attempt to claim, any fact MemoryLake's own extraction pipeline (mem0)
+// eventually produces from that message.
 //
-// Because `engram mcp` is a short-lived subprocess, a fire-and-forget goroutine
-// would be killed when the process exits — so the extraction/backfill step runs
-// synchronously here (bounded by cfg.ExtractMaxWaitMS). The flow:
-//
-//  1. AppendObservation posts the content as a conversation message.
-//  2. BackfillFacts polls (bounded) for the fact MemoryLake extracts from that
-//     message and stamps engram's metadata onto it.
-//  3. Every backfilled fact id is registered in the IDMap. The first fact's
-//     int64 id is returned.
-//
-// If extraction produces no fact before the deadline, AddObservation does NOT
-// error: it returns a provisional int64 keyed off the MemoryLake message id
-// (the fact will materialize later; a subsequent AddObservation with identical
-// content is idempotent on the message custom_id). Callers treat this as a
-// successful, pending save.
-//
-// AddObservation itself is a thin string-sync_id wrapper (Phase 3 Task 1+2:
-// MemoryBackend's by-id surface is keyed by sync_id string, not int64 — see
-// internal/mcp/backend.go) around addObservationInt, which keeps this
-// backend's actual int64 IDMap-based logic unchanged. The returned sync_id is
-// presently just the decimal string of that int64 id; Phase 3B (Task 6) makes
-// sync_id the real MemoryLake fact id once the IDMap is retired.
+// This is the Option A thin-adapter write path (spec §2/§4): mem0's own
+// pipeline (vector+BM25 candidate recall, LLM ADD/UPDATE/NOOP decision,
+// conflict-aware merge) already does everything the retired synchronous
+// snapshot→append→backfill sequence existed to approximate locally —
+// deduplication, topic_key-style upsert, and content management are its job
+// now, not this adapter's. Because that decision runs asynchronously and
+// off this request's path, AddObservation cannot report the resulting fact's
+// real id: the sync_id it returns is a PENDING reference (the MemoryLake
+// message id this call appended, or a content-hash fallback if MemoryLake's
+// response carried no id) — not a fact id, and not guaranteed to resolve via
+// GetObservation/UpdateObservation/DeleteObservation/PinObservation. A
+// caller that needs the materialized fact (and its real fact-id sync_id)
+// must re-find it later via Search once mem0 has processed the message.
 func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (string, error) {
-	id, err := b.addObservationInt(p)
-	if err != nil {
-		return "", err
-	}
-	return strconv.FormatInt(id, 10), nil
-}
-
-func (b *MemoryLakeBackend) addObservationInt(p store.AddObservationParams) (int64, error) {
-	// Serialize the snapshot→append→backfill sequence against concurrent
-	// AddObservation calls on this same project (see writeMu's doc comment):
-	// without it, two concurrent saves can each claim the other's extracted
-	// fact and overwrite its engram_raw. Only the write path is locked; reads
-	// stay concurrent.
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
+	return b.appendObservation(p)
+}
 
-	// topic_key upsert: same project+scope+topic_key updates the existing
-	// fact in place (mirrors internal/store's topic_key match-and-UPDATE
-	// path) instead of appending a new conversation message. The local
-	// TopicIndex is what makes "the existing fact" findable at all — see
-	// topicindex.go's doc comment for why MemoryLake itself can't answer this
-	// query (metadata isn't filterable server-side).
-	//
-	// A TopicIndex hit is NOT trusted blindly: the index is only ever this
-	// backend's own eventually-consistent cache, and internal/store's
-	// equivalent match query filters `deleted_at IS NULL` — a hit here must
-	// clear the same bar. Before PATCHing, fetch the fact and reject the hit
-	// (falling through to the normal append+backfill path below, exactly as
-	// if the index had never had an entry) when either:
-	//   - the fact has since been forgotten (Expired == true) — without this
-	//     check, upserting into a forgotten fact would silently "revive" it:
-	//     Search/Timeline/Stats/FormatContext all exclude expired facts, so
-	//     the save would report success while its content stays permanently
-	//     invisible (task-12 hardening brief C1).
-	//   - the fact's own metadata no longer agrees with the scope/topic_key
-	//     that produced this lookup (normalized on both sides) — this catches
-	//     index drift from a fact whose identity moved out from under it
-	//     (e.g. UpdateObservation reassigning scope/topic_key; see C2) even if
-	//     the index entry itself was never explicitly purged.
-	// Either way, AddObservation self-heals: falling through re-establishes a
-	// fresh fact and topics.Put below overwrites the stale entry with it.
-	if p.TopicKey != "" {
-		if factID, ok := b.topics.Lookup(p.Project, p.Scope, p.TopicKey); ok {
-			current, err := b.getFact(factID)
-			if err != nil {
-				return 0, err
-			}
-			if isValidTopicKeyHit(current, p) {
-				return b.upsertTopicKeyFact(current, p)
-			}
-			// Stale/expired index entry: treat as a miss and fall through.
-		}
-	}
-
+// appendObservation is the shared body behind AddObservation and
+// PassiveCapture's per-learning save — both already hold (or don't need)
+// writeMu at their own call sites, so this helper itself does not lock.
+func (b *MemoryLakeBackend) appendObservation(p store.AddObservationParams) (string, error) {
 	convCustomID := p.SessionID
 	if convCustomID == "" {
 		convCustomID = defaultConversationCustomID
 	}
 
-	// Stable engram-side observation id stamped into fact metadata so a fact
-	// can be traced back to the message that produced it.
-	obsID := contentHash(p.Content)
-
-	// Snapshot the project's existing fact ids *before* appending this message
-	// so BackfillFacts only claims facts that appear afterward. MemoryLake
-	// extraction is asynchronous and bounded here by maxWait, so earlier saves
-	// can leave unmarked facts behind; without this snapshot, this save would
-	// claim one of those stale facts and overwrite its engram_raw with the
-	// wrong observation's text (data corruption on read-back). See BackfillFacts.
-	known, err := b.client.listFacts(b.ws, b.projID)
-	if err != nil {
-		return 0, err
-	}
-	knownFactIDs := make(map[string]bool, len(known))
-	for _, f := range known {
-		knownFactIDs[f.ID] = true
-	}
-
 	msgID, err := b.client.AppendObservation(b.ws, b.projID, convCustomID, b.actorID, p)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-
-	md := FactMetadata(p, obsID, p.Content)
-	facts, err := b.client.BackfillFacts(b.ws, b.projID, md, knownFactIDs, b.poll, b.maxWait)
-	if err != nil {
-		return 0, err
+	if msgID == "" {
+		// MemoryLake's response carried no id (defensive — the real API
+		// always returns one); fall back to a stable, content-derived
+		// pending reference rather than an empty sync_id.
+		msgID = contentHash(p.Content)
 	}
-
-	if len(facts) > 0 {
-		var first int64
-		for i, f := range facts {
-			id := b.idmap.IntFor(b.projID, f.ID)
-			if i == 0 {
-				first = id
-			}
-		}
-		// Record the first backfilled fact as this topic_key's fact so the
-		// next save with the same project+scope+topic_key upserts it instead
-		// of appending another message.
-		if p.TopicKey != "" {
-			if err := b.topics.Put(p.Project, p.Scope, p.TopicKey, facts[0].ID); err != nil {
-				return 0, err
-			}
-		}
-		return first, nil
-	}
-
-	// Extraction pending: return a provisional id keyed off the message.
-	provisional := msgID
-	if provisional == "" {
-		provisional = obsID
-	}
-	return b.idmap.IntFor(b.projID, provisional), nil
-}
-
-// isValidTopicKeyHit reports whether fact f is actually eligible to be
-// upserted as the project+scope+topic_key match for p — i.e. whether a
-// TopicIndex hit resolving to f should be trusted (see AddObservation's C1
-// hardening comment). A hit is valid only when:
-//   - f has not been forgotten (soft-deleted): f.Expired == false, mirroring
-//     internal/store's `deleted_at IS NULL` filter on its own topic_key match
-//     query.
-//   - f's own stamped scope/topic_key metadata (normalized) still agrees with
-//     the scope/topic_key this lookup was made for (also normalized) — a
-//     mismatch means the index entry has drifted from the fact's actual
-//     current identity (e.g. after UpdateObservation reassigned it).
-//
-// Any other difference (title, type, content) is exactly what an upsert is
-// *for* and does not affect validity.
-func isValidTopicKeyHit(f Fact, p store.AddObservationParams) bool {
-	if f.Expired {
-		return false
-	}
-	if normalizeIndexScope(metaString(f.Metadata, metaScope)) != normalizeIndexScope(p.Scope) {
-		return false
-	}
-	return normalizeIndexTopicKey(metaString(f.Metadata, metaTopicKey)) == normalizeIndexTopicKey(p.TopicKey)
+	return msgID, nil
 }
 
 // metaString reads a string-valued metadata key from a MemoryLake fact's
-// metadata map, returning "" if the key is absent or not a string. Local to
-// backend.go (not mapper.go, which task-12's hardening scope leaves
-// untouched) — used only by isValidTopicKeyHit above.
+// metadata map, returning "" if the key is absent or not a string. Used by
+// review.go's decay computation.
 func metaString(md map[string]any, key string) string {
 	if v, ok := md[key].(string); ok {
 		return v
@@ -333,85 +189,32 @@ func metaString(md map[string]any, key string) string {
 	return ""
 }
 
-// upsertTopicKeyFact implements the topic_key upsert hit path: PATCH the
-// already-known (and already fetched + validated, see isValidTopicKeyHit)
-// fact in place (new content + refreshed metadata) instead of appending a new
-// conversation message and waiting on extraction. This mirrors
-// internal/store's topic_key match: on a hit, the store's SQL UPDATEs
-// type/title/content/topic_key and bumps revision_count on the existing row
-// rather than inserting a new one (see store.go's AddObservation). scope is
-// intentionally left untouched here for the same reason the store's SQL never
-// assigns it on that branch: scope is part of what identified this fact as
-// the match (via the TopicIndex key) in the first place, so it cannot differ
-// from what's already stored. Any other metadata keys already on the fact
-// (e.g. "pinned") are preserved verbatim.
-//
-// current is the fact AddObservation already fetched (and validated) for this
-// hit — reusing it here avoids a second, redundant GET.
-func (b *MemoryLakeBackend) upsertTopicKeyFact(current Fact, p store.AddObservationParams) (int64, error) {
-	md := map[string]any{}
-	for k, v := range current.Metadata {
-		md[k] = v
-	}
-	md[metaRaw] = p.Content
-	md[metaTitle] = p.Title
-	md[metaType] = p.Type
-	md[metaTopicKey] = p.TopicKey
-	md[metaObsID] = contentHash(p.Content)
-	md[metaRev] = revisionFromMetadata(current.Metadata) + 1
-
-	if _, err := b.patchFact(current.ID, map[string]any{"fact": p.Content, "metadata": md}); err != nil {
-		return 0, err
-	}
-	return b.idmap.IntFor(b.projID, current.ID), nil
-}
-
-// GetObservation resolves the string sync_id (see parseSyncID) through the
-// IDMap to a MemoryLake fact id, fetches the fact, and decodes it back into a
-// store.Observation (Content preferring the verbatim engram_raw metadata over
-// MemoryLake's paraphrase).
+// GetObservation fetches the MemoryLake fact identified by syncID (which, for
+// this backend, simply *is* the MemoryLake fact id — see this type's doc
+// comment) and decodes it into a store.Observation.
 func (b *MemoryLakeBackend) GetObservation(syncID string) (*store.Observation, error) {
-	id, ok := parseSyncID(syncID)
-	if !ok {
-		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
-	factID, ok := b.factForID(id)
-	if !ok {
-		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
-	f, err := b.getFact(factID)
+	f, err := b.getFact(syncID)
 	if err != nil {
 		return nil, err
 	}
 	obs := ObservationFromFact(f)
-	obs.ID = id
-	obs.SyncID = syncID
 	obs.CreatedAt = f.CreatedAt
 	obs.UpdatedAt = f.UpdatedAt
 	return &obs, nil
 }
 
 // UpdateObservation merges the supplied fields into the fact's existing engram
-// metadata and PATCHes the fact. When Content changes, the fact's own text is
-// updated too (V3 FactUpdateRequest carries `content`) and engram_raw is kept in
-// sync so future reads return the verbatim edited text.
+// metadata and PATCHes the fact. This is an explicit, user-directed edit (see
+// spec §5.5: "仍允许显式 PATCH, 但正确姿势是再 save 一次让 mem0 合并") — mem0 may
+// still independently re-merge this fact later; Engram does not attempt to
+// prevent that.
 func (b *MemoryLakeBackend) UpdateObservation(syncID string, p store.UpdateObservationParams) (*store.Observation, error) {
-	id, ok := parseSyncID(syncID)
-	if !ok {
-		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
-	factID, ok := b.factForID(id)
-	if !ok {
-		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
-
-	current, err := b.getFact(factID)
+	current, err := b.getFact(syncID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy existing metadata so preserved keys (e.g. engram_raw for unchanged
-	// content, engram_obs_id) survive the PATCH.
+	// Copy existing metadata so preserved keys (e.g. "pinned") survive the PATCH.
 	md := map[string]any{}
 	for k, v := range current.Metadata {
 		md[k] = v
@@ -431,39 +234,17 @@ func (b *MemoryLakeBackend) UpdateObservation(syncID string, p store.UpdateObser
 
 	fields := map[string]any{"metadata": md}
 	if p.Content != nil {
-		md[metaRaw] = *p.Content
 		// V3 fact update body field is `fact` (same field name used on read;
 		// FactUpdateRequest has only `fact` + `metadata`, no `content`).
 		fields["fact"] = *p.Content
 	}
 
-	updated, err := b.patchFact(factID, fields)
+	updated, err := b.patchFact(syncID, fields)
 	if err != nil {
 		return nil, err
 	}
 
-	// If this update changed the fact's scope and/or topic_key, its
-	// project+scope+topic_key identity may no longer match whatever
-	// project+scope+topic_key the TopicIndex filed it under (that project
-	// isn't itself recoverable from fact metadata — see RemoveByFactID's doc
-	// comment — so the exact old key can't be recomputed here). Purge any
-	// entry pointing at this fact so a later save using the OLD
-	// scope/topic_key can never upsert-PATCH into this now-reassigned fact; a
-	// save using the NEW scope/topic_key simply misses and re-establishes its
-	// own entry via the normal append path (task-12 hardening brief C2). This
-	// purge is best-effort for the same reason as DeleteObservation's: the
-	// PATCH above already succeeded, and isValidTopicKeyHit's scope/topic_key
-	// comparison (C1) independently self-heals a stale pointer even if this
-	// purge fails to persist.
-	if p.Scope != nil || p.TopicKey != nil {
-		if _, rmErr := b.topics.RemoveByFactID(factID); rmErr != nil {
-			log.Printf("[memorylake] UpdateObservation: failed to purge stale TopicIndex entry for fact %s: %v", factID, rmErr)
-		}
-	}
-
 	obs := ObservationFromFact(updated)
-	obs.ID = id
-	obs.SyncID = syncID
 	obs.CreatedAt = updated.CreatedAt
 	obs.UpdatedAt = updated.UpdatedAt
 	return &obs, nil
@@ -472,35 +253,10 @@ func (b *MemoryLakeBackend) UpdateObservation(syncID string, p store.UpdateObser
 // DeleteObservation soft-deletes by calling MemoryLake's forget endpoint.
 // MemoryLake has no hard delete — forget marks the fact expired while retaining
 // it for audit — so the hardDelete flag is intentionally ignored: a hard-delete
-// request degrades to a forget. An id with no fact mapping is a no-op (nil).
-//
-// Once the fact is forgotten, any TopicIndex entry pointing at it is purged
-// (see RemoveByFactID) so a later save with the same project+scope+topic_key
-// can never upsert-PATCH a forgotten fact back into visibility. isValidTopicKeyHit's
-// Expired check (C1) already prevents that outcome on its own even if this
-// purge never ran; removing the pointer here just means most later saves
-// avoid paying for an extra GET+append round trip (task-12 hardening brief
-// C2). The purge is best-effort: it runs after forgetFact has already
-// succeeded, and a failure to persist it does not resurface the C1 data-loss
-// bug (self-healed on the next hit), so it is logged rather than returned as
-// this call's error.
+// request degrades to a forget.
 func (b *MemoryLakeBackend) DeleteObservation(syncID string, hardDelete bool) error {
 	_ = hardDelete // MemoryLake only supports soft delete (forget); see doc comment.
-	id, ok := parseSyncID(syncID)
-	if !ok {
-		return nil
-	}
-	factID, ok := b.factForID(id)
-	if !ok {
-		return nil
-	}
-	if err := b.forgetFact(factID); err != nil {
-		return err
-	}
-	if _, err := b.topics.RemoveByFactID(factID); err != nil {
-		log.Printf("[memorylake] DeleteObservation: failed to purge stale TopicIndex entry for fact %s: %v", factID, err)
-	}
-	return nil
+	return b.forgetFact(syncID)
 }
 
 // Search delegates to SearchFacts (Task 8), which handles semantic search plus
@@ -517,28 +273,16 @@ func (b *MemoryLakeBackend) MaxObservationLength() int {
 
 // PinObservation sets the pinned flag in the fact's metadata.
 func (b *MemoryLakeBackend) PinObservation(syncID string) error {
-	id, ok := parseSyncID(syncID)
-	if !ok {
-		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
-	return b.setPinned(id, true)
+	return b.setPinned(syncID, true)
 }
 
 // UnpinObservation clears the pinned flag in the fact's metadata.
 func (b *MemoryLakeBackend) UnpinObservation(syncID string) error {
-	id, ok := parseSyncID(syncID)
-	if !ok {
-		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
-	return b.setPinned(id, false)
+	return b.setPinned(syncID, false)
 }
 
 // setPinned reads the fact, merges pinned=<v> into its metadata, and PATCHes it.
-func (b *MemoryLakeBackend) setPinned(id int64, pinned bool) error {
-	factID, ok := b.factForID(id)
-	if !ok {
-		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
+func (b *MemoryLakeBackend) setPinned(factID string, pinned bool) error {
 	current, err := b.getFact(factID)
 	if err != nil {
 		return err
@@ -558,8 +302,13 @@ func (b *MemoryLakeBackend) setPinned(id int64, pinned bool) error {
 // the N facts before/after the anchor observation.
 //
 // First-cut: session grouping and prompts are not modeled (facts carry no
-// engram session id). SessionInfo is left nil. TODO(spec §6): richer timeline
-// fidelity once fact metadata carries session linkage.
+// engram session id). SessionInfo is left nil. Every returned entry's
+// (legacy, int64) ID field is left at zero — see this type's doc comment on
+// why sync_id (a MemoryLake fact id string) is the only identifier this
+// backend can offer; store.TimelineEntry has no sync_id field to carry it,
+// so the timeline text these entries feed still displays content correctly
+// but not a usable per-entry id. TODO(spec §6): richer timeline fidelity
+// once fact metadata carries session linkage.
 func (b *MemoryLakeBackend) Timeline(syncID string, before, after int) (*store.TimelineResult, error) {
 	if before <= 0 {
 		before = 5
@@ -568,14 +317,7 @@ func (b *MemoryLakeBackend) Timeline(syncID string, before, after int) (*store.T
 		after = 5
 	}
 
-	observationID, ok := parseSyncID(syncID)
-	if !ok {
-		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
-	anchorFactID, ok := b.factForID(observationID)
-	if !ok {
-		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
-	}
+	anchorFactID := syncID
 
 	allFacts, err := b.client.listAllFacts(b.ws, b.projID)
 	if err != nil {
@@ -608,9 +350,7 @@ func (b *MemoryLakeBackend) Timeline(syncID string, before, after int) (*store.T
 
 	toEntry := func(f Fact) store.TimelineEntry {
 		o := ObservationFromFact(f)
-		o.ID = b.idmap.IntFor(b.projID, f.ID)
 		return store.TimelineEntry{
-			ID:            o.ID,
 			Type:          o.Type,
 			Title:         o.Title,
 			Content:       o.Content,
@@ -624,7 +364,6 @@ func (b *MemoryLakeBackend) Timeline(syncID string, before, after int) (*store.T
 
 	res := &store.TimelineResult{}
 	focus := ObservationFromFact(facts[anchorIdx])
-	focus.ID = observationID
 	focus.CreatedAt = facts[anchorIdx].CreatedAt
 	focus.UpdatedAt = facts[anchorIdx].UpdatedAt
 	res.Focus = focus
@@ -917,7 +656,7 @@ func (b *MemoryLakeBackend) EndSession(id string, summary string) error {
 			Title:     "Session summary",
 			Content:   summary,
 		}); err != nil {
-			log.Printf("[memorylake] EndSession: failed to append summary message for session %s: %v", id, err)
+			fmt.Fprintf(os.Stderr, "[memorylake] EndSession: failed to append summary message for session %s: %v\n", id, err)
 		}
 	}
 	return nil

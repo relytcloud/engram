@@ -12,8 +12,8 @@ import (
 // TestSearchFacts_SemanticMapsContentAndRank drives the main path: POST
 // .../memories/search returns facts with a score and engram metadata;
 // SearchFacts must map each into a store.SearchResult whose Observation
-// content comes from metadata["engram_raw"] (not the paraphrased f.Fact) and
-// whose Rank equals the fact's score.
+// content is the fact's own text (mem0's text — see mapper.go's doc comment
+// on why engram_raw is no longer read) and whose Rank equals the fact's score.
 func TestSearchFacts_SemanticMapsContentAndRank(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -37,10 +37,9 @@ func TestSearchFacts_SemanticMapsContentAndRank(t *testing.T) {
 					"facts": []map[string]any{
 						{
 							"id":    "fact-1",
-							"fact":  "User likes dark mode (paraphrased)",
+							"fact":  "User likes dark mode",
 							"score": 0.87,
 							"metadata": map[string]any{
-								metaRaw:   "user prefers dark mode, verbatim",
 								metaTitle: "dark mode preference",
 								metaType:  "preference",
 								metaScope: "global",
@@ -66,8 +65,11 @@ func TestSearchFacts_SemanticMapsContentAndRank(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1", len(results))
 	}
-	if results[0].Content != "user prefers dark mode, verbatim" {
-		t.Fatalf("Content=%q, want engram_raw verbatim text", results[0].Content)
+	if results[0].Content != "User likes dark mode" {
+		t.Fatalf("Content=%q, want the fact's own text", results[0].Content)
+	}
+	if results[0].SyncID != "fact-1" {
+		t.Fatalf("SyncID=%q, want fact-1", results[0].SyncID)
 	}
 	if results[0].Rank != 0.87 {
 		t.Fatalf("Rank=%v, want 0.87 (the fact's score)", results[0].Rank)
@@ -88,13 +90,13 @@ func TestSearchFacts_FiltersByType(t *testing.T) {
 						"id":       "fact-1",
 						"fact":     "a decision was made",
 						"score":    0.9,
-						"metadata": map[string]any{metaRaw: "decision content", metaType: "decision"},
+						"metadata": map[string]any{metaType: "decision"},
 					},
 					{
 						"id":       "fact-2",
 						"fact":     "a bug was found",
 						"score":    0.8,
-						"metadata": map[string]any{metaRaw: "bug content", metaType: "bug"},
+						"metadata": map[string]any{metaType: "bug"},
 					},
 				},
 			},
@@ -111,8 +113,8 @@ func TestSearchFacts_FiltersByType(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1 (only the 'decision' type fact)", len(results))
 	}
-	if results[0].Content != "decision content" {
-		t.Fatalf("Content=%q, want 'decision content'", results[0].Content)
+	if results[0].Content != "a decision was made" {
+		t.Fatalf("Content=%q, want 'a decision was made'", results[0].Content)
 	}
 }
 
@@ -136,7 +138,7 @@ func TestSearchFacts_TopicKeySlashPinsFuzzyHits(t *testing.T) {
 							"id":       "fact-semantic",
 							"fact":     "semantic-only hit",
 							"score":    0.95,
-							"metadata": map[string]any{metaRaw: "semantic-only content"},
+							"metadata": map[string]any{},
 						},
 					},
 				},
@@ -151,7 +153,7 @@ func TestSearchFacts_TopicKeySlashPinsFuzzyHits(t *testing.T) {
 						{
 							"id":       "fact-topic",
 							"fact":     "topic key hit",
-							"metadata": map[string]any{metaRaw: "topic key content", metaTopicKey: "architecture/auth-model"},
+							"metadata": map[string]any{metaTopicKey: "architecture/auth-model"},
 						},
 					},
 				},
@@ -177,10 +179,10 @@ func TestSearchFacts_TopicKeySlashPinsFuzzyHits(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("got %d results, want 2 (topic hit + semantic hit)", len(results))
 	}
-	if results[0].Content != "topic key content" {
+	if results[0].Content != "topic key hit" {
 		t.Fatalf("results[0].Content=%q, want the fact_fuzzy hit pinned first", results[0].Content)
 	}
-	if results[1].Content != "semantic-only content" {
+	if results[1].Content != "semantic-only hit" {
 		t.Fatalf("results[1].Content=%q, want the semantic hit second", results[1].Content)
 	}
 }
@@ -198,7 +200,7 @@ func TestSearchFacts_FuzzyFailureDegradesToSemanticOnly(t *testing.T) {
 				"success": true,
 				"data": map[string]any{
 					"facts": []map[string]any{
-						{"id": "fact-semantic", "fact": "semantic hit", "score": 0.9, "metadata": map[string]any{metaRaw: "semantic content"}},
+						{"id": "fact-semantic", "fact": "semantic hit", "score": 0.9, "metadata": map[string]any{}},
 					},
 				},
 			})
@@ -222,8 +224,8 @@ func TestSearchFacts_FuzzyFailureDegradesToSemanticOnly(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1 (the semantic hit must survive the fuzzy failure)", len(results))
 	}
-	if results[0].Content != "semantic content" {
-		t.Fatalf("Content=%q, want 'semantic content'", results[0].Content)
+	if results[0].Content != "semantic hit" {
+		t.Fatalf("Content=%q, want 'semantic hit'", results[0].Content)
 	}
 }
 
@@ -239,7 +241,7 @@ func TestSearchFacts_DedupesOverlapBetweenFuzzyAndSemantic(t *testing.T) {
 				"success": true,
 				"data": map[string]any{
 					"facts": []map[string]any{
-						{"id": "fact-shared", "fact": "shared", "score": 0.5, "metadata": map[string]any{metaRaw: "shared content"}},
+						{"id": "fact-shared", "fact": "shared", "score": 0.5, "metadata": map[string]any{}},
 					},
 				},
 			})
@@ -248,7 +250,7 @@ func TestSearchFacts_DedupesOverlapBetweenFuzzyAndSemantic(t *testing.T) {
 				"success": true,
 				"data": map[string]any{
 					"items": []map[string]any{
-						{"id": "fact-shared", "fact": "shared", "metadata": map[string]any{metaRaw: "shared content"}},
+						{"id": "fact-shared", "fact": "shared", "metadata": map[string]any{}},
 					},
 				},
 			})

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -201,7 +200,9 @@ func (c *Client) listAllFacts(ws, projID string) ([]Fact, error) {
 
 // patchFactMetadata overwrites the metadata of fact factID (within project
 // projID, workspace ws) with md, returning the Fact MemoryLake echoes back
-// with the update applied.
+// with the update applied. Used by PinObservation/UnpinObservation/
+// MarkReviewed — the handful of explicit, Engram-only metadata fields that
+// survive the Option A thin-adapter cut (see mapper.go's doc comment).
 func (c *Client) patchFactMetadata(ws, projID, factID string, md map[string]any) (Fact, error) {
 	var updated Fact
 	path := "/api/v3/workspaces/" + ws + "/projects/" + projID + "/memories/facts/" + factID
@@ -209,94 +210,4 @@ func (c *Client) patchFactMetadata(ws, projID, factID string, md map[string]any)
 		return Fact{}, err
 	}
 	return updated, nil
-}
-
-// BackfillFacts is the other half of the async write flow started by
-// AppendObservation: MemoryLake extracts facts from conversation messages on
-// its own schedule, so the fact engram's message eventually produces does not
-// exist yet at the moment AppendObservation returns. BackfillFacts polls
-// project projID's fact list every poll interval, looking for facts that
-// have not yet been stamped with engram's own metadata (i.e. whose metadata
-// lacks the engram_obs_id key — this is what marks a fact as "extracted by
-// MemoryLake but not yet claimed by engram"), and PATCHes md onto each one it
-// finds so engram can reconstruct the originating Observation from it later
-// (see FactMetadata / ObservationFromFact).
-//
-// knownFactIDs is a snapshot of the project's fact ids taken *before* the
-// message this backfill belongs to was appended (see AddObservation). Any
-// fact whose id is in that snapshot pre-dates this write and must never be
-// claimed by it: MemoryLake's extraction is asynchronous, so a previous save
-// may have appended a message whose fact had not yet materialized (or whose
-// own bounded backfill timed out), leaving an unmarked fact behind. Without
-// this guard, the next save would "claim" that stale unmarked fact and PATCH
-// *this* observation's engram_raw onto it, corrupting the earlier observation
-// so mem_get/mem_search read back the wrong verbatim text. Restricting the
-// scan to facts absent from the snapshot keeps each save associated only with
-// facts that appeared after its own message was appended.
-//
-// BackfillFacts returns once a poll finds no additional un-backfilled facts
-// and at least one fact has been backfilled so far (the set has
-// "stabilized"), or once maxWait elapses — whichever comes first. Timing out
-// is deliberately not treated as an error: MemoryLake's extraction is
-// asynchronous and may simply not have produced a fact yet, so callers get
-// back whatever was collected (possibly nothing) instead of an error, and may
-// retry or proceed without a backfilled fact.
-//
-// poll and maxWait are caller-supplied rather than hardcoded so tests can
-// drive this loop with millisecond-scale timings instead of waiting on
-// production-scale polling intervals.
-func (c *Client) BackfillFacts(ws, projID string, md map[string]any, knownFactIDs map[string]bool, poll, maxWait time.Duration) ([]Fact, error) {
-	var backfilled []Fact
-	seen := map[string]bool{}
-
-	scanOnce := func() (foundNew bool, err error) {
-		facts, err := c.listFacts(ws, projID)
-		if err != nil {
-			return false, err
-		}
-		for _, f := range facts {
-			if seen[f.ID] {
-				continue
-			}
-			if knownFactIDs[f.ID] {
-				// Pre-existing before this write's message was appended — it
-				// belongs to an earlier observation (possibly one whose own
-				// backfill timed out) and must not be claimed here.
-				continue
-			}
-			if _, alreadyBackfilled := f.Metadata[metaObsID]; alreadyBackfilled {
-				// Backfilled already, by us in a previous run or another
-				// caller — nothing to do, and it doesn't count as instability
-				// for this scan.
-				continue
-			}
-			updated, err := c.patchFactMetadata(ws, projID, f.ID, md)
-			if err != nil {
-				return false, err
-			}
-			seen[f.ID] = true
-			backfilled = append(backfilled, updated)
-			foundNew = true
-		}
-		return foundNew, nil
-	}
-
-	ticker := time.NewTicker(poll)
-	defer ticker.Stop()
-	deadline := time.After(maxWait)
-
-	for {
-		select {
-		case <-deadline:
-			return backfilled, nil
-		case <-ticker.C:
-			foundNew, err := scanOnce()
-			if err != nil {
-				return backfilled, err
-			}
-			if !foundNew && len(backfilled) > 0 {
-				return backfilled, nil
-			}
-		}
-	}
 }

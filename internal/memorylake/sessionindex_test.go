@@ -188,7 +188,7 @@ func TestSessionIndex_Recent_EmptyProjectMatchesAll(t *testing.T) {
 }
 
 // TestSessionIndex_PersistsAcrossReload verifies the sidecar round-trips
-// through disk exactly like IDMap/TopicIndex.
+// through disk.
 func TestSessionIndex_PersistsAcrossReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sessions.json")
 	idx, err := LoadSessionIndex(path)

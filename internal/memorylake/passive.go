@@ -23,9 +23,7 @@ func hashNormalizedContent(content string) string {
 
 // passiveDedupKey builds the local dedup key PassiveCapture uses to detect a
 // learning it has already saved for project: normalized project + the
-// content's normalized hash. Prefixed "passive:" so it can never collide
-// with a MemoryLake fact id, provisional message id, or a prompt dedup key
-// sharing the same IDMap key space (see idmap.go's IntIfExists doc comment).
+// content's normalized hash.
 func passiveDedupKey(project, learning string) string {
 	norm, _ := store.NormalizeProject(project)
 	return "passive:" + norm + ":" + hashNormalizedContent(learning)
@@ -41,14 +39,17 @@ func passiveDedupKey(project, learning string) string {
 //
 // Unlike the local store, which checks the dedup hash against a live SQL
 // column (`observations.normalized_hash`) that also excludes soft-deleted
-// rows, this backend's dedup set (borrowed from the shared per-project
-// IDMap, see idmap.go's IntIfExists doc comment) only ever grows: once a
+// rows, this backend's dedup set (b.passiveSeen, in-process only — see
+// MemoryLakeBackend's doc comment on why that's an accepted trade-off now
+// that the process-global, disk-persisted IDMap that used to back this is
+// retired) only ever grows for the lifetime of this backend instance: once a
 // learning's hash has been recorded here it is never un-recorded even if the
-// resulting observation is later deleted via DeleteObservation. This is an
-// accepted, documented divergence — reproducing store's live exclusion would
-// require either a second listAllFacts scan per learning (defeating the
-// point of a local cache) or teaching DeleteObservation about this dedup
-// namespace, which is out of this task's scope.
+// resulting observation is later deleted via DeleteObservation, and it does
+// not survive a process restart. This is an accepted, documented divergence
+// — reproducing store's live exclusion would require either a second
+// listAllFacts scan per learning (defeating the point of a local cache) or
+// teaching DeleteObservation about this dedup namespace, which is out of
+// this task's scope.
 func (b *MemoryLakeBackend) PassiveCapture(p store.PassiveCaptureParams) (*store.PassiveCaptureResult, error) {
 	result := &store.PassiveCaptureResult{}
 
@@ -60,7 +61,11 @@ func (b *MemoryLakeBackend) PassiveCapture(p store.PassiveCaptureParams) (*store
 
 	for _, learning := range learnings {
 		key := passiveDedupKey(p.Project, learning)
-		if _, ok := b.idmap.IntIfExists(b.projID, key); ok {
+
+		b.passiveMu.Lock()
+		seen := b.passiveSeen[key]
+		b.passiveMu.Unlock()
+		if seen {
 			result.Duplicates++
 			continue
 		}
@@ -83,7 +88,12 @@ func (b *MemoryLakeBackend) PassiveCapture(p store.PassiveCaptureParams) (*store
 		}
 		// Record as seen so a later identical learning (same normalized
 		// content, same project) dedupes instead of saving a second fact.
-		b.idmap.IntFor(b.projID, key)
+		b.passiveMu.Lock()
+		if b.passiveSeen == nil {
+			b.passiveSeen = map[string]bool{}
+		}
+		b.passiveSeen[key] = true
+		b.passiveMu.Unlock()
 		result.Saved++
 	}
 

@@ -1,25 +1,27 @@
 package memorylake
 
-import (
-	"testing"
+import "testing"
 
-	"github.com/Gentleman-Programming/engram/internal/store"
-)
-
-func TestObservationFromFactPrefersRaw(t *testing.T) {
+// TestObservationFromFact_ContentIsFactTextVerbatim verifies content comes
+// straight from fact.Fact — engram_raw is no longer written or read (Option A
+// thin adapter, spec §2/§4: content management is mem0's job now).
+func TestObservationFromFact_ContentIsFactTextVerbatim(t *testing.T) {
 	f := Fact{
 		ID:   "fact-1",
-		Fact: "paraphrased text",
+		Fact: "mem0's own text",
 		Metadata: map[string]any{
-			"engram_raw":   "EXACT original",
+			"engram_raw":   "an old build's stamped verbatim copy",
 			"engram_type":  "decision",
 			"engram_scope": "project",
 			"topic_key":    "arch/db",
 		},
 	}
 	obs := ObservationFromFact(f)
-	if obs.Content != "EXACT original" {
-		t.Fatalf("content=%q, want raw", obs.Content)
+	if obs.Content != "mem0's own text" {
+		t.Fatalf("content=%q, want fact.Fact verbatim (engram_raw must not be read any more)", obs.Content)
+	}
+	if obs.SyncID != "fact-1" {
+		t.Fatalf("SyncID=%q, want fact-1 (the fact id, no id-mapping indirection)", obs.SyncID)
 	}
 	if obs.Type != "decision" || obs.Scope != "project" {
 		t.Fatalf("metadata not decoded: %+v", obs)
@@ -29,51 +31,22 @@ func TestObservationFromFactPrefersRaw(t *testing.T) {
 	}
 }
 
-func TestObservationFromFactFallsBackToFactWhenRawMissing(t *testing.T) {
+func TestObservationFromFact_NoMetadataStillDecodesContentAndSyncID(t *testing.T) {
 	f := Fact{
 		ID:   "fact-2",
-		Fact: "paraphrased text",
-		Metadata: map[string]any{
-			"engram_type":  "note",
-			"engram_scope": "project",
-		},
+		Fact: "a fact mem0 created with no engram-authored metadata at all",
 	}
 	obs := ObservationFromFact(f)
-	if obs.Content != "paraphrased text" {
-		t.Fatalf("content=%q, want fallback to f.Fact", obs.Content)
+	if obs.Content != "a fact mem0 created with no engram-authored metadata at all" {
+		t.Fatalf("content=%q, want fact.Fact", obs.Content)
+	}
+	if obs.SyncID != "fact-2" {
+		t.Fatalf("SyncID=%q, want fact-2", obs.SyncID)
 	}
 	if obs.TopicKey != nil {
 		t.Fatalf("topic_key should be nil when absent, got %+v", obs.TopicKey)
 	}
-}
-
-func TestFactMetadataCarriesRaw(t *testing.T) {
-	md := FactMetadata(store.AddObservationParams{
-		Title:    "T",
-		Content:  "C",
-		Type:     "bugfix",
-		Scope:    "project",
-		TopicKey: "x/y",
-	}, "obs-9", "C")
-	if md["engram_raw"] != "C" || md["engram_type"] != "bugfix" {
-		t.Fatalf("bad metadata: %+v", md)
-	}
-	if md["engram_title"] != "T" || md["engram_scope"] != "project" {
-		t.Fatalf("bad metadata: %+v", md)
-	}
-	if md["engram_obs_id"] != "obs-9" {
-		t.Fatalf("bad metadata: %+v", md)
-	}
-	if md["topic_key"] != "x/y" {
-		t.Fatalf("bad metadata: %+v", md)
-	}
-}
-
-func TestFactMetadataOmitsTopicKeyWhenEmpty(t *testing.T) {
-	md := FactMetadata(store.AddObservationParams{
-		Title: "T", Content: "C", Type: "note", Scope: "session",
-	}, "obs-1", "C")
-	if _, ok := md["topic_key"]; ok {
-		t.Fatalf("topic_key must be absent when empty, got %+v", md)
+	if obs.RevisionCount != 1 {
+		t.Fatalf("RevisionCount=%d, want 1 (default when engram_rev absent)", obs.RevisionCount)
 	}
 }

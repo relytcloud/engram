@@ -11,7 +11,11 @@ import (
 )
 
 // promptMessageServer answers conversation-ensure and message-append calls,
-// counting how many distinct message posts arrive.
+// counting how many distinct message posts arrive. The returned message id is
+// derived from the posted custom_id (itself a content hash, see
+// AppendObservation) so byte-identical content always maps to the same
+// message id and distinct content maps to distinct ids — mirroring
+// MemoryLake's real idempotency contract.
 func promptMessageServer(t *testing.T, posts *int32) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +24,11 @@ func promptMessageServer(t *testing.T, posts *int32) *httptest.Server {
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
 		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
 			atomic.AddInt32(posts, 1)
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+			var body struct {
+				CustomID string `json:"custom_id"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-" + body.CustomID}})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -58,7 +66,7 @@ func TestBackend_AddPromptIfMissing_DedupesByContentHash(t *testing.T) {
 		t.Fatal("second call with identical content should report inserted=false")
 	}
 	if id1 != id2 {
-		t.Fatalf("id1=%d id2=%d, want equal on a dedup hit", id1, id2)
+		t.Fatalf("id1=%q id2=%q, want equal on a dedup hit", id1, id2)
 	}
 	if atomic.LoadInt32(&posts) != 1 {
 		t.Fatalf("posts=%d after second (dup) call, want still 1 (no network round trip on a hit)", posts)
@@ -86,7 +94,7 @@ func TestBackend_AddPromptIfMissing_DifferentContentIsNotADuplicate(t *testing.T
 		t.Fatalf("inserted1=%v inserted2=%v, want both true (distinct content)", inserted1, inserted2)
 	}
 	if id1 == id2 {
-		t.Fatalf("id1=%d id2=%d, want distinct ids for distinct content", id1, id2)
+		t.Fatalf("id1=%q id2=%q, want distinct ids for distinct content", id1, id2)
 	}
 	if atomic.LoadInt32(&posts) != 2 {
 		t.Fatalf("posts=%d, want 2 (one per distinct prompt)", posts)
@@ -113,7 +121,7 @@ func TestBackend_AddPrompt_AlwaysPostsAMessage(t *testing.T) {
 		t.Fatalf("AddPrompt (second): %v", err)
 	}
 	if id1 != id2 {
-		t.Fatalf("id1=%d id2=%d, want equal (same dedup key on identical content)", id1, id2)
+		t.Fatalf("id1=%q id2=%q, want equal (same dedup key on identical content)", id1, id2)
 	}
 	if atomic.LoadInt32(&posts) != 2 {
 		t.Fatalf("posts=%d, want 2 (AddPrompt always appends, unlike AddPromptIfMissing)", posts)

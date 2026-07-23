@@ -1103,7 +1103,7 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 	}
 
-	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
+	fmt.Printf("Memory saved: #%s %q (%s)\n", id, title, typ)
 }
 
 func cmdDelete(cfg store.Config) {

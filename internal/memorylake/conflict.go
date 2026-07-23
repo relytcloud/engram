@@ -242,20 +242,24 @@ func isValidConflictRelationVerb(v string) bool {
 // opts.Scope, by contrast, IS honored: candidates whose engram_scope
 // metadata doesn't match are filtered out client-side, mirroring the local
 // store's scope-filtered FTS5 query.
+// SkipsCandidateGeneration reports true unconditionally: it satisfies
+// internal/mcp's candidateOptOut duck-typed interface (see that type's doc
+// comment) so mem_save never calls FindCandidates or surfaces
+// judgment_required/candidates for a MemoryLake-backed project. FindCandidates
+// below is still implemented for direct callers/tests, but the mem_save path
+// no longer reaches it.
+func (b *MemoryLakeBackend) SkipsCandidateGeneration() bool {
+	return true
+}
+
 func (b *MemoryLakeBackend) FindCandidates(savedSyncID string, opts store.CandidateOptions) ([]store.Candidate, error) {
-	savedID, ok := parseSyncID(savedSyncID)
-	if !ok {
-		// Malformed sync_id: fail-safe, mirroring the "nothing to find
-		// candidates for" contract below rather than erroring the save.
-		return nil, nil
-	}
-	factID, ok := b.factForID(savedID)
-	if !ok {
-		// No fact mapped yet for this id (e.g. a still-pending provisional id
-		// from AddObservation), or an id owned by another project — fail-safe:
-		// nothing to find candidates for.
-		return nil, nil
-	}
+	// Under Option A′ (spec §3), sync_id for this backend simply *is* the
+	// MemoryLake fact id — no id-mapping lookup needed. A savedSyncID that is
+	// actually a still-pending message reference (see AddObservation's doc
+	// comment) rather than a materialized fact id just fails to match any
+	// fact_ids below and falls through to the empty, non-error result, same
+	// as before.
+	factID := savedSyncID
 
 	limit := opts.Limit
 	if limit <= 0 {
@@ -293,7 +297,9 @@ func (b *MemoryLakeBackend) FindCandidates(savedSyncID string, opts store.Candid
 				continue
 			}
 			candidates = append(candidates, store.Candidate{
-				ID:       b.idmap.IntFor(b.projID, otherID),
+				// ID (the legacy int64 field): left at zero. There is no
+				// MemoryLake analogue any more (that was the retired IDMap's
+				// job) — SyncID (a real fact id) is the handle callers use.
 				SyncID:   otherID,
 				Title:    obs.Title,
 				Type:     obs.Type,
@@ -404,6 +410,9 @@ func (b *MemoryLakeBackend) relationFromConflict(c conflictItem, srcID, tgtID st
 	if c.Description != "" {
 		reason = &c.Description
 	}
+	// SourceIntID/TargetIntID (legacy int64 annotation fields, json:"-"): left
+	// at zero. There is no MemoryLake analogue any more (that was the retired
+	// IDMap's job) — SourceID/TargetID (real fact ids) are what callers use.
 	return store.Relation{
 		SyncID:         c.ID,
 		SourceID:       srcID,
@@ -411,8 +420,6 @@ func (b *MemoryLakeBackend) relationFromConflict(c conflictItem, srcID, tgtID st
 		Relation:       store.RelationConflictsWith,
 		Reason:         reason,
 		JudgmentStatus: status,
-		SourceIntID:    b.idmap.IntFor(b.projID, srcID),
-		TargetIntID:    b.idmap.IntFor(b.projID, tgtID),
 		CreatedAt:      c.CreatedAt,
 		UpdatedAt:      c.UpdatedAt,
 	}

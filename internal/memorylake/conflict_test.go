@@ -126,7 +126,6 @@ func TestFindCandidates_MapsUnresolvedConflictToCandidate(t *testing.T) {
 	s.facts["fact-other"] = Fact{
 		ID: "fact-other",
 		Metadata: map[string]any{
-			metaRaw:   "other content",
 			metaTitle: "other title",
 			metaType:  "decision",
 			metaScope: "global",
@@ -134,9 +133,7 @@ func TestFindCandidates_MapsUnresolvedConflictToCandidate(t *testing.T) {
 	}
 	b := newConflictBackend(t, s)
 
-	savedID := b.idmap.IntFor(b.projID, "fact-saved")
-
-	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{})
+	candidates, err := b.FindCandidates("fact-saved", store.CandidateOptions{})
 	if err != nil {
 		t.Fatalf("FindCandidates: %v", err)
 	}
@@ -166,9 +163,8 @@ func TestFindCandidates_ResolvedConflictExcluded(t *testing.T) {
 		Resolved: true,
 	}
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
-	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{})
+	candidates, err := b.FindCandidates("fact-saved", store.CandidateOptions{})
 	if err != nil {
 		t.Fatalf("FindCandidates: %v", err)
 	}
@@ -180,9 +176,8 @@ func TestFindCandidates_ResolvedConflictExcluded(t *testing.T) {
 func TestFindCandidates_NoConflicts_ReturnsEmptyNotError(t *testing.T) {
 	s := newConflictTestServer()
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
-	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{})
+	candidates, err := b.FindCandidates("fact-saved", store.CandidateOptions{})
 	if err != nil {
 		t.Fatalf("FindCandidates: %v", err)
 	}
@@ -191,13 +186,16 @@ func TestFindCandidates_NoConflicts_ReturnsEmptyNotError(t *testing.T) {
 	}
 }
 
-func TestFindCandidates_UnmappedObservationID_ReturnsEmptyNotError(t *testing.T) {
+// TestFindCandidates_UnknownFactID_ReturnsEmptyNotError verifies a syncID
+// that matches no conflict's fact_ids (e.g. a still-pending message
+// reference from AddObservation, never a real fact — see its doc comment)
+// fails safe rather than erroring the save.
+func TestFindCandidates_UnknownFactID_ReturnsEmptyNotError(t *testing.T) {
 	s := newConflictTestServer()
+	s.conflicts["conf-1"] = conflictItem{ID: "conf-1", FactIDs: []string{"fact-a", "fact-b"}}
 	b := newConflictBackend(t, s)
 
-	// An id never registered in the IDMap (e.g. a fresh backend that never
-	// saved this observation) must fail-safe rather than error.
-	candidates, err := b.FindCandidates(99999, store.CandidateOptions{})
+	candidates, err := b.FindCandidates("msg-pending-123", store.CandidateOptions{})
 	if err != nil {
 		t.Fatalf("FindCandidates: %v", err)
 	}
@@ -217,9 +215,8 @@ func TestFindCandidates_ScopeFilter(t *testing.T) {
 		Metadata: map[string]any{metaScope: "project-a"},
 	}
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
-	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{Scope: "project-b"})
+	candidates, err := b.FindCandidates("fact-saved", store.CandidateOptions{Scope: "project-b"})
 	if err != nil {
 		t.Fatalf("FindCandidates: %v", err)
 	}
@@ -238,9 +235,8 @@ func TestFindCandidates_LimitCaps(t *testing.T) {
 	s.facts["fact-b"] = Fact{ID: "fact-b"}
 	s.facts["fact-c"] = Fact{ID: "fact-c"}
 	b := newConflictBackend(t, s)
-	savedID := b.idmap.IntFor(b.projID, "fact-saved")
 
-	candidates, err := b.FindCandidates(savedID, store.CandidateOptions{Limit: 2})
+	candidates, err := b.FindCandidates("fact-saved", store.CandidateOptions{Limit: 2})
 	if err != nil {
 		t.Fatalf("FindCandidates: %v", err)
 	}
