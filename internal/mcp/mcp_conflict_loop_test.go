@@ -33,9 +33,9 @@ import (
 // REQ-001 (candidate detection), REQ-002 (search annotations), REQ-003 (mem_judge)
 func TestConflictLoop_SaveJudgeSearch(t *testing.T) {
 	s := newMCPTestStore(t)
-	saveH := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
-	searchH := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
-	judgeH := handleJudge(s, NewSessionActivity(10*time.Minute))
+	saveH := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	searchH := handleSearch(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	judgeH := handleJudge(StaticSelector(newSQLiteBackend(s)), NewSessionActivity(10*time.Minute))
 
 	// ── Step 1: Save observation A (unique topic → no candidates) ────────────
 	resA, err := saveH(context.Background(), mcppkg.CallToolRequest{
@@ -311,7 +311,7 @@ func TestConflictLoop_MultiActor(t *testing.T) {
 //   - mem_search results no longer surface orphaned relations (REQ-010)
 func TestConflictLoop_Orphaning(t *testing.T) {
 	s := newMCPTestStore(t)
-	searchH := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	searchH := handleSearch(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	if err := s.CreateSession("s-orphan", "engram", "/tmp"); err != nil {
 		t.Fatalf("G.3 create session: %v", err)
@@ -438,8 +438,8 @@ func TestConflictLoop_Orphaning(t *testing.T) {
 // Sessions and observations still produce their own sync mutations as expected.
 func TestConflictLoop_SyncRegression(t *testing.T) {
 	s := newMCPTestStore(t)
-	saveH := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
-	judgeH := handleJudge(s, NewSessionActivity(10*time.Minute))
+	saveH := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	judgeH := handleJudge(StaticSelector(newSQLiteBackend(s)), NewSessionActivity(10*time.Minute))
 
 	// ── Step 1: Save two similar observations. ────────────────────────────────
 	// Each save enqueues a session mutation + an observation mutation.
@@ -508,8 +508,8 @@ func TestConflictLoop_SyncRegression(t *testing.T) {
 // REQ-007 | Design §4 (regression guard).
 func TestConflictLoop_BackwardsCompat(t *testing.T) {
 	s := newMCPTestStore(t)
-	saveH := handleSave(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
-	searchH := handleSearch(s, MCPConfig{}, NewSessionActivity(10*time.Minute))
+	saveH := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	searchH := handleSearch(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// ── Case 1: mem_save with no candidates (no-candidate path). ─────────────
 	resEmpty, err := saveH(context.Background(), mcppkg.CallToolRequest{

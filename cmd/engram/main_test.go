@@ -1023,14 +1023,18 @@ func TestCmdProjectsAllNoGroups(t *testing.T) {
 
 func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 	cfg := testConfig(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	var capturedCfg mcp.MCPConfig
-	oldNew := newMCPServerWithConfig
-	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	oldNew := newMCPServerWithSelector
+	t.Cleanup(func() { newMCPServerWithSelector = oldNew })
+	newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
 		// Return a valid server so serveMCP doesn't panic
-		return oldNew(s, mcpCfg, allowlist)
+		return oldNew(sel, mcpCfg, allowlist)
 	}
 
 	oldServe := serveMCP
@@ -1050,15 +1054,18 @@ func TestCmdMCPDetectsProjectFromFlag(t *testing.T) {
 
 func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 	cfg := testConfig(t)
+	// See TestCmdMCPDetectsProjectFromFlag: isolate HOME so cmdMCP's
+	// memorylake enablement load never touches a real machine's file.
+	t.Setenv("HOME", t.TempDir())
 
 	t.Setenv("ENGRAM_PROJECT", "env-project")
 
 	var capturedCfg mcp.MCPConfig
-	oldNew := newMCPServerWithConfig
-	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	oldNew := newMCPServerWithSelector
+	t.Cleanup(func() { newMCPServerWithSelector = oldNew })
+	newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
-		return oldNew(s, mcpCfg, allowlist)
+		return oldNew(sel, mcpCfg, allowlist)
 	}
 
 	oldServe := serveMCP
@@ -1077,6 +1084,9 @@ func TestCmdMCPDetectsProjectFromEnv(t *testing.T) {
 
 func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	cfg := testConfig(t)
+	// See TestCmdMCPDetectsProjectFromFlag: isolate HOME so cmdMCP's
+	// memorylake enablement load never touches a real machine's file.
+	t.Setenv("HOME", t.TempDir())
 
 	// Stub detectProject to simulate git detection
 	old := detectProject
@@ -1084,11 +1094,11 @@ func TestCmdMCPDetectsProjectFromGit(t *testing.T) {
 	detectProject = func(string) string { return "detected-from-git" }
 
 	var capturedCfg mcp.MCPConfig
-	oldNew := newMCPServerWithConfig
-	t.Cleanup(func() { newMCPServerWithConfig = oldNew })
-	newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+	oldNew := newMCPServerWithSelector
+	t.Cleanup(func() { newMCPServerWithSelector = oldNew })
+	newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 		capturedCfg = mcpCfg
-		return oldNew(s, mcpCfg, allowlist)
+		return oldNew(sel, mcpCfg, allowlist)
 	}
 
 	oldServe := serveMCP

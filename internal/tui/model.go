@@ -219,16 +219,29 @@ func loadRecentObservations(s *store.Store) tea.Cmd {
 	}
 }
 
-func loadObservationDetail(s *store.Store, id int64) tea.Cmd {
+// loadObservationDetail and loadTimeline key the selected observation by its
+// sync_id (the same opaque string handle exposed by search/context results
+// and, on a MemoryLake-enabled project, the backend's fact id) rather than
+// the local sqlite int64 primary key — see Task 3 of the phase-3 thin-adapter
+// plan. The TUI only ever talks to *store.Store directly (no MemoryBackend
+// routing today), so this is a same-package resolve via
+// GetObservationBySyncID rather than a behavior change; it keeps the TUI's
+// notion of "which observation is selected" consistent with the rest of the
+// by-id surface (HTTP server, CLI).
+func loadObservationDetail(s *store.Store, syncID string) tea.Cmd {
 	return func() tea.Msg {
-		obs, err := s.GetObservation(id)
+		obs, err := s.GetObservationBySyncID(syncID)
 		return observationDetailMsg{observation: obs, err: err}
 	}
 }
 
-func loadTimeline(s *store.Store, obsID int64) tea.Cmd {
+func loadTimeline(s *store.Store, syncID string) tea.Cmd {
 	return func() tea.Msg {
-		tl, err := s.Timeline(obsID, 10, 10)
+		obs, err := s.GetObservationBySyncID(syncID)
+		if err != nil {
+			return timelineMsg{err: err}
+		}
+		tl, err := s.Timeline(obs.ID, 10, 10)
 		return timelineMsg{timeline: tl, err: err}
 	}
 }

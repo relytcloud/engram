@@ -18,9 +18,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
+	"github.com/Gentleman-Programming/engram/internal/mcp"
 	projectpkg "github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -77,6 +79,35 @@ type Server struct {
 	// promptBuilder constructs LLM prompts for semantic scan pairs.
 	// When nil and semantic=true, a no-op builder is used (returns empty string).
 	promptBuilder SemanticPromptBuilder
+
+	// selector, when configured via SetBackendSelector, routes the subset of
+	// handlers below whose store calls are fully covered by mcp.MemoryBackend
+	// to a per-project backend (sqlite or MemoryLake) instead of always using
+	// store directly — see backendForProject/backendForSession/
+	// backendForObservation. nil (the default set by New) preserves today's
+	// behavior exactly: every call goes through the local sqlite `store`.
+	//
+	// Endpoints backed by store methods outside MemoryBackend (Export/Import,
+	// relation browsing, prompt search, MigrateProject, doctor, ...) are
+	// inherently local-sqlite concepts with no MemoryLake equivalent yet and
+	// are intentionally left on `store` unconditionally — see Task 15's
+	// report for the full list.
+	selector mcp.BackendSelector
+
+	// sessionProject and obsProject cache, in-process only, which project a
+	// routed session/observation was created under — populated at
+	// CreateSession/AddObservation time (once selector is configured). Several
+	// existing HTTP endpoints identify their target purely by session/
+	// observation sync_id (POST /sessions/{id}/end, GET/PATCH/DELETE
+	// /observations/{id}, ...) with no project in the request body, so there
+	// is no way to route them from the request alone without changing the
+	// wire contract. Consulting this cache lets those ID-only endpoints reach
+	// the SAME backend their session/observation actually lives on. A miss
+	// (unknown ID, selector unset, or a fresh process that did not create it)
+	// falls back to the local sqlite store — identical to pre-routing
+	// behavior for anything not in the cache.
+	sessionProject sync.Map // sessionID string -> project string
+	obsProject     sync.Map // observation sync_id string -> project string
 }
 
 func New(s *store.Store, port int) *Server {
@@ -107,6 +138,60 @@ func (s *Server) SetRunnerFactory(fn SemanticRunnerFactory) {
 // When not set, an empty-string builder is used (valid for tests, not production).
 func (s *Server) SetPromptBuilder(fn SemanticPromptBuilder) {
 	s.promptBuilder = fn
+}
+
+// SetBackendSelector configures per-project routing (sqlite vs MemoryLake)
+// for the subset of HTTP handlers whose store calls are fully covered by
+// mcp.MemoryBackend (see the Server.selector field doc for the full
+// boundary). When never called (the zero value, nil), every handler uses the
+// local sqlite store directly — byte-for-byte the pre-routing behavior.
+func (s *Server) SetBackendSelector(sel mcp.BackendSelector) {
+	s.selector = sel
+}
+
+// backendForProject resolves the storage backend for project via the
+// configured selector, or the local sqlite store if no selector has been
+// configured. project should already be normalized by the caller when it
+// matters for matching enablement (store.NormalizeProject) — resolution here
+// treats project as an opaque routing key.
+func (s *Server) backendForProject(project string) mcp.MemoryBackend {
+	if s.selector == nil {
+		return mcp.NewSQLiteBackend(s.store)
+	}
+	return s.selector(project)
+}
+
+// backendForSession resolves the backend that owns sessionID: the project it
+// was routed under at CreateSession time (see sessionProject), or the local
+// sqlite store when unknown (selector unset, never routed, or a process that
+// did not create this session) — matching pre-routing behavior exactly for
+// anything not in the cache.
+func (s *Server) backendForSession(sessionID string) mcp.MemoryBackend {
+	if s.selector == nil {
+		return mcp.NewSQLiteBackend(s.store)
+	}
+	if v, ok := s.sessionProject.Load(sessionID); ok {
+		return s.selector(v.(string))
+	}
+	return mcp.NewSQLiteBackend(s.store)
+}
+
+// backendForObservation mirrors backendForSession for an observation, keyed
+// by its sync_id (see obsProject, populated at AddObservation time). sync_id
+// is the opaque by-id handle used across the whole observation surface (MCP
+// tools, HTTP, this cache): for the local sqlite backend it is the
+// `obs-<hex>` string stamped in the sync_id column; for a MemoryLake-enabled
+// project it is that backend's fact id. Addressing by sync_id rather than the
+// local sqlite int64 primary key is what makes by-id HTTP endpoints work at
+// all for MemoryLake-enabled projects, whose observations have no int64 id.
+func (s *Server) backendForObservation(syncID string) mcp.MemoryBackend {
+	if s.selector == nil {
+		return mcp.NewSQLiteBackend(s.store)
+	}
+	if v, ok := s.obsProject.Load(syncID); ok {
+		return s.selector(v.(string))
+	}
+	return mcp.NewSQLiteBackend(s.store)
 }
 
 // notifyWrite calls the onWrite callback if configured (best-effort, non-blocking).
@@ -268,9 +353,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateSession(body.ID, body.Project, body.Directory); err != nil {
+	project, _ := store.NormalizeProject(body.Project)
+	backend := s.backendForProject(project)
+	if err := backend.CreateSession(body.ID, body.Project, body.Directory); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if s.selector != nil {
+		s.sessionProject.Store(body.ID, project)
 	}
 
 	s.notifyWrite()
@@ -285,7 +375,7 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&body)
 
-	if err := s.store.EndSession(id, body.Summary); err != nil {
+	if err := s.backendForSession(id).EndSession(id, body.Summary); err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -298,7 +388,12 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	limit := queryInt(r, "limit", 5)
 
-	sessions, err := s.store.RecentSessions(project, limit)
+	// RecentSessions is part of mcp.MemoryBackend and the project is in the
+	// query string, so route it to the project's backend (sqlite or MemoryLake)
+	// like handleSearch/handleReviewList/handleContext — an enabled project's
+	// recent sessions must come from its MemoryLake session index, not sqlite.
+	routeProject, _ := store.NormalizeProject(project)
+	sessions, err := s.backendForProject(routeProject).RecentSessions(project, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -308,7 +403,8 @@ func (s *Server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	session, err := s.store.GetSession(r.PathValue("id"))
+	id := r.PathValue("id")
+	session, err := s.backendForSession(id).GetSession(id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "session not found")
@@ -335,14 +431,22 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := s.store.AddObservation(body)
+	project, _ := store.NormalizeProject(body.Project)
+	backend := s.backendForProject(project)
+	syncID, err := backend.AddObservation(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if s.selector != nil {
+		s.obsProject.Store(syncID, project)
+	}
 
 	s.notifyWrite()
-	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
+	// "id" is the observation's sync_id — the opaque string handle to use for
+	// every subsequent by-id call (GET/PATCH/DELETE /observations/{id},
+	// GET /timeline?observation_id=, POST /review/mark_reviewed).
+	jsonResponse(w, http.StatusCreated, map[string]any{"id": syncID, "status": "saved"})
 }
 
 func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +463,8 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.store.PassiveCapture(body)
+	project, _ := store.NormalizeProject(body.Project)
+	result, err := s.backendForProject(project).PassiveCapture(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -412,7 +517,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.store.Search(query, store.SearchOptions{
+	routeProject, _ := store.NormalizeProject(project)
+	results, err := s.backendForProject(routeProject).Search(query, store.SearchOptions{
 		Type:      params.Get("type"),
 		Project:   project,
 		Scope:     params.Get("scope"),
@@ -427,15 +533,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, results)
 }
 
+// handleGetObservation, handleUpdateObservation, handleDeleteObservation, and
+// handleTimeline key their target observation by sync_id — the path/query
+// value is an opaque string handle (see backendForObservation's doc comment),
+// not a numeric id. Any string is a syntactically valid sync_id, so an
+// unknown one surfaces as a normal not-found error rather than a 400.
 func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation id")
-		return
-	}
+	syncID := r.PathValue("id")
 
-	obs, err := s.store.GetObservation(id)
+	obs, err := s.backendForObservation(syncID).GetObservation(syncID)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "observation not found")
 		return
@@ -445,12 +551,7 @@ func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation id")
-		return
-	}
+	syncID := r.PathValue("id")
 
 	var body store.UpdateObservationParams
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -463,7 +564,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	obs, err := s.store.UpdateObservation(id, body)
+	obs, err := s.backendForObservation(syncID).UpdateObservation(syncID, body)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -474,18 +575,20 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation id")
-		return
-	}
+	syncID := r.PathValue("id")
 
 	hard := queryBool(r, "hard", false)
-	if err := s.store.DeleteObservation(id, hard); err != nil {
+	if err := s.backendForObservation(syncID).DeleteObservation(syncID, hard); err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, sql.ErrNoRows):
+			// The sqlite backend resolves sync_id -> int64 via
+			// GetObservationBySyncID before deleting; an unknown or
+			// already-soft-deleted sync_id surfaces sql.ErrNoRows from that
+			// lookup rather than store.ErrObservationNotFound. Both mean the
+			// same thing to an HTTP caller: there's nothing left to delete.
+			jsonError(w, http.StatusNotFound, "observation not found")
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())
 		}
@@ -494,29 +597,23 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 
 	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"id":          id,
+		"id":          syncID,
 		"status":      "deleted",
 		"hard_delete": hard,
 	})
 }
 
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("observation_id")
-	if idStr == "" {
+	syncID := r.URL.Query().Get("observation_id")
+	if syncID == "" {
 		jsonError(w, http.StatusBadRequest, "observation_id parameter is required")
-		return
-	}
-
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation_id")
 		return
 	}
 
 	before := queryInt(r, "before", 5)
 	after := queryInt(r, "after", 5)
 
-	result, err := s.store.Timeline(id, before, after)
+	result, err := s.backendForObservation(syncID).Timeline(syncID, before, after)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -529,7 +626,8 @@ func (s *Server) handleReviewList(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	limit := queryInt(r, "limit", 10)
 
-	observations, err := s.store.ObservationsNeedingReview(project, limit)
+	routeProject, _ := store.NormalizeProject(project)
+	observations, err := s.backendForProject(routeProject).ObservationsNeedingReview(project, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -547,33 +645,37 @@ func (s *Server) handleReviewList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request) {
+	// observation_id (and its legacy "id" alias) is the observation's
+	// sync_id — an opaque string handle, not a numeric id (see
+	// backendForObservation's doc comment).
 	var body struct {
-		ObservationID int64 `json:"observation_id"`
-		ID            int64 `json:"id"`
+		ObservationID string `json:"observation_id"`
+		ID            string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 
-	id := body.ObservationID
-	if id == 0 {
-		id = body.ID
+	syncID := body.ObservationID
+	if syncID == "" {
+		syncID = body.ID
 	}
-	if id == 0 {
+	if syncID == "" {
 		jsonError(w, http.StatusBadRequest, "observation_id is required")
 		return
 	}
 
-	if err := s.store.MarkReviewed(id); err != nil {
-		if errors.Is(err, store.ErrObservationNotFound) {
+	backend := s.backendForObservation(syncID)
+	if err := backend.MarkReviewed(syncID); err != nil {
+		if errors.Is(err, store.ErrObservationNotFound) || errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	obs, err := s.store.GetObservation(id)
+	obs, err := backend.GetObservation(syncID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "marked reviewed but failed to reload observation: "+err.Error())
 		return
@@ -617,21 +719,33 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 
 	// When the client omits the project, derive it from the session so the
 	// prompt is attributed correctly without the hook detecting it eagerly on
-	// every message.
+	// every message. Looked up on the session's OWN backend (backendForSession)
+	// since that's where the session actually lives.
 	if strings.TrimSpace(body.Project) == "" {
-		if sess, err := s.store.GetSession(body.SessionID); err == nil {
+		if sess, err := s.backendForSession(body.SessionID).GetSession(body.SessionID); err == nil {
 			body.Project = sess.Project
 		}
 	}
 
-	id, err := s.store.AddPrompt(body)
+	project, _ := store.NormalizeProject(body.Project)
+	promptID, err := s.backendForProject(project).AddPrompt(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	s.notifyWrite()
-	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
+	// AddPrompt's returned id is the decimal string of the prompt row's
+	// numeric id (see sqliteBackend.AddPrompt) — parse it back to a number to
+	// preserve this endpoint's existing JSON response shape. No downstream
+	// caller looks a prompt back up by id, so a non-numeric id (were a future
+	// backend to ever return one) degrades to being echoed as-is rather than
+	// failing the request.
+	var idField any = promptID
+	if n, convErr := strconv.ParseInt(promptID, 10, 64); convErr == nil {
+		idField = n
+	}
+	jsonResponse(w, http.StatusCreated, map[string]any{"id": idField, "status": "saved"})
 }
 
 func (s *Server) handleRecentPrompts(w http.ResponseWriter, r *http.Request) {
@@ -774,7 +888,8 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
 	scope := r.URL.Query().Get("scope")
 
-	context, err := s.store.FormatContext(project, scope)
+	routeProject, _ := store.NormalizeProject(project)
+	context, err := s.backendForProject(routeProject).FormatContext(project, scope)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1283,11 +1398,18 @@ func (s *Server) handleJudgeConflict(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCompareMemories serves POST /conflicts/compare.
-// Body: {"memory_id_a":1,"memory_id_b":2,"relation":"related", "confidence":0.9, "reasoning":"..."}
+// Body: {"memory_id_a":"obs-abc","memory_id_b":"obs-def","relation":"related", "confidence":0.9, "reasoning":"..."}
+//
+// memory_id_a/memory_id_b are sync_ids — the opaque by-id handle used across
+// the whole observation surface (see backendForObservation's doc comment) —
+// not the legacy int64 primary key. This is what makes /conflicts/compare
+// work for MemoryLake-enabled projects, whose observations have no int64 id:
+// both sides are expected to belong to the same project/backend, so the
+// backend is resolved once from memory_id_a via backendForObservation.
 func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		MemoryIDA  int64    `json:"memory_id_a"`
-		MemoryIDB  int64    `json:"memory_id_b"`
+		MemoryIDA  string   `json:"memory_id_a"`
+		MemoryIDB  string   `json:"memory_id_b"`
 		Relation   string   `json:"relation"`
 		Confidence *float64 `json:"confidence"`
 		Reasoning  string   `json:"reasoning"`
@@ -1297,11 +1419,11 @@ func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if body.MemoryIDA == 0 {
+	if strings.TrimSpace(body.MemoryIDA) == "" {
 		jsonError(w, http.StatusBadRequest, "memory_id_a is required")
 		return
 	}
-	if body.MemoryIDB == 0 {
+	if strings.TrimSpace(body.MemoryIDB) == "" {
 		jsonError(w, http.StatusBadRequest, "memory_id_b is required")
 		return
 	}
@@ -1323,20 +1445,19 @@ func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obsA, err := s.store.GetObservation(body.MemoryIDA)
-	if err != nil {
-		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%d not found: %s", body.MemoryIDA, err))
+	backend := s.backendForObservation(body.MemoryIDA)
+	if _, err := backend.GetObservation(body.MemoryIDA); err != nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%s not found: %s", body.MemoryIDA, err))
 		return
 	}
-	obsB, err := s.store.GetObservation(body.MemoryIDB)
-	if err != nil {
-		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%d not found: %s", body.MemoryIDB, err))
+	if _, err := backend.GetObservation(body.MemoryIDB); err != nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%s not found: %s", body.MemoryIDB, err))
 		return
 	}
 
-	syncID, err := s.store.JudgeBySemantic(store.JudgeBySemanticParams{
-		SourceID:   obsA.SyncID,
-		TargetID:   obsB.SyncID,
+	syncID, err := backend.JudgeBySemantic(store.JudgeBySemanticParams{
+		SourceID:   body.MemoryIDA,
+		TargetID:   body.MemoryIDB,
 		Relation:   body.Relation,
 		Confidence: confidence,
 		Reasoning:  body.Reasoning,
@@ -1410,7 +1531,7 @@ func (s *Server) validateSessionProject(w http.ResponseWriter, sessionID, projec
 		return true
 	}
 	projectName, _ = store.NormalizeProject(projectName)
-	session, err := s.store.GetSession(sessionID)
+	session, err := s.backendForSession(sessionID).GetSession(sessionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, "session not found")

@@ -33,6 +33,7 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/cloud/syncguidance"
 	"github.com/Gentleman-Programming/engram/internal/diagnostic"
 	"github.com/Gentleman-Programming/engram/internal/mcp"
+	"github.com/Gentleman-Programming/engram/internal/memorylake"
 	"github.com/Gentleman-Programming/engram/internal/obsidian"
 	"github.com/Gentleman-Programming/engram/internal/project"
 	"github.com/Gentleman-Programming/engram/internal/server"
@@ -65,11 +66,19 @@ var (
 	newHTTPServer = server.New
 	startHTTP     = (*server.Server).Start
 
-	newMCPServer           = mcp.NewServer
-	newMCPServerWithTools  = mcp.NewServerWithTools
-	newMCPServerWithConfig = mcp.NewServerWithConfig
-	resolveMCPTools        = mcp.ResolveTools
-	serveMCP               = mcpserver.ServeStdio
+	newMCPServer             = mcp.NewServer
+	newMCPServerWithTools    = mcp.NewServerWithTools
+	newMCPServerWithConfig   = mcp.NewServerWithConfig
+	newMCPServerWithSelector = mcp.NewServerWithSelector
+	resolveMCPTools          = mcp.ResolveTools
+	serveMCP                 = mcpserver.ServeStdio
+
+	// loadMemorylakeConfig and loadMemorylakeEnablement are the injectable
+	// hooks cmdMCP uses to assemble the per-project routing selector
+	// (NewRoutingSelector in routing.go). Overridable in tests so they don't
+	// depend on real environment variables / the real ~/.engram/memorylake.json.
+	loadMemorylakeConfig     = memorylake.LoadConfig
+	loadMemorylakeEnablement = memorylake.LoadEnablement
 
 	// detectProject is injectable for testing; wraps project.DetectProject.
 	detectProject = project.DetectProject
@@ -658,6 +667,8 @@ func main() {
 		cmdObsidianExport(cfg)
 	case "projects":
 		cmdProjects(cfg)
+	case "memorylake":
+		cmdMemorylake(cfg)
 	case "setup":
 		cmdSetup(cfg)
 	case "protocol-mode":
@@ -747,6 +758,13 @@ func cmdServe(cfg store.Config) {
 	srv.SetPromptBuilder(func(a, b store.ObservationSnippet) string {
 		return llmBuildPrompt(a, b)
 	})
+
+	// Route enabled projects to MemoryLake for the subset of endpoints
+	// internal/server can route (see Server.selector's doc) — the same
+	// selector `engram mcp` and `engram save`/`engram search` use, so the
+	// OpenCode/Pi HTTP session-tracking path no longer split-brains against
+	// an enabled project.
+	srv.SetBackendSelector(buildRoutingSelector(mcp.NewSQLiteBackend(s)))
 
 	// Graceful shutdown context — cancelled on SIGINT/SIGTERM.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -896,7 +914,16 @@ func cmdMCP(cfg store.Config) {
 
 	mcpCfg := mcp.MCPConfig{DefaultProject: projectOverride}
 	allowlist := resolveMCPTools(toolsFilter)
-	mcpSrv := newMCPServerWithConfig(s, mcpCfg, allowlist)
+
+	// Route enabled projects to MemoryLake, everything else to the local
+	// sqlite store `s` — the same store that would otherwise be used
+	// directly (StaticSelector-style). MemoryLake stays strictly opt-in per
+	// project; a missing/unreadable enablement file just means no project
+	// is enabled yet, not a startup failure. buildRoutingSelector is the same
+	// helper `engram save`/`engram search`/`engram serve` use, so all
+	// interfaces route enabled projects identically.
+	sel := buildRoutingSelector(mcp.NewSQLiteBackend(s))
+	mcpSrv := newMCPServerWithSelector(sel, mcpCfg, allowlist)
 
 	if err := serveMCP(mcpSrv); err != nil {
 		stopAutosync()
@@ -970,7 +997,14 @@ func cmdSearch(cfg store.Config) {
 	}
 	defer s.Close()
 
-	results, err := storeSearch(s, query, opts)
+	// Route to MemoryLake when the target project (--project, else cwd
+	// detection) is enabled; otherwise backend is `s` itself and behavior is
+	// byte-for-byte unchanged from before routing existed. This is the same
+	// selector `engram mcp` and `engram serve` use.
+	sel := buildRoutingSelector(mcp.NewSQLiteBackend(s))
+	backend := sel(resolveCLIRoutingProject(opts.Project))
+
+	results, err := backendSearch(backend, query, opts)
 	if err != nil {
 		fatal(err)
 		return
@@ -1038,6 +1072,13 @@ func cmdSave(cfg store.Config) {
 	}
 	defer s.Close()
 
+	// Route to MemoryLake when the target project (--project, else cwd
+	// detection) is enabled; otherwise backend is `s` itself and behavior is
+	// byte-for-byte unchanged from before routing existed. This is the same
+	// selector `engram mcp` and `engram serve` use.
+	sel := buildRoutingSelector(mcp.NewSQLiteBackend(s))
+	backend := sel(resolveCLIRoutingProject(project))
+
 	sessionID := "manual-save"
 	if project != "" {
 		sessionID = "manual-save-" + project
@@ -1046,10 +1087,10 @@ func cmdSave(cfg store.Config) {
 	if err != nil {
 		fatal(err)
 	}
-	if err := s.CreateSession(sessionID, project, cwd); err != nil {
+	if err := backend.CreateSession(sessionID, project, cwd); err != nil {
 		fatal(err)
 	}
-	id, err := storeAddObservation(s, store.AddObservationParams{
+	id, err := backendAddObservation(backend, store.AddObservationParams{
 		SessionID: sessionID,
 		Type:      typ,
 		Title:     title,
@@ -1062,7 +1103,7 @@ func cmdSave(cfg store.Config) {
 		fatal(err)
 	}
 
-	fmt.Printf("Memory saved: #%d %q (%s)\n", id, title, typ)
+	fmt.Printf("Memory saved: #%s %q (%s)\n", id, title, typ)
 }
 
 func cmdDelete(cfg store.Config) {
@@ -1096,12 +1137,7 @@ func cmdDeleteObservation(cfg store.Config) {
 		return
 	}
 
-	id, err := strconv.ParseInt(os.Args[2], 10, 64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
-		exitFunc(1)
-		return
-	}
+	arg := os.Args[2]
 
 	hard := false
 	for i := 3; i < len(os.Args); i++ {
@@ -1117,6 +1153,13 @@ func cmdDeleteObservation(cfg store.Config) {
 	}
 	defer s.Close()
 
+	id, err := resolveObservationID(s, arg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		exitFunc(1)
+		return
+	}
+
 	if err := storeDeleteObservation(s, id, hard); err != nil {
 		fatal(err)
 		return
@@ -1127,6 +1170,26 @@ func cmdDeleteObservation(cfg store.Config) {
 		kind = "hard-deleted"
 	}
 	fmt.Printf("Observation #%d %s\n", id, kind)
+}
+
+// resolveObservationID resolves a CLI observation-id argument to the store's
+// underlying int64 primary key. The argument is treated first as an opaque
+// sync_id — the same by-id handle mem_search/mem_save/mem_get_observation and
+// the HTTP API use (see internal/server's backendForObservation) — falling
+// back to a legacy plain-digit row id (what `engram save`'s stdout has
+// always printed) for backward compatibility. Failure to resolve either
+// form is reported as a single "invalid observation id" error; deciding whether a
+// resolvable-but-nonexistent id (e.g. a stale numeric id) is itself an error
+// is left to the caller (storeDeleteObservation/storeTimeline already return
+// a proper not-found error for that case).
+func resolveObservationID(s *store.Store, arg string) (int64, error) {
+	if obs, err := s.GetObservationBySyncID(arg); err == nil {
+		return obs.ID, nil
+	}
+	if id, err := strconv.ParseInt(arg, 10, 64); err == nil {
+		return id, nil
+	}
+	return 0, fmt.Errorf("invalid observation id %q", arg)
 }
 
 func cmdDeleteSession(cfg store.Config) {
@@ -1222,11 +1285,7 @@ func cmdTimeline(cfg store.Config) {
 		exitFunc(1)
 	}
 
-	obsID, err := strconv.ParseInt(os.Args[2], 10, 64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
-		exitFunc(1)
-	}
+	arg := os.Args[2]
 
 	before, after := 5, 5
 	for i := 3; i < len(os.Args); i++ {
@@ -1253,6 +1312,12 @@ func cmdTimeline(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+
+	obsID, err := resolveObservationID(s, arg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		exitFunc(1)
+	}
 
 	result, err := storeTimeline(s, obsID, before, after)
 	if err != nil {
@@ -2333,6 +2398,171 @@ func cmdProjectsPrune(cfg store.Config) {
 	fmt.Printf("\nPruned %d project(s): %d sessions, %d prompts removed.\n", len(selected), totalSessions, totalPrompts)
 }
 
+// cmdMemorylake routes: engram memorylake enable --project <name> [--migrate]
+//
+//	engram memorylake disable --project <name>
+//	engram memorylake status
+func cmdMemorylake(cfg store.Config) {
+	subCmd := "status"
+	if len(os.Args) > 2 {
+		subCmd = os.Args[2]
+	}
+	switch subCmd {
+	case "enable":
+		cmdMemorylakeEnable(cfg)
+	case "disable":
+		cmdMemorylakeDisable(cfg)
+	case "status", "":
+		cmdMemorylakeStatus(cfg)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown memorylake subcommand: %s\n", subCmd)
+		printMemorylakeUsage()
+		exitFunc(1)
+	}
+}
+
+func printMemorylakeUsage() {
+	fmt.Fprintln(os.Stderr, "usage: engram memorylake enable --project <name> [--migrate]")
+	fmt.Fprintln(os.Stderr, "       engram memorylake disable --project <name>")
+	fmt.Fprintln(os.Stderr, "       engram memorylake status")
+}
+
+func cmdMemorylakeEnable(cfg store.Config) {
+	project := ""
+	migrate := false
+	for i := 3; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--project":
+			if i+1 < len(os.Args) {
+				project = os.Args[i+1]
+				i++
+			}
+		case "--migrate":
+			migrate = true
+		}
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "engram: --project <name> is required")
+		printMemorylakeUsage()
+		exitFunc(1)
+		return
+	}
+
+	path := memorylake.DefaultEnablementPath()
+	enablement, err := memorylake.LoadEnablement(path)
+	if err != nil {
+		fatal(err)
+	}
+
+	// TODO(task5/task10): resolve ProjID via identity.EnsureProject(project)
+	// once internal/identity lands. Until then ProjID is left empty and the
+	// enablement entry only records that the project opted in.
+	entry := memorylake.ProjectEntry{
+		ProjID:    "",
+		EnabledAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	enablement.EnabledProjects[project] = entry
+	if err := enablement.Save(path); err != nil {
+		fatal(err)
+	}
+
+	fmt.Printf("Enabled MemoryLake backend for project %q.\n", project)
+	if migrate {
+		// TODO(task9): trigger migration of existing SQLite memories for
+		// this project into MemoryLake once the migration path lands.
+		fmt.Println("Note: --migrate is not yet implemented (arrives in Task 9); no data was migrated.")
+	}
+}
+
+func cmdMemorylakeDisable(cfg store.Config) {
+	project := ""
+	for i := 3; i < len(os.Args); i++ {
+		if os.Args[i] == "--project" && i+1 < len(os.Args) {
+			project = os.Args[i+1]
+			i++
+		}
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "engram: --project <name> is required")
+		printMemorylakeUsage()
+		exitFunc(1)
+		return
+	}
+
+	path := memorylake.DefaultEnablementPath()
+	enablement, err := memorylake.LoadEnablement(path)
+	if err != nil {
+		fatal(err)
+	}
+
+	if _, ok := enablement.IsEnabled(project); !ok {
+		fmt.Printf("Project %q is not enabled for MemoryLake (no change).\n", project)
+		return
+	}
+
+	delete(enablement.EnabledProjects, project)
+	if err := enablement.Save(path); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("Disabled MemoryLake backend for project %q (now using local SQLite).\n", project)
+}
+
+func cmdMemorylakeStatus(cfg store.Config) {
+	path := memorylake.DefaultEnablementPath()
+	enablement, err := memorylake.LoadEnablement(path)
+	if err != nil {
+		fatal(err)
+	}
+
+	s, err := storeNew(cfg)
+	if err != nil {
+		fatal(err)
+	}
+	defer s.Close()
+
+	names, err := s.ListProjectNames()
+	if err != nil {
+		fatal(err)
+	}
+
+	// Include any enabled projects that may not (yet) have observations in
+	// the local store, so `status` is authoritative from the enablement
+	// list even before any local memories exist.
+	seen := make(map[string]bool, len(names))
+	all := make([]string, 0, len(names))
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			all = append(all, n)
+		}
+	}
+	for n := range enablement.EnabledProjects {
+		if !seen[n] {
+			seen[n] = true
+			all = append(all, n)
+		}
+	}
+	sort.Strings(all)
+
+	if len(all) == 0 {
+		fmt.Println("No projects found.")
+		return
+	}
+
+	fmt.Printf("MemoryLake backend status (%d project(s)):\n", len(all))
+	for _, name := range all {
+		if entry, ok := enablement.IsEnabled(name); ok {
+			projID := entry.ProjID
+			if projID == "" {
+				projID = "(pending)"
+			}
+			fmt.Printf("  %-30s memorylake  (proj_id=%s, enabled_at=%s)\n", name, projID, entry.EnabledAt)
+		} else {
+			fmt.Printf("  %-30s sqlite\n", name)
+		}
+	}
+}
+
 // cmdSetup classifies os.Args[2:] with a two-pass, order-independent
 // algorithm (see openspec/changes/setup-protocol-flag/proposal.md,
 // Approach; JD-014 residual fix). The FIRST pass scans every token and only
@@ -2679,6 +2909,12 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
+  memorylake status  Show MemoryLake backend enablement per project (sqlite vs memorylake)
+  memorylake enable --project <name> [--migrate]
+                     Enable the MemoryLake backend for a project
+                       --migrate  Migrate existing SQLite memories (arrives in Task 9)
+  memorylake disable --project <name>
+                     Disable the MemoryLake backend for a project (reverts to local SQLite)
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
                      cursor, vscode-copilot, kilocode)

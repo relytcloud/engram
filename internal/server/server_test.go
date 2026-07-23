@@ -300,11 +300,14 @@ func TestAdditionalServerErrorBranches(t *testing.T) {
 		t.Fatalf("expected session create 201, got %d", createRec.Code)
 	}
 
+	// Observation ids are opaque sync_id strings (see backendForObservation's
+	// doc comment) — "not-a-number" is a syntactically valid id that simply
+	// doesn't exist, so this is a 404, not a 400.
 	getBadIDReq := httptest.NewRequest(http.MethodGet, "/observations/not-a-number", nil)
 	getBadIDRec := httptest.NewRecorder()
 	h.ServeHTTP(getBadIDRec, getBadIDReq)
-	if getBadIDRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for invalid observation id, got %d", getBadIDRec.Code)
+	if getBadIDRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown observation id, got %d", getBadIDRec.Code)
 	}
 
 	updateNotFoundReq := httptest.NewRequest(http.MethodPatch, "/observations/99999", strings.NewReader(`{"title":"updated"}`))
@@ -361,6 +364,10 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add observation: %v", err)
 	}
+	obs, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatalf("reload observation: %v", err)
+	}
 	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
 	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
 		t.Fatalf("backdate review_after: %v", err)
@@ -385,7 +392,7 @@ func TestHandleReviewListAndMarkReviewed(t *testing.T) {
 		t.Fatalf("expected needs_review state, got %v", entry["state"])
 	}
 
-	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"observation_id":%d}`, id)))
+	markReq := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"observation_id":%q}`, obs.SyncID)))
 	markReq.Header.Set("Content-Type", "application/json")
 	markRec := httptest.NewRecorder()
 	h.ServeHTTP(markRec, markReq)
@@ -413,12 +420,16 @@ func TestHandleReviewMarkReviewedAcceptsIDAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add observation: %v", err)
 	}
+	obs, err := st.GetObservation(id)
+	if err != nil {
+		t.Fatalf("reload observation: %v", err)
+	}
 	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
 	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
 		t.Fatalf("backdate review_after: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"id":%d}`, id)))
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(fmt.Sprintf(`{"id":%q}`, obs.SyncID)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -441,7 +452,7 @@ func TestHandleReviewMarkReviewedRequiresObservationID(t *testing.T) {
 
 func TestHandleReviewMarkReviewedReturnsNotFoundForUnknownObservation(t *testing.T) {
 	srv := New(newServerTestStore(t), 0)
-	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(`{"observation_id":999999}`))
+	req := httptest.NewRequest(http.MethodPost, "/review/mark_reviewed", strings.NewReader(`{"observation_id":"obs-nonexistent"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -2073,7 +2084,7 @@ func TestProjectCurrentDoctorJudgeAndCompareRoutes(t *testing.T) {
 		t.Fatalf("expected relation envelope, got %#v", judgeResp)
 	}
 
-	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(fmt.Sprintf(`{"memory_id_a":%d,"memory_id_b":%d,"relation":"related","confidence":0.91,"reasoning":"same auth topic","model":"test-model"}`, idA, idB)))
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(fmt.Sprintf(`{"memory_id_a":%q,"memory_id_b":%q,"relation":"related","confidence":0.91,"reasoning":"same auth topic","model":"test-model"}`, obsA.SyncID, obsB.SyncID)))
 	compareReq.Header.Set("Content-Type", "application/json")
 	compareRec := httptest.NewRecorder()
 	h.ServeHTTP(compareRec, compareReq)
@@ -2103,25 +2114,39 @@ func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
 		t.Fatalf("expected missing judgment_id 400, got %d body=%q", judgeRec.Code, judgeRec.Body.String())
 	}
 
-	missingConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","reasoning":"missing confidence"}`))
+	missingConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-1","memory_id_b":"obs-2","relation":"related","reasoning":"missing confidence"}`))
 	missingConfidenceRec := httptest.NewRecorder()
 	h.ServeHTTP(missingConfidenceRec, missingConfidenceReq)
 	if missingConfidenceRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected missing confidence 400, got %d body=%q", missingConfidenceRec.Code, missingConfidenceRec.Body.String())
 	}
 
-	invalidConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","confidence":1.5,"reasoning":"invalid confidence"}`))
+	invalidConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-1","memory_id_b":"obs-2","relation":"related","confidence":1.5,"reasoning":"invalid confidence"}`))
 	invalidConfidenceRec := httptest.NewRecorder()
 	h.ServeHTTP(invalidConfidenceRec, invalidConfidenceReq)
 	if invalidConfidenceRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid confidence 400, got %d body=%q", invalidConfidenceRec.Code, invalidConfidenceRec.Body.String())
 	}
 
-	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":999,"memory_id_b":1000,"relation":"related","confidence":0.9,"reasoning":"missing"}`))
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-missing-999","memory_id_b":"obs-missing-1000","relation":"related","confidence":0.9,"reasoning":"missing"}`))
 	compareRec := httptest.NewRecorder()
 	h.ServeHTTP(compareRec, compareReq)
 	if compareRec.Code != http.StatusNotFound {
 		t.Fatalf("expected missing observation 404, got %d body=%q", compareRec.Code, compareRec.Body.String())
+	}
+
+	emptyIDAReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"","memory_id_b":"obs-2","relation":"related","confidence":0.9,"reasoning":"empty id a"}`))
+	emptyIDARec := httptest.NewRecorder()
+	h.ServeHTTP(emptyIDARec, emptyIDAReq)
+	if emptyIDARec.Code != http.StatusBadRequest {
+		t.Fatalf("expected empty memory_id_a 400, got %d body=%q", emptyIDARec.Code, emptyIDARec.Body.String())
+	}
+
+	emptyIDBReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-1","memory_id_b":"","relation":"related","confidence":0.9,"reasoning":"empty id b"}`))
+	emptyIDBRec := httptest.NewRecorder()
+	h.ServeHTTP(emptyIDBRec, emptyIDBReq)
+	if emptyIDBRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected empty memory_id_b 400, got %d body=%q", emptyIDBRec.Code, emptyIDBRec.Body.String())
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -87,7 +86,7 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 		t.Fatalf("expected 201 creating first observation, got %d", firstResp.StatusCode)
 	}
 	firstBody := decodeJSON[map[string]any](t, firstResp)
-	firstID := int64(firstBody["id"].(float64))
+	firstID := firstBody["id"].(string)
 
 	secondResp := postJSON(t, client, ts.URL+"/observations", map[string]any{
 		"session_id": "s-e2e",
@@ -102,12 +101,12 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 		t.Fatalf("expected 201 upserting observation, got %d", secondResp.StatusCode)
 	}
 	secondBody := decodeJSON[map[string]any](t, secondResp)
-	secondID := int64(secondBody["id"].(float64))
+	secondID := secondBody["id"].(string)
 	if firstID != secondID {
-		t.Fatalf("expected topic upsert to return same id, got %d and %d", firstID, secondID)
+		t.Fatalf("expected topic upsert to return same id, got %q and %q", firstID, secondID)
 	}
 
-	getResp, err := client.Get(ts.URL + "/observations/" + strconv.FormatInt(firstID, 10))
+	getResp, err := client.Get(ts.URL + "/observations/" + firstID)
 	if err != nil {
 		t.Fatalf("get observation: %v", err)
 	}
@@ -135,12 +134,12 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 		t.Fatalf("expected 201 creating bug observation, got %d", bugResp.StatusCode)
 	}
 	bugBody := decodeJSON[map[string]any](t, bugResp)
-	bugID := int64(bugBody["id"].(float64))
+	bugID := bugBody["id"].(string)
 	if bugID == firstID {
 		t.Fatalf("expected different topic to create new observation")
 	}
 
-	deleteReq, err := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(firstID, 10), nil)
+	deleteReq, err := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+firstID, nil)
 	if err != nil {
 		t.Fatalf("new delete request: %v", err)
 	}
@@ -153,7 +152,7 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 	}
 	deleteResp.Body.Close()
 
-	deletedGetResp, err := client.Get(ts.URL + "/observations/" + strconv.FormatInt(firstID, 10))
+	deletedGetResp, err := client.Get(ts.URL + "/observations/" + firstID)
 	if err != nil {
 		t.Fatalf("get deleted observation: %v", err)
 	}
@@ -173,8 +172,11 @@ func TestObservationsTopicUpsertAndDeleteE2E(t *testing.T) {
 	if len(searchResults) != 1 {
 		t.Fatalf("expected one search result after soft-delete, got %d", len(searchResults))
 	}
-	if int64(searchResults[0]["id"].(float64)) != bugID {
-		t.Fatalf("expected bug observation in search results")
+	// The search result embeds the full store.Observation shape (numeric id +
+	// string sync_id); compare by sync_id, the same handle the create
+	// response returned as bugID.
+	if searchResults[0]["sync_id"].(string) != bugID {
+		t.Fatalf("expected bug observation in search results, got %#v", searchResults[0])
 	}
 }
 
@@ -379,7 +381,7 @@ func TestCoreReadHandlersAndHelpersE2E(t *testing.T) {
 		t.Fatalf("expected 201 creating observation, got %d", obs.StatusCode)
 	}
 	obsData := decodeJSON[map[string]any](t, obs)
-	obsID := int64(obsData["id"].(float64))
+	obsID := obsData["id"].(string)
 
 	recentSessionsResp, err := client.Get(ts.URL + "/sessions/recent?project=engram&limit=oops")
 	if err != nil {
@@ -429,7 +431,7 @@ func TestCoreReadHandlersAndHelpersE2E(t *testing.T) {
 		t.Fatalf("expected latest observation with created_at, got %#v", listObs)
 	}
 
-	timelineResp, err := client.Get(ts.URL + "/timeline?observation_id=" + strconv.FormatInt(obsID, 10) + "&before=bad&after=bad")
+	timelineResp, err := client.Get(ts.URL + "/timeline?observation_id=" + obsID + "&before=bad&after=bad")
 	if err != nil {
 		t.Fatalf("timeline: %v", err)
 	}
@@ -500,14 +502,16 @@ func TestValidationAndImportExportErrorsE2E(t *testing.T) {
 	}
 	create.Body.Close()
 
+	// "not-a-number" is a syntactically valid (but nonexistent) sync_id now
+	// that observation ids are opaque strings, so this is a 404, not a 400.
 	updateBadIDReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/not-a-number", strings.NewReader(`{"title":"x"}`))
 	updateBadIDReq.Header.Set("Content-Type", "application/json")
 	updateBadIDResp, err := client.Do(updateBadIDReq)
 	if err != nil {
-		t.Fatalf("patch bad id: %v", err)
+		t.Fatalf("patch unknown id: %v", err)
 	}
-	if updateBadIDResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 update bad id, got %d", updateBadIDResp.StatusCode)
+	if updateBadIDResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 update unknown id, got %d", updateBadIDResp.StatusCode)
 	}
 	updateBadIDResp.Body.Close()
 
@@ -624,9 +628,9 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 		t.Fatalf("expected 201 adding observation, got %d", obs.StatusCode)
 	}
 	obsBody := decodeJSON[map[string]any](t, obs)
-	obsID := int64(obsBody["id"].(float64))
+	obsID := obsBody["id"].(string)
 
-	updateReq, err := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader(`{"title":"Auth handling updated","topic_key":"architecture/auth"}`))
+	updateReq, err := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+obsID, strings.NewReader(`{"title":"Auth handling updated","topic_key":"architecture/auth"}`))
 	if err != nil {
 		t.Fatalf("new patch request: %v", err)
 	}
@@ -643,7 +647,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 		t.Fatalf("expected updated title, got %v", updated["title"])
 	}
 
-	emptyUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader(`{}`))
+	emptyUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+obsID, strings.NewReader(`{}`))
 	emptyUpdateReq.Header.Set("Content-Type", "application/json")
 	emptyUpdateResp, err := client.Do(emptyUpdateReq)
 	if err != nil {
@@ -654,7 +658,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	emptyUpdateResp.Body.Close()
 
-	badUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), strings.NewReader("{"))
+	badUpdateReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/observations/"+obsID, strings.NewReader("{"))
 	badUpdateReq.Header.Set("Content-Type", "application/json")
 	badUpdateResp, err := client.Do(badUpdateReq)
 	if err != nil {
@@ -665,7 +669,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	badUpdateResp.Body.Close()
 
-	deleteHardReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?hard=true", nil)
+	deleteHardReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+obsID+"?hard=true", nil)
 	deleteHardResp, err := client.Do(deleteHardReq)
 	if err != nil {
 		t.Fatalf("delete hard observation: %v", err)
@@ -675,7 +679,7 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	deleteHardResp.Body.Close()
 
-	deleteInvalidBoolReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10)+"?hard=not-bool", nil)
+	deleteInvalidBoolReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+obsID+"?hard=not-bool", nil)
 	deleteInvalidBoolResp, err := client.Do(deleteInvalidBoolReq)
 	if err != nil {
 		t.Fatalf("delete with invalid bool: %v", err)
@@ -694,12 +698,14 @@ func TestPromptAndObservationMutationHandlersE2E(t *testing.T) {
 	}
 	timelineMissingIDResp.Body.Close()
 
+	// "abc" is a syntactically valid (but nonexistent) sync_id now that
+	// observation ids are opaque strings, so this is a 404, not a 400.
 	timelineBadIDResp, err := client.Get(ts.URL + "/timeline?observation_id=abc")
 	if err != nil {
-		t.Fatalf("timeline bad id: %v", err)
+		t.Fatalf("timeline unknown id: %v", err)
 	}
-	if timelineBadIDResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 invalid timeline id, got %d", timelineBadIDResp.StatusCode)
+	if timelineBadIDResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 unknown timeline id, got %d", timelineBadIDResp.StatusCode)
 	}
 	timelineBadIDResp.Body.Close()
 }
@@ -807,19 +813,21 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 		t.Fatalf("expected 201 adding observation, got %d", obs.StatusCode)
 	}
 	obsData := decodeJSON[map[string]any](t, obs)
-	obsID := int64(obsData["id"].(float64))
+	obsID := obsData["id"].(string)
 
+	// "not-number" is a syntactically valid (but nonexistent) sync_id now
+	// that observation ids are opaque strings, so this is a 404, not a 400.
 	deleteBadIDReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/not-number", nil)
 	deleteBadIDResp, err := client.Do(deleteBadIDReq)
 	if err != nil {
-		t.Fatalf("delete bad id: %v", err)
+		t.Fatalf("delete unknown id: %v", err)
 	}
-	if deleteBadIDResp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 delete bad id, got %d", deleteBadIDResp.StatusCode)
+	if deleteBadIDResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 delete unknown id, got %d", deleteBadIDResp.StatusCode)
 	}
 	deleteBadIDResp.Body.Close()
 
-	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), nil)
+	deleteReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+obsID, nil)
 	deleteResp, err := client.Do(deleteReq)
 	if err != nil {
 		t.Fatalf("delete observation: %v", err)
@@ -829,7 +837,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	}
 	deleteResp.Body.Close()
 
-	deleteMissingReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+strconv.FormatInt(obsID, 10), nil)
+	deleteMissingReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/observations/"+obsID, nil)
 	deleteMissingResp, err := client.Do(deleteMissingReq)
 	if err != nil {
 		t.Fatalf("delete missing observation: %v", err)
@@ -839,7 +847,7 @@ func TestObservationAndSessionErrorBranchesE2E(t *testing.T) {
 	}
 	deleteMissingResp.Body.Close()
 
-	timelineNotFoundResp, err := client.Get(ts.URL + "/timeline?observation_id=" + strconv.FormatInt(obsID, 10))
+	timelineNotFoundResp, err := client.Get(ts.URL + "/timeline?observation_id=" + obsID)
 	if err != nil {
 		t.Fatalf("timeline for deleted obs: %v", err)
 	}

@@ -21,6 +21,7 @@ This is the complete technical reference for Engram. For getting started, see th
 | [Features](#features)                                     | FTS5 search, timeline, privacy, git sync, compression        |
 | [TUI](#terminal-ui-tui)                                   | Screens, navigation, architecture                            |
 | [Running as a Service](#running-as-a-service)             | systemd setup                                                |
+| [MemoryLake Backend](#memorylake-backend)                 | Optional per-project cloud backend, config, known limitations |
 | [Design Decisions](#design-decisions)                     | Why Go, why SQLite, why no raw auto-capture                  |
 
 For other docs:
@@ -133,19 +134,21 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Observations
 
-- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`. Response `id` is the observation's **sync_id** (an opaque string, e.g. `obs-1a2b3c`) — use it for every subsequent by-id call below.
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal|global&limit=N`
-- `GET /observations/{id}` — Get single observation by ID
-- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
-- `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
+- `GET /observations/{id}` — Get single observation by sync_id
+- `PATCH /observations/{id}` — Update fields by sync_id. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
+- `DELETE /observations/{id}` — Delete observation by sync_id (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
+
+  `{id}` is an opaque sync_id string, not a numeric row id (this is what lets a MemoryLake-enabled project's observations — which have no int64 id — be addressed the same way as sqlite's). Any string is syntactically valid; an unknown one is a `404`, never a `400`.
 
 ### Review
 
 - `GET /review` — List observations due for local review. Query: `?project=X&limit=N`
-- `POST /review/mark_reviewed` — Reset one observation's local review cycle. Body: `{observation_id}`; legacy `{id}` is accepted.
+- `POST /review/mark_reviewed` — Reset one observation's local review cycle. Body: `{observation_id}` (sync_id string); legacy `{id}` is accepted.
   - `200` with the refreshed observation payload when marked reviewed
   - `400` when `observation_id`/`id` is missing or the JSON body is invalid
   - `404` when the observation does not exist
@@ -157,7 +160,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Timeline
 
-- `GET /timeline` — Chronological context. Query: `?observation_id=N&before=5&after=5`
+- `GET /timeline` — Chronological context. Query: `?observation_id=<sync_id>&before=5&after=5`
 
 ### Prompts
 
@@ -262,14 +265,14 @@ Status codes:
 
 #### POST /conflicts/compare
 
-Persist an agent-supplied semantic verdict for two observation IDs.
+Persist an agent-supplied semantic verdict for two observations, addressed by sync_id.
 
 Body:
 
 ```json
 {
-  "memory_id_a": 5,
-  "memory_id_b": 6,
+  "memory_id_a": "obs-abc123",
+  "memory_id_b": "obs-def456",
   "relation": "related|compatible|scoped|conflicts_with|supersedes|not_conflict",
   "confidence": 0.99,
   "reasoning": "brief explanation",
@@ -471,6 +474,14 @@ Response:
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
+| `ENGRAM_BACKEND`                | Global safety valve for the [MemoryLake backend](#memorylake-backend). Set to `sqlite` to force every project onto local SQLite regardless of per-project enablement. Any other value (or unset) defers to the per-project enablement list.             | (unset — per-project) |
+| `ENGRAM_MEMORYLAKE_BASE_URL`    | MemoryLake V3 API base URL. Required to enable the MemoryLake backend for any project.                                                                                                                                                                   | (unset)              |
+| `ENGRAM_MEMORYLAKE_API_KEY`     | MemoryLake API key (`Authorization: Bearer <key>`). Required to enable the MemoryLake backend for any project.                                                                                                                                            | (unset)              |
+| `ENGRAM_MEMORYLAKE_WORKSPACE`   | MemoryLake workspace custom_id or `ws-...` id that MemoryLake-backed memories are stored under.                                                                                                                                                           | `engram`             |
+| `ENGRAM_MEMORYLAKE_ACTOR`       | MemoryLake actor custom_id used for writes/reads from this machine. Falls back to hostname when unset.                                                                                                                                                   | (unset — hostname)   |
+| `ENGRAM_MEMORYLAKE_TIMEOUT_MS`  | Per-request HTTP timeout for the MemoryLake client.                                                                                                                                                                                                       | `30000`              |
+| `ENGRAM_MEMORYLAKE_EXTRACT_POLL_MS` | Poll interval while waiting for MemoryLake to extract a fact from a newly written message.                                                                                                                                                            | `2000`               |
+| `ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS` | Max total time to wait for fact extraction before returning a provisional (pending) result.                                                                                                                                                       | `30000`              |
 | `ENGRAM_CLOUD_AUTOSYNC`         | Set to `1` to enable background autosync. Requires `ENGRAM_CLOUD_TOKEN` and `ENGRAM_CLOUD_SERVER` to also be set.                                                                                                                                         | (unset — disabled)   |
 | `ENGRAM_CLOUD_SERVER`           | Cloud server URL used by the autosync manager and `engram sync --cloud`.                                                                                                                                                                                  | (unset)              |
 | `ENGRAM_DATABASE_URL`           | Postgres DSN for `engram cloud serve`.                                                                                                                                                                                                                    | (unset)              |
@@ -957,8 +968,8 @@ Available in the `agent` profile (`engram mcp --tools=agent`).
 
 Parameters:
 
-- **memory_id_a** (required): int — observation ID of the first memory
-- **memory_id_b** (required): int — observation ID of the second memory
+- **memory_id_a** (required): string — sync_id of the first memory
+- **memory_id_b** (required): string — sync_id of the second memory
 - **relation** (required): string — one of `conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict`
 - **confidence** (required): float 0.0..1.0
 - **reasoning** (required): string — explanation of the verdict (max 200 chars)
@@ -1532,6 +1543,77 @@ WHERE id IN (
 );
 COMMIT;
 ```
+
+---
+
+## MemoryLake Backend
+
+Engram's default and source-of-truth storage is local SQLite (`internal/store`). **MemoryLake** is an optional, per-project alternate backend: memories for an *enabled* project are stored as MemoryLake V3 facts (under the `engram` workspace at your configured MemoryLake API) instead of the local database. Projects that are not explicitly enabled are completely unaffected — they keep today's SQLite behavior (FTS5/BM25 search, exact 1:1 int ids, verbatim content) with zero changes.
+
+Both backends can be active at once on the same machine: project A can stay on SQLite while project B is enabled for MemoryLake. Routing is decided per `mem_*` call by resolving the calling project and checking the enablement list below.
+
+### Environment Variables
+
+| Variable                                | Required to enable | Description                                                                                          | Default            |
+| ---------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------ |
+| `ENGRAM_MEMORYLAKE_BASE_URL`              | yes                  | MemoryLake V3 API base URL.                                                                                          | (unset)             |
+| `ENGRAM_MEMORYLAKE_API_KEY`               | yes                  | MemoryLake API key, sent as `Authorization: Bearer <key>`.                                                          | (unset)             |
+| `ENGRAM_MEMORYLAKE_WORKSPACE`             | no                   | Workspace custom_id or `ws-...` id memories are stored under.                                                       | `engram`            |
+| `ENGRAM_MEMORYLAKE_ACTOR`                 | no                   | Actor custom_id for writes/reads from this machine; distinguishes contributors when a project is shared.            | (unset — hostname)  |
+| `ENGRAM_MEMORYLAKE_TIMEOUT_MS`            | no                   | Per-request HTTP timeout for the MemoryLake client.                                                                 | `30000`             |
+| `ENGRAM_MEMORYLAKE_EXTRACT_POLL_MS`       | no                   | **Deprecated, currently unused.** `mem_save` no longer polls for or waits on MemoryLake's fact extraction — it appends and returns immediately (see "Known limitations" below). Parsed but has no effect on any current code path. | `2000`              |
+| `ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS`   | no                   | **Deprecated, currently unused.** Same as above.                                                                    | `30000`             |
+| `ENGRAM_BACKEND`                          | no                   | Global safety valve. Set to `sqlite` to force **every** project onto local SQLite, even projects present in the enablement list below. Any other value (or unset) defers to per-project enablement. | (unset — per-project) |
+
+### `engram memorylake` CLI
+
+```
+engram memorylake enable  --project <name> [--migrate]   # opt this project into the MemoryLake backend
+engram memorylake disable --project <name>                # move this project back to local SQLite
+engram memorylake status                                  # list every known project and its current backend
+```
+
+- `enable` records the project in `~/.engram/memorylake.json` (`enabled_projects`). The first `mem_*` call for that project afterward resolves (and caches) the MemoryLake workspace/project id, auto-creating the MemoryLake project under the `engram` workspace if it doesn't already exist.
+- `disable` removes the project from that list; the project's `mem_*` calls immediately go back to SQLite. Any memories already written to MemoryLake are left in place (not deleted).
+- `status` prints every project engram knows about (from local SQLite plus the enablement list) and which backend each currently uses.
+- `--migrate` is accepted by `enable` but is not yet implemented — it currently only prints a note that no data was migrated; existing SQLite observations for that project stay in SQLite until a real migration path lands.
+
+### Per-project semantics
+
+- **Default: SQLite, for every project.** MemoryLake is strictly opt-in — a project must be explicitly enabled before any of its `mem_*` calls touch the MemoryLake API.
+- **Enabled projects only:** once a project is in the enablement list (and `ENGRAM_BACKEND` is not forced to `sqlite`), that project's `mem_*` calls route to MemoryLake. All other projects on the same machine are unaffected.
+- **`ENGRAM_BACKEND=sqlite` is a global override**, not a per-project one — it forces SQLite for all projects regardless of the enablement list, useful for a full local/cloud comparison or an emergency rollback.
+- Memories for enabled projects are stored under the `engram` workspace at your MemoryLake tenant (configurable via `ENGRAM_MEMORYLAKE_WORKSPACE`), which is how multiple people can share the same project's memories without each running their own local SQLite copy.
+
+### Known limitations
+
+- **Only `engram mcp` routes to MemoryLake; other interfaces still use SQLite.** Per-project MemoryLake routing is wired only through the MCP server (`engram mcp`, the interface stdio agents like Claude Code / Gemini / Codex use). The CLI (`engram save` / `engram search`), the TUI (`engram tui`), and the local HTTP API (`engram serve`, used by the OpenCode plugin and Pi extension) do **not** consult the enablement list — they always talk to local SQLite, even for a project that has been enabled for MemoryLake. As a result, the same enabled project is split-brained across interfaces: memories saved via MCP land in MemoryLake and are invisible to `engram search`/TUI/HTTP, and vice versa. This is a current limitation; use the MCP path exclusively for an enabled project until the other interfaces are routed too.
+- **`mem_save` is asynchronous — it appends and returns immediately.** MemoryLake-backed saves append the content as a conversation message and return right away; a downstream mem0 pipeline (outside this call's request path) decides asynchronously whether/how it becomes one or more facts (ADD/UPDATE/NOOP), including deduplication and conflict-aware merging. `mem_save`'s response `id`/`sync_id` is therefore a **pending reference** (the MemoryLake message id), not a materialized fact id — it is **not guaranteed to resolve via `mem_get_observation`** immediately (or ever, if mem0 discards/merges the content). Re-find newly-saved content via `mem_search` once mem0 has processed it; its `sync_id` in a search hit *is* the real fact id.
+- **Dedup, `topic_key` upsert, and conflict detection are mem0's job, not Engram's.** Earlier builds implemented a local topic_key-match upsert and hash-based dedup on top of MemoryLake; both are retired (Option A thin adapter) in favor of mem0's own vector+BM25 dedup and LLM ADD/UPDATE/NOOP decision downstream. `mem_save` on a MemoryLake-backed project no longer returns `judgment_required`/`candidates` — that conflict-candidate loop is SQLite-only; `mem_judge`/`mem_compare` on MemoryLake still work but read mem0's own conflict-detection API instead.
+- **Content and structure are mem0's, not preserved verbatim.** `mem_get_observation` / search results return the fact text mem0 stored (which may be an LLM extraction/paraphrase/merge of what you saved) — Engram no longer stamps or reads a verbatim `engram_raw` copy.
+- **`mem_search` is pure semantic search — no local keyword/fuzzy augmentation.** `SearchFacts` issues only MemoryLake's vector-search endpoint (`POST /api/v3/workspaces/{ws}/memories/search`); the earlier `topic_key`-slash-triggered keyword-fuzzy lookup (`fact_fuzzy`) and its dedup/pin-merge logic against semantic results are removed. Type/scope filtering still happens client-side, but a fact missing `engram_type`/`engram_scope` metadata (the common case for new saves, since Option A no longer stamps that metadata at save time) now passes the filter rather than being dropped.
+- **No hard delete.** MemoryLake only supports "forget" (soft delete, expiring a fact); `mem_delete`'s `hard_delete` flag is accepted but ignored on MemoryLake-backed projects — every delete degrades to a soft delete.
+- **`mem_merge_projects` is not supported** on a MemoryLake-backed project. Calling it against an enabled project returns an explicit unsupported error rather than attempting a cross-project migration; SQLite projects are unaffected and merge normally.
+- **Several tools are a first cut on MemoryLake**, favoring "returns something reasonable" over full parity with SQLite: sessions (`mem_session_start`/`mem_session_end`/recent-session lookups), `mem_review`, prompt tracking (`mem_save_prompt`), passive capture (`mem_capture_passive`), and relation/conflict tooling (`mem_judge`, `mem_compare`, `FindCandidates`) either have reduced fidelity or are no-ops on the MemoryLake backend today. These gaps are tracked as follow-up work; see `internal/memorylake/backend.go` for the per-method TODOs and `docs/superpowers/specs/2026-07-22-memorylake-sqlite-parity-testing.md` for the full differential test matrix used to evaluate them against SQLite.
+- **Object ids are just the MemoryLake fact id.** `sync_id` for a MemoryLake-backed observation *is* the MemoryLake fact id string — there is no local id-mapping layer any more (an earlier build maintained one, `~/.engram/memorylake-idmap.json`; that file is no longer read or written and can be deleted). Because a fact id is already globally unique to its project, a by-id lookup on a multi-project `engram serve` still cannot resolve to a different project's content.
+- **`engram serve` by-id routing is in-process and lost on restart.** The HTTP server remembers which project a routed observation/session belongs to in an in-memory cache populated when it was created. After an `engram serve` restart that cache is empty, so a by-id request (`GET/PATCH/DELETE /observations/{id}`, `GET /sessions/{id}`, ...) for a MemoryLake-backed object it never saw this run falls back to local SQLite. Because MemoryLake observation ids are globally unique, this can only ever *miss* (SQLite doesn't have that id → `404`/not-found), never return another project's content. Re-issue the request after any read that re-populates routing (e.g. a project-scoped search/context call), or address the object through an interface that carries its project.
+- **Session by-id lookups can still cross projects when a `session_id` string is reused.** Unlike observation int64 ids, session ids are opaque strings supplied by the caller. Within one `engram serve` instance, if two *different* enabled projects are driven with the **same** `session_id` string, a by-id session query (`GET /sessions/{id}`, `POST /sessions/{id}/end`) may resolve to whichever project's backend the in-process cache last recorded for that string. Use distinct session ids per project (the session ids agents generate are already unique in practice) to avoid this residual ambiguity; it does not affect observations, whose ids are globally unique.
+- **By-id operations address only the *active* (non-soft-deleted) observation.** All sync_id-addressed operations over MCP and HTTP — `mem_update`, `mem_delete`, `mem_pin`/`mem_unpin`, `mem_review mark_reviewed`, `mem_timeline` — resolve the sync_id against **non-deleted** rows only (the adapter looks the id up via `GetObservationBySyncID`, which filters `deleted_at IS NULL`). Once an observation is soft-deleted it becomes not-found for every by-id call, so `mem_delete hard_delete=true` cannot reach an already-soft-deleted row through MCP or HTTP. To permanently purge a row that is already soft-deleted, use the CLI (`engram` delete by numeric id), which can still address soft-deleted rows directly.
+- **A MemoryLake observation's numeric `#id` displays as `0`.** MemoryLake-backed observations have no local int64 primary key, so the decimal `#id` shown in human-readable `mem_*` output (e.g. `Memory marked reviewed: #0 …`) is always `0` — it is a display artifact, not a handle. The structured `sync_id` (the MemoryLake fact id string) is the real, addressable handle; use it for every by-id call.
+
+### Agent tool surface on MemoryLake-backed projects
+
+The `mem_*` MCP tool set is registered once, globally, and shared by both backends — nothing is removed or hidden per project. On a MemoryLake-backed project, though, several tools thin out or become unnecessary because mem0 now owns dedup/update/conflict-merge:
+
+| Tier | Tools | MemoryLake-backed behavior |
+| --- | --- | --- |
+| Core (what agents mainly use) | `mem_save`, `mem_search`, `mem_context` | `mem_save` feeds the conversation to mem0 for async extraction/dedup/merge; `mem_search` is pure semantic recall; `mem_context` pulls recent + pinned. |
+| Explicit control (still needed) | `mem_delete` (forget), `mem_get_observation` | mem0 only forgets on an explicit delete call, so this stays; `mem_get_observation` fetches a fact directly by id. |
+| Engram-only capability (mem0 has no equivalent) | `mem_review` (recency decay), `mem_pin`/`mem_unpin`, `mem_session_*`, `mem_save_prompt`, `mem_capture_passive` | Kept — these wrap session/prompt/passive-capture semantics or provide decay-based ranking mem0 doesn't have. |
+| Degraded / defer to mem0 | `mem_update`, `mem_judge`, `mem_compare`, `mem_suggest_topic_key` | `mem_update` still applies an explicit PATCH, but the recommended move is to `mem_save` again and let mem0 merge; `mem_judge`/`mem_compare` still work but read mem0's own conflict-detection API since Engram no longer generates local candidates; `mem_suggest_topic_key` is a harmless pure function but `topic_key` upsert semantics are weaker now that mem0 owns merging. |
+| Unsupported | `mem_merge_projects`, hard delete, `mem_doctor` (redefined) | Unchanged from the rest of this section. |
+
+Because `mem_save` on a MemoryLake-backed project never returns `judgment_required`/`candidates` (see "Known limitations" above), the `mem_judge`/`mem_compare` conflict loop is naturally silent there — agents never enter it. The agent-facing memory protocol (`plugin/*/skills/memory/SKILL.md`, `plugin/*/scripts/session-start.sh` and `post-compaction.sh`) reflects this with one added note: on a MemoryLake-backed project (check `engram memorylake status`), dedup/update/conflict-merge is automatic and agents only need `mem_save` / `mem_search` / `mem_context`, without needing to call `mem_update` / `mem_judge` / `mem_compare` themselves. Default SQLite projects keep the full protocol unchanged — this is one shared, session-level protocol (a session can span both backends across projects), not a separate protocol per backend.
 
 ---
 

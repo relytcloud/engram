@@ -75,6 +75,10 @@ Format for `mem_save`:
 - If unsure about the key, call `mem_suggest_topic_key` first, then reuse that key consistently
 - If you already know the exact ID to fix, use `mem_update`
 
+### MemoryLake-backed projects
+
+If the current project uses the **MemoryLake backend** (check with `engram memorylake status`), dedup, updating existing memories, and merging contradictions are handled **automatically** by the backend — you only need `mem_save` / `mem_search` / `mem_context`; you do **not** need to call `mem_update`, `mem_judge`, or `mem_compare` yourself. Projects on the default **SQLite backend** are unaffected — keep following the topic-key/upsert rules above.
+
 ## WHEN TO SEARCH MEMORY
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",

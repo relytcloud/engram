@@ -523,6 +523,10 @@ func TestCmdMCPAndTUIBranches(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	serveMCP = func(_ *mcpserver.MCPServer, _ ...mcpserver.StdioOption) error { return errors.New("mcp failed") }
 	_, mcpErr, recovered := captureOutputAndRecover(t, func() { cmdMCP(cfg) })
@@ -1895,6 +1899,10 @@ func TestUnconfiguredCloudKeepsLocalCommandDefaults(t *testing.T) {
 	stubExitWithPanic(t)
 	t.Setenv("ENGRAM_CLOUD_SERVER", "")
 	t.Setenv("ENGRAM_CLOUD_TOKEN", "")
+	// cmdMCP (called below) unconditionally loads
+	// memorylake.DefaultEnablementPath() ($HOME/.engram/memorylake.json);
+	// isolate HOME so this test never reads a real machine's file.
+	t.Setenv("HOME", t.TempDir())
 
 	cfg := testConfig(t)
 
@@ -4001,6 +4009,11 @@ func TestCmdMCP(t *testing.T) {
 	cfg := testConfig(t)
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json) in every subtest below that reaches
+	// past storeNew; isolate HOME once here so none of them ever read a real
+	// machine's file and all stay on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	assertFatal := func(t *testing.T, stderr string, recovered any, want string) {
 		t.Helper()
@@ -4013,9 +4026,9 @@ func TestCmdMCP(t *testing.T) {
 		}
 	}
 
-	t.Run("no tools filter uses newMCPServerWithConfig with nil allowlist", func(t *testing.T) {
+	t.Run("no tools filter uses newMCPServerWithSelector with nil allowlist", func(t *testing.T) {
 		called := false
-		newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 			called = true
 			if allowlist != nil {
 				t.Errorf("expected nil allowlist for no tools filter, got %v", allowlist)
@@ -4028,13 +4041,13 @@ func TestCmdMCP(t *testing.T) {
 			t.Fatalf("expected clean run, got panic=%v stderr=%q", recovered, stderr)
 		}
 		if !called {
-			t.Fatal("expected newMCPServerWithConfig to be called")
+			t.Fatal("expected newMCPServerWithSelector to be called")
 		}
 	})
 
-	t.Run("--tools flag uses newMCPServerWithConfig with non-nil allowlist", func(t *testing.T) {
+	t.Run("--tools flag uses newMCPServerWithSelector with non-nil allowlist", func(t *testing.T) {
 		var gotAllowlist map[string]bool
-		newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 			gotAllowlist = allowlist
 			return mcpserver.NewMCPServer("test", "0")
 		}
@@ -4044,13 +4057,13 @@ func TestCmdMCP(t *testing.T) {
 			t.Fatalf("expected clean run, got panic=%v stderr=%q", recovered, stderr)
 		}
 		if gotAllowlist == nil {
-			t.Fatal("expected newMCPServerWithConfig to be called with non-nil allowlist")
+			t.Fatal("expected newMCPServerWithSelector to be called with non-nil allowlist")
 		}
 	})
 
-	t.Run("--tools as separate arg uses newMCPServerWithConfig with non-nil allowlist", func(t *testing.T) {
+	t.Run("--tools as separate arg uses newMCPServerWithSelector with non-nil allowlist", func(t *testing.T) {
 		var gotAllowlist map[string]bool
-		newMCPServerWithConfig = func(s *store.Store, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
+		newMCPServerWithSelector = func(sel mcp.BackendSelector, mcpCfg mcp.MCPConfig, allowlist map[string]bool) *mcpserver.MCPServer {
 			gotAllowlist = allowlist
 			return mcpserver.NewMCPServer("test", "0")
 		}
@@ -4060,7 +4073,7 @@ func TestCmdMCP(t *testing.T) {
 			t.Fatalf("expected clean run, got panic=%v stderr=%q", recovered, stderr)
 		}
 		if gotAllowlist == nil {
-			t.Fatal("expected newMCPServerWithConfig to be called with non-nil allowlist")
+			t.Fatal("expected newMCPServerWithSelector to be called with non-nil allowlist")
 		}
 	})
 
@@ -4126,6 +4139,10 @@ func TestCmdMCP(t *testing.T) {
 func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 	cfg := testConfig(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	var mu sync.Mutex
 	var pushed []autosync.MutationEntry
@@ -4183,21 +4200,22 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_SERVER", srv.URL)
 
 	oldStoreNew := storeNew
-	oldNewMCPServerWithConfig := newMCPServerWithConfig
 	oldServeMCP := serveMCP
 	oldNewAutosyncManager := newAutosyncManager
-	storeNew = store.New
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
-		newMCPServerWithConfig = oldNewMCPServerWithConfig
 		serveMCP = oldServeMCP
 		newAutosyncManager = oldNewAutosyncManager
 	})
 
+	// Capture the *store.Store cmdMCP constructs directly (it is now threaded
+	// into the mcp server via a routing BackendSelector rather than being
+	// passed straight to a mockable newMCPServerWith* hook).
 	var mcpStore *store.Store
-	newMCPServerWithConfig = func(s *store.Store, _ mcp.MCPConfig, _ map[string]bool) *mcpserver.MCPServer {
+	storeNew = func(cfg store.Config) (*store.Store, error) {
+		s, err := store.New(cfg)
 		mcpStore = s
-		return mcpserver.NewMCPServer("test", "0")
+		return s, err
 	}
 	newAutosyncManager = func(s *store.Store, transport autosync.CloudTransport, cfg autosync.Config) startableAutosyncManager {
 		cfg.DebounceDuration = 5 * time.Millisecond
@@ -4251,6 +4269,10 @@ func TestCmdMCPAutosyncPushesWriteDuringServe(t *testing.T) {
 func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	cfg := testConfig(t)
 	stubExitWithPanic(t)
+	// cmdMCP unconditionally loads memorylake.DefaultEnablementPath()
+	// ($HOME/.engram/memorylake.json); isolate HOME so this test never reads
+	// a real machine's file and always stays on the sqlite routing path.
+	t.Setenv("HOME", t.TempDir())
 
 	pullCalled := make(chan struct{})
 	var closePullCalled sync.Once
@@ -4289,20 +4311,15 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 	t.Setenv("ENGRAM_CLOUD_SERVER", srv.URL)
 
 	oldStoreNew := storeNew
-	oldNewMCPServerWithConfig := newMCPServerWithConfig
 	oldServeMCP := serveMCP
 	oldNewAutosyncManager := newAutosyncManager
 	storeNew = store.New
 	t.Cleanup(func() {
 		storeNew = oldStoreNew
-		newMCPServerWithConfig = oldNewMCPServerWithConfig
 		serveMCP = oldServeMCP
 		newAutosyncManager = oldNewAutosyncManager
 	})
 
-	newMCPServerWithConfig = func(s *store.Store, _ mcp.MCPConfig, _ map[string]bool) *mcpserver.MCPServer {
-		return mcpserver.NewMCPServer("test", "0")
-	}
 	newAutosyncManager = func(s *store.Store, transport autosync.CloudTransport, cfg autosync.Config) startableAutosyncManager {
 		cfg.DebounceDuration = time.Hour
 		cfg.PollInterval = 10 * time.Millisecond
