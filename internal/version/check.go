@@ -8,13 +8,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 )
 
 const (
-	repoOwner = "Gentleman-Programming"
+	repoOwner = "relytcloud"
 	repoName  = "engram"
 )
 
@@ -146,16 +145,12 @@ func splitVersion(v string) [3]int {
 	return parts
 }
 
-// updateInstructions returns platform-appropriate update commands.
+// updateInstructions returns how to upgrade. This fork distributes only via
+// GitHub Release archives (no Homebrew tap; the module path still declares the
+// upstream owner, so `go install` would fetch upstream — neither is offered
+// here), so we point users at the fork's releases page for every platform.
 func updateInstructions() string {
-	switch runtime.GOOS {
-	case "darwin":
-		return "  brew update && brew upgrade engram"
-	case "linux":
-		return "  brew update && brew upgrade engram\n  or: go install github.com/Gentleman-Programming/engram/cmd/engram@latest"
-	default:
-		return "  go install github.com/Gentleman-Programming/engram/cmd/engram@latest\n  or: https://github.com/Gentleman-Programming/engram/releases/latest"
-	}
+	return fmt.Sprintf("  Download the latest release:\n  https://github.com/%s/%s/releases/latest", repoOwner, repoName)
 }
 
 func githubToken() string {
