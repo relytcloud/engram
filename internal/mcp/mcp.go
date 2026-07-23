@@ -1346,26 +1346,73 @@ func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) s
 		// Post-transaction conflict candidate detection (REQ-001).
 		// Errors are logged and swallowed — detection failure never fails the save.
 		extra := map[string]any{}
-		// Build CandidateOptions, forwarding any MCPConfig overrides.
-		// nil fields mean "use store defaults"; explicit pointer values override.
-		candOpts := store.CandidateOptions{
-			Project:   project,
-			Scope:     scope,
-			BM25Floor: cfg.BM25Floor, // nil → store default (-2.0); explicit value overrides
+
+		// MemoryLake-backed projects skip candidate generation entirely: under
+		// the Option A thin adapter (spec §4/§7), mem0 already owns
+		// dedup/conflict detection asynchronously downstream, so Engram's own
+		// FTS5-style candidate surfacing would be redundant and there is no
+		// judgment_required/mem_judge loop to route the agent into for this
+		// backend. See candidateOptOut's doc comment for how this is detected
+		// without internal/mcp importing internal/memorylake. SQLite-backed
+		// projects are entirely unaffected: sqliteBackend does not implement
+		// candidateOptOut, so this block behaves exactly as before.
+		skipCandidates := false
+		if opt, ok := s.(candidateOptOut); ok {
+			skipCandidates = opt.SkipsCandidateGeneration()
 		}
-		if cfg.Limit != nil {
-			candOpts.Limit = *cfg.Limit
-		}
-		candidates, candErr := s.FindCandidates(savedSyncID, candOpts)
-		if candErr != nil {
-			// Log only — do not fail the save.
-			fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
+
+		if !skipCandidates {
+			// Build CandidateOptions, forwarding any MCPConfig overrides.
+			// nil fields mean "use store defaults"; explicit pointer values override.
+			candOpts := store.CandidateOptions{
+				Project:   project,
+				Scope:     scope,
+				BM25Floor: cfg.BM25Floor, // nil → store default (-2.0); explicit value overrides
+			}
+			if cfg.Limit != nil {
+				candOpts.Limit = *cfg.Limit
+			}
+			candidates, candErr := s.FindCandidates(savedSyncID, candOpts)
+			if candErr != nil {
+				// Log only — do not fail the save.
+				fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
+			}
+
+			if len(candidates) > 0 {
+				extra["judgment_required"] = true
+				extra["judgment_status"] = "pending"
+				extra["judgment_id"] = candidates[0].JudgmentID // first candidate's rel sync_id (design convenience)
+
+				candList := make([]map[string]any, 0, len(candidates))
+				for _, c := range candidates {
+					entry := map[string]any{
+						"id":          c.ID,
+						"sync_id":     c.SyncID,
+						"title":       c.Title,
+						"type":        c.Type,
+						"score":       c.Score,
+						"judgment_id": c.JudgmentID,
+					}
+					if c.TopicKey != nil {
+						entry["topic_key"] = *c.TopicKey
+					}
+					candList = append(candList, entry)
+				}
+				extra["candidates"] = candList
+
+				msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
+			} else {
+				extra["judgment_required"] = false
+			}
 		}
 
 		// Fetch the saved observation's fields for the envelope (REQ-001).
 		// savedSyncID is already the observation's sync_id (AddObservation's
-		// return value post sync_id migration — see backend.go), so no
-		// separate sync_id lookup is needed here.
+		// return value post sync_id migration — see backend.go). On a
+		// MemoryLake-backed project this is a pending reference, not yet a
+		// materialized fact id (see MemoryLakeBackend.AddObservation's doc
+		// comment), so this lookup is expected to routinely miss right after
+		// a save — that's fine, it's already tolerant of error below.
 		if obs, obsErr := s.GetObservation(savedSyncID); obsErr == nil {
 			extra["id"] = obs.ID
 			extra["sync_id"] = obs.SyncID
@@ -1373,33 +1420,6 @@ func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) s
 			if obs.ReviewAfter != nil {
 				extra["review_after"] = *obs.ReviewAfter
 			}
-		}
-
-		if len(candidates) > 0 {
-			extra["judgment_required"] = true
-			extra["judgment_status"] = "pending"
-			extra["judgment_id"] = candidates[0].JudgmentID // first candidate's rel sync_id (design convenience)
-
-			candList := make([]map[string]any, 0, len(candidates))
-			for _, c := range candidates {
-				entry := map[string]any{
-					"id":          c.ID,
-					"sync_id":     c.SyncID,
-					"title":       c.Title,
-					"type":        c.Type,
-					"score":       c.Score,
-					"judgment_id": c.JudgmentID,
-				}
-				if c.TopicKey != nil {
-					entry["topic_key"] = *c.TopicKey
-				}
-				candList = append(candList, entry)
-			}
-			extra["candidates"] = candList
-
-			msg += fmt.Sprintf("\nCONFLICT REVIEW PENDING — %d candidate(s); use mem_judge to record verdicts.", len(candidates))
-		} else {
-			extra["judgment_required"] = false
 		}
 
 		// Update detRes to reflect normalized project for envelope accuracy
