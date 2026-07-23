@@ -98,17 +98,16 @@ type Server struct {
 	// routed session/observation was created under — populated at
 	// CreateSession/AddObservation time (once selector is configured). Several
 	// existing HTTP endpoints identify their target purely by session/
-	// observation ID (POST /sessions/{id}/end, GET/PATCH/DELETE
+	// observation sync_id (POST /sessions/{id}/end, GET/PATCH/DELETE
 	// /observations/{id}, ...) with no project in the request body, so there
 	// is no way to route them from the request alone without changing the
-	// wire contract (task constraint: existing endpoint contracts stay
-	// unchanged). Consulting this cache lets those ID-only endpoints reach
+	// wire contract. Consulting this cache lets those ID-only endpoints reach
 	// the SAME backend their session/observation actually lives on. A miss
 	// (unknown ID, selector unset, or a fresh process that did not create it)
 	// falls back to the local sqlite store — identical to pre-routing
 	// behavior for anything not in the cache.
 	sessionProject sync.Map // sessionID string -> project string
-	obsProject     sync.Map // observation id int64 -> project string
+	obsProject     sync.Map // observation sync_id string -> project string
 }
 
 func New(s *store.Store, port int) *Server {
@@ -177,45 +176,22 @@ func (s *Server) backendForSession(sessionID string) mcp.MemoryBackend {
 	return mcp.NewSQLiteBackend(s.store)
 }
 
-// backendForObservation mirrors backendForSession for an observation id
-// (see obsProject, populated at AddObservation time).
-func (s *Server) backendForObservation(id int64) mcp.MemoryBackend {
+// backendForObservation mirrors backendForSession for an observation, keyed
+// by its sync_id (see obsProject, populated at AddObservation time). sync_id
+// is the opaque by-id handle used across the whole observation surface (MCP
+// tools, HTTP, this cache): for the local sqlite backend it is the
+// `obs-<hex>` string stamped in the sync_id column; for a MemoryLake-enabled
+// project it is that backend's fact id. Addressing by sync_id rather than the
+// local sqlite int64 primary key is what makes by-id HTTP endpoints work at
+// all for MemoryLake-enabled projects, whose observations have no int64 id.
+func (s *Server) backendForObservation(syncID string) mcp.MemoryBackend {
 	if s.selector == nil {
 		return mcp.NewSQLiteBackend(s.store)
 	}
-	if v, ok := s.obsProject.Load(id); ok {
+	if v, ok := s.obsProject.Load(syncID); ok {
 		return s.selector(v.(string))
 	}
 	return mcp.NewSQLiteBackend(s.store)
-}
-
-// syncIDForLegacyID resolves a numeric observation id — the HTTP API's
-// existing wire contract, unchanged by this task (see Task 3 in the phase-3
-// plan for the pending full migration of the HTTP surface to sync_id) — to
-// the sync_id string MemoryBackend's by-id methods now expect. For an id that
-// lives in the local sqlite store this is a real lookup, so behavior for the
-// default (non-MemoryLake) path is exactly preserved. For an id that was
-// routed to a non-sqlite backend (a MemoryLake-enabled project), the decimal
-// string of id IS already the right key: that backend's interim sync_id
-// scheme is the decimal string of its own internal numeric id (see
-// internal/memorylake's minimal sync_id compat shim for this phase).
-func (s *Server) syncIDForLegacyID(id int64) string {
-	if obs, err := s.store.GetObservation(id); err == nil {
-		return obs.SyncID
-	}
-	return strconv.FormatInt(id, 10)
-}
-
-// legacyIDForSyncID is syncIDForLegacyID's inverse: given a sync_id a
-// MemoryBackend.AddObservation call just returned, recovers the numeric id
-// this HTTP endpoint's JSON response and obsProject cache still key by (see
-// syncIDForLegacyID's doc comment for why this round-trips correctly for
-// both the sqlite and interim MemoryLake cases).
-func (s *Server) legacyIDForSyncID(syncID string) (int64, error) {
-	if obs, err := s.store.GetObservationBySyncID(syncID); err == nil {
-		return obs.ID, nil
-	}
-	return strconv.ParseInt(syncID, 10, 64)
 }
 
 // notifyWrite calls the onWrite callback if configured (best-effort, non-blocking).
@@ -462,20 +438,15 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// The HTTP wire contract still keys observations by the numeric id (see
-	// syncIDForLegacyID's doc comment) — recover it from the sync_id
-	// AddObservation just returned rather than changing the response shape.
-	id, err := s.legacyIDForSyncID(syncID)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "saved but failed to resolve observation id: "+err.Error())
-		return
-	}
 	if s.selector != nil {
-		s.obsProject.Store(id, project)
+		s.obsProject.Store(syncID, project)
 	}
 
 	s.notifyWrite()
-	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
+	// "id" is the observation's sync_id — the opaque string handle to use for
+	// every subsequent by-id call (GET/PATCH/DELETE /observations/{id},
+	// GET /timeline?observation_id=, POST /review/mark_reviewed).
+	jsonResponse(w, http.StatusCreated, map[string]any{"id": syncID, "status": "saved"})
 }
 
 func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
@@ -562,15 +533,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, results)
 }
 
+// handleGetObservation, handleUpdateObservation, handleDeleteObservation, and
+// handleTimeline key their target observation by sync_id — the path/query
+// value is an opaque string handle (see backendForObservation's doc comment),
+// not a numeric id. Any string is a syntactically valid sync_id, so an
+// unknown one surfaces as a normal not-found error rather than a 400.
 func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation id")
-		return
-	}
+	syncID := r.PathValue("id")
 
-	obs, err := s.backendForObservation(id).GetObservation(s.syncIDForLegacyID(id))
+	obs, err := s.backendForObservation(syncID).GetObservation(syncID)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "observation not found")
 		return
@@ -580,12 +551,7 @@ func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation id")
-		return
-	}
+	syncID := r.PathValue("id")
 
 	var body store.UpdateObservationParams
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -598,7 +564,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	obs, err := s.backendForObservation(id).UpdateObservation(s.syncIDForLegacyID(id), body)
+	obs, err := s.backendForObservation(syncID).UpdateObservation(syncID, body)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -609,18 +575,20 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation id")
-		return
-	}
+	syncID := r.PathValue("id")
 
 	hard := queryBool(r, "hard", false)
-	if err := s.backendForObservation(id).DeleteObservation(s.syncIDForLegacyID(id), hard); err != nil {
+	if err := s.backendForObservation(syncID).DeleteObservation(syncID, hard); err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, sql.ErrNoRows):
+			// The sqlite backend resolves sync_id -> int64 via
+			// GetObservationBySyncID before deleting; an unknown or
+			// already-soft-deleted sync_id surfaces sql.ErrNoRows from that
+			// lookup rather than store.ErrObservationNotFound. Both mean the
+			// same thing to an HTTP caller: there's nothing left to delete.
+			jsonError(w, http.StatusNotFound, "observation not found")
 		default:
 			jsonError(w, http.StatusInternalServerError, err.Error())
 		}
@@ -629,29 +597,23 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 
 	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"id":          id,
+		"id":          syncID,
 		"status":      "deleted",
 		"hard_delete": hard,
 	})
 }
 
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Query().Get("observation_id")
-	if idStr == "" {
+	syncID := r.URL.Query().Get("observation_id")
+	if syncID == "" {
 		jsonError(w, http.StatusBadRequest, "observation_id parameter is required")
-		return
-	}
-
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, "invalid observation_id")
 		return
 	}
 
 	before := queryInt(r, "before", 5)
 	after := queryInt(r, "after", 5)
 
-	result, err := s.backendForObservation(id).Timeline(s.syncIDForLegacyID(id), before, after)
+	result, err := s.backendForObservation(syncID).Timeline(syncID, before, after)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -683,28 +645,30 @@ func (s *Server) handleReviewList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request) {
+	// observation_id (and its legacy "id" alias) is the observation's
+	// sync_id — an opaque string handle, not a numeric id (see
+	// backendForObservation's doc comment).
 	var body struct {
-		ObservationID int64 `json:"observation_id"`
-		ID            int64 `json:"id"`
+		ObservationID string `json:"observation_id"`
+		ID            string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 
-	id := body.ObservationID
-	if id == 0 {
-		id = body.ID
+	syncID := body.ObservationID
+	if syncID == "" {
+		syncID = body.ID
 	}
-	if id == 0 {
+	if syncID == "" {
 		jsonError(w, http.StatusBadRequest, "observation_id is required")
 		return
 	}
 
-	backend := s.backendForObservation(id)
-	syncID := s.syncIDForLegacyID(id)
+	backend := s.backendForObservation(syncID)
 	if err := backend.MarkReviewed(syncID); err != nil {
-		if errors.Is(err, store.ErrObservationNotFound) {
+		if errors.Is(err, store.ErrObservationNotFound) || errors.Is(err, sql.ErrNoRows) {
 			jsonError(w, http.StatusNotFound, err.Error())
 			return
 		}

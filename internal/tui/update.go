@@ -349,7 +349,7 @@ func (m Model) handleSearchResultsKeys(key string) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if len(m.SearchResults) > 0 && m.Cursor < len(m.SearchResults) {
-			obsID := m.SearchResults[m.Cursor].ID
+			obsID := m.SearchResults[m.Cursor].SyncID
 			m.PrevScreen = ScreenSearchResults
 			return m, loadObservationDetail(m.store, obsID)
 		}
@@ -360,7 +360,7 @@ func (m Model) handleSearchResultsKeys(key string) (tea.Model, tea.Cmd) {
 	case "t":
 		// Timeline for selected result
 		if len(m.SearchResults) > 0 && m.Cursor < len(m.SearchResults) {
-			obsID := m.SearchResults[m.Cursor].ID
+			obsID := m.SearchResults[m.Cursor].SyncID
 			m.PrevScreen = ScreenSearchResults
 			return m, loadTimeline(m.store, obsID)
 		}
@@ -405,7 +405,7 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if len(m.RecentObservations) > 0 && m.Cursor < len(m.RecentObservations) {
-			obsID := m.RecentObservations[m.Cursor].ID
+			obsID := m.RecentObservations[m.Cursor].SyncID
 			m.PrevScreen = ScreenRecent
 			return m, loadObservationDetail(m.store, obsID)
 		}
@@ -415,7 +415,7 @@ func (m Model) handleRecentKeys(key string) (tea.Model, tea.Cmd) {
 		}
 	case "t":
 		if len(m.RecentObservations) > 0 && m.Cursor < len(m.RecentObservations) {
-			obsID := m.RecentObservations[m.Cursor].ID
+			obsID := m.RecentObservations[m.Cursor].SyncID
 			m.PrevScreen = ScreenRecent
 			return m, loadTimeline(m.store, obsID)
 		}
@@ -445,7 +445,7 @@ func (m Model) handleObservationDetailKeys(key string) (tea.Model, tea.Cmd) {
 	case "t":
 		// View timeline for this observation
 		if m.SelectedObservation != nil {
-			return m, loadTimeline(m.store, m.SelectedObservation.ID)
+			return m, loadTimeline(m.store, m.SelectedObservation.SyncID)
 		}
 	case "esc", "q":
 		m.Screen = m.PrevScreen
@@ -567,7 +567,7 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		if len(m.SessionObservations) > 0 && m.Cursor < len(m.SessionObservations) {
-			obsID := m.SessionObservations[m.Cursor].ID
+			obsID := m.SessionObservations[m.Cursor].SyncID
 			m.PrevScreen = ScreenSessionDetail
 			return m, loadObservationDetail(m.store, obsID)
 		}
@@ -577,7 +577,7 @@ func (m Model) handleSessionDetailKeys(key string) (tea.Model, tea.Cmd) {
 		}
 	case "t":
 		if len(m.SessionObservations) > 0 && m.Cursor < len(m.SessionObservations) {
-			obsID := m.SessionObservations[m.Cursor].ID
+			obsID := m.SessionObservations[m.Cursor].SyncID
 			m.PrevScreen = ScreenSessionDetail
 			return m, loadTimeline(m.store, obsID)
 		}

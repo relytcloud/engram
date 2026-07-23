@@ -134,19 +134,21 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Observations
 
-- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`
+- `POST /observations` — Add observation. Body: `{session_id, type, title, content, tool_name?, project?, scope?, topic_key?}`. Response `id` is the observation's **sync_id** (an opaque string, e.g. `obs-1a2b3c`) — use it for every subsequent by-id call below.
 - `GET /observations` — Recent observations compatibility endpoint. Query: `?project=X&scope=project|personal|global&limit=N&sort=created_at:desc`
 - `GET /observations/recent` — Recent observations. Query: `?project=X&scope=project|personal|global&limit=N`
-- `GET /observations/{id}` — Get single observation by ID
-- `PATCH /observations/{id}` — Update fields. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
-- `DELETE /observations/{id}` — Delete observation (`?hard=true` for hard delete, soft delete by default)
+- `GET /observations/{id}` — Get single observation by sync_id
+- `PATCH /observations/{id}` — Update fields by sync_id. Body: `{title?, content?, type?, project?, scope?, topic_key?}`
+- `DELETE /observations/{id}` — Delete observation by sync_id (`?hard=true` for hard delete, soft delete by default)
   - `200` when deleted
   - `404` when observation does not exist
+
+  `{id}` is an opaque sync_id string, not a numeric row id (this is what lets a MemoryLake-enabled project's observations — which have no int64 id — be addressed the same way as sqlite's). Any string is syntactically valid; an unknown one is a `404`, never a `400`.
 
 ### Review
 
 - `GET /review` — List observations due for local review. Query: `?project=X&limit=N`
-- `POST /review/mark_reviewed` — Reset one observation's local review cycle. Body: `{observation_id}`; legacy `{id}` is accepted.
+- `POST /review/mark_reviewed` — Reset one observation's local review cycle. Body: `{observation_id}` (sync_id string); legacy `{id}` is accepted.
   - `200` with the refreshed observation payload when marked reviewed
   - `400` when `observation_id`/`id` is missing or the JSON body is invalid
   - `404` when the observation does not exist
@@ -158,7 +160,7 @@ Engram is local-first: local SQLite is authoritative; cloud features are optiona
 
 ### Timeline
 
-- `GET /timeline` — Chronological context. Query: `?observation_id=N&before=5&after=5`
+- `GET /timeline` — Chronological context. Query: `?observation_id=<sync_id>&before=5&after=5`
 
 ### Prompts
 

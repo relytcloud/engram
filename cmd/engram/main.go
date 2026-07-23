@@ -1137,12 +1137,7 @@ func cmdDeleteObservation(cfg store.Config) {
 		return
 	}
 
-	id, err := strconv.ParseInt(os.Args[2], 10, 64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
-		exitFunc(1)
-		return
-	}
+	arg := os.Args[2]
 
 	hard := false
 	for i := 3; i < len(os.Args); i++ {
@@ -1158,6 +1153,13 @@ func cmdDeleteObservation(cfg store.Config) {
 	}
 	defer s.Close()
 
+	id, err := resolveObservationID(s, arg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		exitFunc(1)
+		return
+	}
+
 	if err := storeDeleteObservation(s, id, hard); err != nil {
 		fatal(err)
 		return
@@ -1168,6 +1170,26 @@ func cmdDeleteObservation(cfg store.Config) {
 		kind = "hard-deleted"
 	}
 	fmt.Printf("Observation #%d %s\n", id, kind)
+}
+
+// resolveObservationID resolves a CLI observation-id argument to the store's
+// underlying int64 primary key. The argument is treated first as an opaque
+// sync_id — the same by-id handle mem_search/mem_save/mem_get_observation and
+// the HTTP API use (see internal/server's backendForObservation) — falling
+// back to a legacy plain-digit row id (what `engram save`'s stdout has
+// always printed) for backward compatibility. Failure to resolve either
+// form is reported as a single "invalid observation id" error; deciding whether a
+// resolvable-but-nonexistent id (e.g. a stale numeric id) is itself an error
+// is left to the caller (storeDeleteObservation/storeTimeline already return
+// a proper not-found error for that case).
+func resolveObservationID(s *store.Store, arg string) (int64, error) {
+	if obs, err := s.GetObservationBySyncID(arg); err == nil {
+		return obs.ID, nil
+	}
+	if id, err := strconv.ParseInt(arg, 10, 64); err == nil {
+		return id, nil
+	}
+	return 0, fmt.Errorf("invalid observation id %q", arg)
 }
 
 func cmdDeleteSession(cfg store.Config) {
@@ -1263,11 +1285,7 @@ func cmdTimeline(cfg store.Config) {
 		exitFunc(1)
 	}
 
-	obsID, err := strconv.ParseInt(os.Args[2], 10, 64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: invalid observation id %q\n", os.Args[2])
-		exitFunc(1)
-	}
+	arg := os.Args[2]
 
 	before, after := 5, 5
 	for i := 3; i < len(os.Args); i++ {
@@ -1294,6 +1312,12 @@ func cmdTimeline(cfg store.Config) {
 		fatal(err)
 	}
 	defer s.Close()
+
+	obsID, err := resolveObservationID(s, arg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		exitFunc(1)
+	}
 
 	result, err := storeTimeline(s, obsID, before, after)
 	if err != nil {

@@ -24,7 +24,7 @@ import (
 type stubMLBackend struct {
 	mcp.MemoryBackend // nil embed: only overridden methods below may be invoked
 	sessions          map[string]*store.Session
-	obs               map[int64]*store.Observation
+	obs               map[string]*store.Observation
 	nextID            int64
 	// shared, when non-nil, is a process-global id counter shared with other
 	// stub backends — mimicking the real MemoryLake IDMap that hands out
@@ -34,7 +34,7 @@ type stubMLBackend struct {
 }
 
 func newStubMLBackend() *stubMLBackend {
-	return &stubMLBackend{sessions: map[string]*store.Session{}, obs: map[int64]*store.Observation{}}
+	return &stubMLBackend{sessions: map[string]*store.Session{}, obs: map[string]*store.Observation{}}
 }
 
 // newStubMLBackendShared builds a stub whose AddObservation draws ids from the
@@ -78,7 +78,7 @@ func (b *stubMLBackend) EndSession(id string, summary string) error {
 	return nil
 }
 
-func (b *stubMLBackend) AddObservation(p store.AddObservationParams) (int64, error) {
+func (b *stubMLBackend) AddObservation(p store.AddObservationParams) (string, error) {
 	var id int64
 	if b.shared != nil {
 		id = atomic.AddInt64(b.shared, 1)
@@ -86,15 +86,18 @@ func (b *stubMLBackend) AddObservation(p store.AddObservationParams) (int64, err
 		b.nextID++
 		id = b.nextID
 	}
+	// syncID mimics a MemoryLake fact id: an opaque string, distinct from the
+	// (unused outside this stub) int64 id field on store.Observation.
+	syncID := fmt.Sprintf("ml-fact-%d", id)
 	proj := p.Project
-	b.obs[id] = &store.Observation{ID: id, Type: p.Type, Title: p.Title, Content: p.Content, Project: &proj, Scope: p.Scope}
-	return id, nil
+	b.obs[syncID] = &store.Observation{ID: id, SyncID: syncID, Type: p.Type, Title: p.Title, Content: p.Content, Project: &proj, Scope: p.Scope}
+	return syncID, nil
 }
 
-func (b *stubMLBackend) GetObservation(id int64) (*store.Observation, error) {
-	o, ok := b.obs[id]
+func (b *stubMLBackend) GetObservation(syncID string) (*store.Observation, error) {
+	o, ok := b.obs[syncID]
 	if !ok {
-		return nil, fmt.Errorf("observation %d not found", id)
+		return nil, fmt.Errorf("observation %q not found", syncID)
 	}
 	return o, nil
 }
@@ -132,7 +135,7 @@ func TestServer_EnabledProject_CreateSessionAndAddObservation_RouteToMemoryLake(
 	sqlite := newServerTestStore(t)
 	ml := newStubMLBackend()
 	srv := New(sqlite, 0)
-	srv.SetBackendSelector(selectorFor("enabled-proj", ml, sqlite))
+	srv.SetBackendSelector(selectorFor("enabled-proj", ml, mcp.NewSQLiteBackend(sqlite)))
 	h := srv.Handler()
 
 	// Create a session under the enabled project.
@@ -159,14 +162,14 @@ func TestServer_EnabledProject_CreateSessionAndAddObservation_RouteToMemoryLake(
 	if err := json.Unmarshal(obsRec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	obsID := int64(created["id"].(float64))
+	obsID := created["id"].(string)
 	if _, ok := ml.obs[obsID]; !ok {
 		t.Fatalf("expected observation to be created on the MemoryLake stub, not sqlite")
 	}
 
 	// GET /observations/{id}: must resolve back to the SAME backend (the
 	// obsProject ID cache), not sqlite (which never saw this observation).
-	getReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/observations/%d", obsID), nil)
+	getReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/observations/%s", obsID), nil)
 	getRec := httptest.NewRecorder()
 	h.ServeHTTP(getRec, getReq)
 	if getRec.Code != http.StatusOK {
@@ -218,7 +221,7 @@ func TestServer_NotEnabledProject_BehavesExactlyAsBeforeRouting(t *testing.T) {
 	sqlite := newServerTestStore(t)
 	ml := newStubMLBackend()
 	srv := New(sqlite, 0)
-	srv.SetBackendSelector(selectorFor("some-other-enabled-project", ml, sqlite))
+	srv.SetBackendSelector(selectorFor("some-other-enabled-project", ml, mcp.NewSQLiteBackend(sqlite)))
 	h := srv.Handler()
 
 	createReq := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"id":"sess-sqlite","project":"plain-proj","directory":"/work"}`))
@@ -305,7 +308,7 @@ func TestServer_TwoEnabledProjects_ByIDObservationDoesNotLeak(t *testing.T) {
 		case "proj-b":
 			return mlB
 		default:
-			return sqlite
+			return mcp.NewSQLiteBackend(sqlite)
 		}
 	})
 	h := srv.Handler()
@@ -322,7 +325,7 @@ func TestServer_TwoEnabledProjects_ByIDObservationDoesNotLeak(t *testing.T) {
 		}
 	}
 
-	addObs := func(sess, proj, title, content string) int64 {
+	addObs := func(sess, proj, title, content string) string {
 		req := httptest.NewRequest(http.MethodPost, "/observations",
 			strings.NewReader(fmt.Sprintf(`{"session_id":%q,"type":"note","title":%q,"content":%q,"project":%q}`, sess, title, content, proj)))
 		req.Header.Set("Content-Type", "application/json")
@@ -335,41 +338,41 @@ func TestServer_TwoEnabledProjects_ByIDObservationDoesNotLeak(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		return int64(created["id"].(float64))
+		return created["id"].(string)
 	}
 
 	idA := addObs("sess-a", "proj-a", "title-A", "content-A")
 	idB := addObs("sess-b", "proj-b", "title-B", "content-B")
 	if idA == idB {
-		t.Fatalf("two projects' first observations must get distinct global ids, both got %d", idA)
+		t.Fatalf("two projects' first observations must get distinct global ids, both got %q", idA)
 	}
 
-	getTitle := func(id int64) string {
-		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/observations/%d", id), nil)
+	getTitle := func(id string) string {
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/observations/%s", id), nil)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("get observation %d: expected 200, got %d body=%s", id, rec.Code, rec.Body.String())
+			t.Fatalf("get observation %s: expected 200, got %d body=%s", id, rec.Code, rec.Body.String())
 		}
 		var got map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-			t.Fatalf("decode obs %d: %v", id, err)
+			t.Fatalf("decode obs %s: %v", id, err)
 		}
 		return got["title"].(string)
 	}
 
 	if got := getTitle(idA); got != "title-A" {
-		t.Fatalf("GET /observations/%d (proj-a) returned %q; leaked wrong project", idA, got)
+		t.Fatalf("GET /observations/%s (proj-a) returned %q; leaked wrong project", idA, got)
 	}
 	if got := getTitle(idB); got != "title-B" {
-		t.Fatalf("GET /observations/%d (proj-b) returned %q; leaked wrong project", idB, got)
+		t.Fatalf("GET /observations/%s (proj-b) returned %q; leaked wrong project", idB, got)
 	}
 	// The observation truly lives only on its own backend, never the other's.
 	if _, ok := mlA.obs[idB]; ok {
-		t.Fatalf("proj-b's observation id=%d must not exist on proj-a's backend", idB)
+		t.Fatalf("proj-b's observation id=%s must not exist on proj-a's backend", idB)
 	}
 	if _, ok := mlB.obs[idA]; ok {
-		t.Fatalf("proj-a's observation id=%d must not exist on proj-b's backend", idA)
+		t.Fatalf("proj-a's observation id=%s must not exist on proj-b's backend", idA)
 	}
 }
 
@@ -381,7 +384,7 @@ func TestServer_EnabledProject_RecentSessions_RoutesToMemoryLake(t *testing.T) {
 	sqlite := newServerTestStore(t)
 	ml := newStubMLBackend()
 	srv := New(sqlite, 0)
-	srv.SetBackendSelector(selectorFor("enabled-proj", ml, sqlite))
+	srv.SetBackendSelector(selectorFor("enabled-proj", ml, mcp.NewSQLiteBackend(sqlite)))
 	h := srv.Handler()
 
 	createReq := httptest.NewRequest(http.MethodPost, "/sessions",

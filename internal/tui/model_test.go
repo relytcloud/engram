@@ -10,11 +10,13 @@ import (
 )
 
 type testFixture struct {
-	store        *store.Store
-	sessionID    string
-	obsID        int64
-	secondObs    int64
-	otherSession string
+	store           *store.Store
+	sessionID       string
+	obsID           int64
+	obsSyncID       string
+	secondObs       int64
+	secondObsSyncID string
+	otherSession    string
 }
 
 func newTestFixture(t *testing.T) testFixture {
@@ -63,7 +65,24 @@ func newTestFixture(t *testing.T) testFixture {
 		t.Fatalf("add second observation: %v", err)
 	}
 
-	return testFixture{store: s, sessionID: "session-1", obsID: obsID, secondObs: secondObs, otherSession: "session-2"}
+	firstLoaded, err := s.GetObservation(obsID)
+	if err != nil {
+		t.Fatalf("reload first observation: %v", err)
+	}
+	secondLoaded, err := s.GetObservation(secondObs)
+	if err != nil {
+		t.Fatalf("reload second observation: %v", err)
+	}
+
+	return testFixture{
+		store:           s,
+		sessionID:       "session-1",
+		obsID:           obsID,
+		obsSyncID:       firstLoaded.SyncID,
+		secondObs:       secondObs,
+		secondObsSyncID: secondLoaded.SyncID,
+		otherSession:    "session-2",
+	}
 }
 
 func TestNewInitializesModelDefaults(t *testing.T) {
@@ -178,7 +197,7 @@ func TestDataLoadingCommands(t *testing.T) {
 	})
 
 	t.Run("loadObservationDetail", func(t *testing.T) {
-		msg := loadObservationDetail(fx.store, fx.obsID)()
+		msg := loadObservationDetail(fx.store, fx.obsSyncID)()
 		loaded, ok := msg.(observationDetailMsg)
 		if !ok {
 			t.Fatalf("message type = %T", msg)
@@ -192,7 +211,7 @@ func TestDataLoadingCommands(t *testing.T) {
 	})
 
 	t.Run("loadTimeline", func(t *testing.T) {
-		msg := loadTimeline(fx.store, fx.secondObs)()
+		msg := loadTimeline(fx.store, fx.secondObsSyncID)()
 		loaded, ok := msg.(timelineMsg)
 		if !ok {
 			t.Fatalf("message type = %T", msg)
