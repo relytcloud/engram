@@ -532,7 +532,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     capture_prompt: optionalBoolean("Capture current prompt when available"),
   }),
   mem_update: Type.Object({
-    id: Type.Number({ description: "Observation ID to update" }),
+    id: Type.String({ description: "Observation sync_id to update (from search/save results)" }),
     title: optionalString("New title"),
     content: optionalString("New content"),
     type: optionalString("New type/category"),
@@ -540,7 +540,7 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     topic_key: optionalString("New topic key"),
   }),
   mem_delete: Type.Object({
-    id: Type.Number({ description: "Observation ID to delete" }),
+    id: Type.String({ description: "Observation sync_id to delete (from search/save results)" }),
     hard_delete: optionalBoolean("Permanently delete the observation"),
   }),
   mem_suggest_topic_key: Type.Object({
@@ -566,13 +566,13 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     project: optionalString("Project to echo in UI chrome"),
   }),
   mem_timeline: Type.Object({
-    observation_id: Type.Number({ description: "Observation ID to center on" }),
+    observation_id: Type.String({ description: "Observation sync_id to center on (from search/save results)" }),
     before: optionalNumber("Number of observations before"),
     after: optionalNumber("Number of observations after"),
     project: optionalString("Filter by project name"),
   }),
   mem_get_observation: Type.Object({
-    id: Type.Number({ description: "Observation ID to retrieve" }),
+    id: Type.String({ description: "Observation sync_id to retrieve (from search/save results)" }),
   }),
   mem_session_start: Type.Object({
     id: Type.String({ description: "Unique session identifier" }),
@@ -598,8 +598,8 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     action: Type.String({ description: "Action: list | mark_reviewed" }),
     project: optionalString("Optional project filter for action=list"),
     limit: optionalNumber("Max results for action=list"),
-    observation_id: optionalNumber("Observation id for action=mark_reviewed"),
-    id: optionalNumber("Alias for observation_id"),
+    observation_id: optionalString("Observation sync_id for action=mark_reviewed (from search/save results)"),
+    id: optionalString("Alias for observation_id"),
   }),
   mem_judge: Type.Object({
     judgment_id: Type.String({ description: "The relation judgment_id returned by mem_save candidates" }),
