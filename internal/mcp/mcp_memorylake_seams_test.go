@@ -48,6 +48,13 @@ type memoryLakeStubBackend struct {
 	// those tests can assert handleSave never reaches it when skipping.
 	skipCandidateGeneration bool
 	findCandidatesCalls     int
+
+	// getObservationCalls counts every GetObservation invocation so tests can
+	// assert whether handleSave re-fetches the saved envelope. For a
+	// candidateOptOut backend that re-fetch is skipped (savedSyncID is a
+	// pending reference that would only 404), so this must stay 0 across a
+	// save; for a non-opt-out backend it is called once.
+	getObservationCalls int
 }
 
 var _ MemoryBackend = (*memoryLakeStubBackend)(nil)
@@ -97,6 +104,7 @@ func (m *memoryLakeStubBackend) AddObservation(p store.AddObservationParams) (st
 }
 
 func (m *memoryLakeStubBackend) GetObservation(syncID string) (*store.Observation, error) {
+	m.getObservationCalls++
 	return m.memoryLakeSyncBackend().GetObservation(syncID)
 }
 
@@ -455,6 +463,80 @@ func TestHandleSaveGeneratesCandidatesWhenBackendDoesNotOptOut(t *testing.T) {
 	envB := parseEnvelope(t, "non-opt-out save B", resB)
 	if jr, _ := envB["judgment_required"].(bool); !jr {
 		t.Fatalf("expected judgment_required=true when the backend does not opt out, envelope=%v", envB)
+	}
+}
+
+// TestHandleSaveSkipsGetObservationRefetchForCandidateOptOutBackend is the
+// RED->GREEN case for Fix #2: for a candidateOptOut backend (MemoryLake),
+// AddObservation returns a pending reference whose GetObservation would only
+// 404, so handleSave must NOT re-fetch it for the response envelope — that
+// round-trip is pure waste. The envelope still carries the sync_id handle,
+// sourced directly from savedSyncID rather than a re-fetch.
+func TestHandleSaveSkipsGetObservationRefetchForCandidateOptOutBackend(t *testing.T) {
+	stub := newMemoryLakeStubBackend(t)
+	stub.skipCandidateGeneration = true
+	if err := stub.Store.CreateSession("s-ml-noref", "mlproj", "/work/mlproj"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleSave(StaticSelector(stub), MCPConfig{}, activity)
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "MemoryLake save without re-fetch",
+		"content": "**What**: pending reference must not be re-fetched\n**Why**: skip the wasted 404 round-trip",
+		"type":    "note",
+		"project": "mlproj",
+	}}})
+	if err != nil {
+		t.Fatalf("handleSave: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	if stub.getObservationCalls != 0 {
+		t.Fatalf("expected GetObservation to never be called for a candidateOptOut backend save, got %d calls", stub.getObservationCalls)
+	}
+
+	env := parseEnvelope(t, "candidateOptOut save envelope", res)
+	if env["sync_id"] == nil || env["sync_id"] == "" {
+		t.Fatalf("expected the envelope to still carry a sync_id handle (from savedSyncID), got %v", env["sync_id"])
+	}
+}
+
+// TestHandleSaveStillRefetchesObservationForNonOptOutBackend is the contrast
+// case: a backend that does not opt out of candidate generation (the SQLite
+// path) must keep re-fetching the saved observation to populate the envelope,
+// proving Fix #2's skip is scoped to candidateOptOut backends only and does
+// not regress SQLite behavior.
+func TestHandleSaveStillRefetchesObservationForNonOptOutBackend(t *testing.T) {
+	stub := newMemoryLakeStubBackend(t) // skipCandidateGeneration defaults false → non-opt-out, like sqliteBackend
+	if err := stub.Store.CreateSession("s-ml-ref", "mlproj", "/work/mlproj"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleSave(StaticSelector(stub), MCPConfig{}, activity)
+
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "SQLite-style save re-fetches envelope",
+		"content": "**What**: non-opt-out backends re-fetch\n**Why**: full envelope with id/state",
+		"type":    "note",
+		"project": "mlproj",
+	}}})
+	if err != nil {
+		t.Fatalf("handleSave: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected save error: %s", callResultText(t, res))
+	}
+
+	if stub.getObservationCalls != 1 {
+		t.Fatalf("expected GetObservation to be called exactly once for a non-opt-out backend save, got %d calls", stub.getObservationCalls)
+	}
+
+	env := parseEnvelope(t, "non-opt-out save envelope", res)
+	if env["state"] == nil {
+		t.Fatalf("expected the re-fetched envelope to carry a state field, got %v", env)
 	}
 }
 

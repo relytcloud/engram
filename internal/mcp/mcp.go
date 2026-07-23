@@ -1417,12 +1417,18 @@ func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) s
 
 		// Fetch the saved observation's fields for the envelope (REQ-001).
 		// savedSyncID is already the observation's sync_id (AddObservation's
-		// return value post sync_id migration — see backend.go). On a
-		// MemoryLake-backed project this is a pending reference, not yet a
-		// materialized fact id (see MemoryLakeBackend.AddObservation's doc
-		// comment), so this lookup is expected to routinely miss right after
-		// a save — that's fine, it's already tolerant of error below.
-		if obs, obsErr := s.GetObservation(savedSyncID); obsErr == nil {
+		// return value post sync_id migration — see backend.go).
+		//
+		// A candidateOptOut backend (MemoryLake) returns a *pending* reference
+		// from AddObservation, not yet a materialized fact id (see
+		// MemoryLakeBackend.AddObservation's doc comment), so this re-fetch
+		// would always 404 — a wasted synchronous round-trip on every save.
+		// Skip it entirely for those backends and surface savedSyncID directly
+		// as the handle. SQLite-backed projects (skipCandidates == false) keep
+		// the original re-fetch behavior byte-for-byte.
+		if skipCandidates {
+			extra["sync_id"] = savedSyncID
+		} else if obs, obsErr := s.GetObservation(savedSyncID); obsErr == nil {
 			extra["id"] = obs.ID
 			extra["sync_id"] = obs.SyncID
 			extra["state"] = obs.State()
@@ -1518,13 +1524,20 @@ func handleUpdate(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 
 func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		s := sel("")
 		action, _ := req.GetArguments()["action"].(string)
 		switch strings.TrimSpace(action) {
 		case "list":
 			projectFilter, _ := req.GetArguments()["project"].(string)
 			limit := intArg(req, "limit", 10)
 			detRes := projectpkg.DetectionResult{Project: projectFilter, Source: projectpkg.SourceAllProjects}
+			// backendProject selects WHICH backend answers the list; it may
+			// differ from projectFilter (the query's project filter). For a
+			// MemoryLake-enabled project detected from cwd we must route to
+			// that project's backend even though the query filter stays "" so
+			// SQLite's cross-project "all projects" listing is unchanged (for a
+			// non-enabled project sel(detected) and sel("") are the same sqlite
+			// instance — see resolveByIDBackend's doc comment).
+			backendProject := projectFilter
 			if strings.TrimSpace(projectFilter) != "" {
 				var err error
 				detRes, err = resolveReadProject(sel, projectFilter)
@@ -1539,11 +1552,13 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 					return mcp.NewToolResultError(fmt.Sprintf("Project resolution failed: %s", err)), nil
 				}
 				projectFilter = detRes.Project
+				backendProject = detRes.Project
 			} else if res, err := resolveReadProjectWithProcessOverride(sel, "", cfg.DefaultProject); err == nil {
 				detRes = res
 				detRes.Source = projectpkg.SourceAllProjects
+				backendProject = res.Project // route to detected project's backend; keep projectFilter="" for SQLite all-projects listing
 			}
-			s = sel(projectFilter) // re-resolve now that the target project filter is known
+			s := sel(backendProject) // re-resolve now that the target backend is known
 
 			observations, err := s.ObservationsNeedingReview(projectFilter, limit)
 			if err != nil {
@@ -1594,6 +1609,13 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 			if strings.TrimSpace(id) == "" {
 				return mcp.NewToolResultError("observation_id is required for mark_reviewed"), nil
 			}
+			// mark_reviewed is addressed purely by observation sync_id, but the
+			// id may belong to a MemoryLake-enabled project — route through the
+			// cwd/process-detected project's backend (resolveByIDBackend, the
+			// same helper the other by-id handlers use) rather than the
+			// project-unaware default. SQLite-backed projects resolve to the
+			// exact same backend, so their behavior is unchanged.
+			s, detRes, detErr := resolveByIDBackend(sel, cfg)
 			if err := s.MarkReviewed(id); err != nil {
 				return mcp.NewToolResultError("Failed to mark reviewed: " + err.Error()), nil
 			}
@@ -1605,7 +1627,6 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 			if obs.ReviewAfter != nil {
 				extra["review_after"] = *obs.ReviewAfter
 			}
-			detRes, detErr := resolveReadProjectWithProcessOverride(sel, "", cfg.DefaultProject)
 			msg := fmt.Sprintf("Memory marked reviewed: #%d %q (%s)", obs.ID, obs.Title, obs.Type)
 			if detErr != nil {
 				out, _ := jsonMarshal(map[string]any{"result": msg, "id": obs.ID, "sync_id": obs.SyncID, "state": obs.State()})

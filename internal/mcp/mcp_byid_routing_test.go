@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
@@ -394,6 +395,127 @@ func TestByIDHandlers_CompareRoutesToDetectedMemoryLakeProject(t *testing.T) {
 	}
 	if res.IsError {
 		t.Fatalf("expected mem_compare to resolve both ml-backend ids via detected project, got error: %s", callResultText(t, res))
+	}
+}
+
+// ─── mem_review (list + mark_reviewed) ──────────────────────────────────────
+//
+// mem_review is a spec §5 retained capability. Before Fix #4, handleReview
+// resolved its backend via sel("") for mark_reviewed and for a list with no
+// explicit project, so both fell to the project-unaware default SQLite
+// backend — mem_review was inert for a MemoryLake-enabled project detected
+// from cwd. These tests prove list (no explicit project) and mark_reviewed
+// now route through the cwd/process-detected project's backend, while SQLite
+// projects are unchanged.
+
+// backdateReviewAfter forces obs id in st into needs_review state so
+// ObservationsNeedingReview will surface it.
+func backdateReviewAfter(t *testing.T, st *store.Store, id int64) {
+	t.Helper()
+	past := time.Now().UTC().Add(-time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := st.DB().Exec(`UPDATE observations SET review_after = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatalf("backdate review_after: %v", err)
+	}
+}
+
+func TestByIDHandlers_ReviewMarkReviewedRoutesToDetectedMemoryLakeProject(t *testing.T) {
+	f := newByIDRoutingFixture(t)
+	backdateReviewAfter(t, f.ml.Store, f.mlID)
+	cfg := MCPConfig{DefaultProject: "mlproj"}
+
+	res, err := handleReview(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":         "mark_reviewed",
+		"observation_id": f.mlSyncID,
+	}}})
+	if err != nil {
+		t.Fatalf("handleReview mark_reviewed error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("expected mem_review mark_reviewed to route to the ml backend, got error: %s", callResultText(t, res))
+	}
+
+	// The ml observation was backdated into needs_review; after mark_reviewed
+	// via the ml-routed backend it must be active again.
+	mlObs, err := f.ml.Store.GetObservation(f.mlID)
+	if err != nil {
+		t.Fatalf("reload ml observation: %v", err)
+	}
+	if mlObs.State() != store.ObservationStateActive {
+		t.Fatalf("expected ml observation to be active after mark_reviewed, got %q", mlObs.State())
+	}
+}
+
+func TestByIDHandlers_ReviewMarkReviewedForeignIDNotFound(t *testing.T) {
+	f := newByIDRoutingFixture(t)
+	cfg := MCPConfig{DefaultProject: "mlproj"}
+
+	// sqliteSyncID only exists in the sqlite backend; routed to the ml backend
+	// via detected project it must not be found — proving mark_reviewed cannot
+	// reach across to another project's data.
+	res, err := handleReview(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action":         "mark_reviewed",
+		"observation_id": f.sqliteSyncID,
+	}}})
+	if err != nil {
+		t.Fatalf("handleReview mark_reviewed error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected not-found marking a sqlite-only id via the ml-routed backend, got success: %s", callResultText(t, res))
+	}
+}
+
+func TestByIDHandlers_ReviewListRoutesToDetectedMemoryLakeProject(t *testing.T) {
+	f := newByIDRoutingFixture(t)
+	backdateReviewAfter(t, f.ml.Store, f.mlID)
+	// Also backdate the sqlite-only observation so, if the list wrongly fell to
+	// the sqlite backend, it would surface "sqlite-only fact" instead — making
+	// this a non-vacuous routing assertion.
+	backdateReviewAfter(t, f.sqlite, f.sqliteID)
+	cfg := MCPConfig{DefaultProject: "mlproj"}
+
+	// No explicit project argument: routing must come from the detected
+	// project (mlproj via DefaultProject process override).
+	res, err := handleReview(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action": "list",
+		"limit":  10.0,
+	}}})
+	if err != nil {
+		t.Fatalf("handleReview list error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("expected mem_review list to route to the ml backend, got error: %s", callResultText(t, res))
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "ml-only fact") {
+		t.Fatalf("expected review list to surface the ml backend observation, got %q", text)
+	}
+	if strings.Contains(text, "sqlite-only fact") {
+		t.Fatalf("review list must not surface the sqlite backend's observation when routed to mlproj, got %q", text)
+	}
+}
+
+func TestByIDHandlers_ReviewListSQLiteUnchangedWhenProjectNotEnabled(t *testing.T) {
+	f := newByIDRoutingFixture(t)
+	backdateReviewAfter(t, f.sqlite, f.sqliteID)
+	// "otherproj" is not the enabled project, so it resolves to the same
+	// sqlite backend sel("") does; the no-explicit-project list keeps its
+	// cross-project SQLite semantics (query filter stays "") and surfaces the
+	// sqlite observation exactly as before Fix #4.
+	cfg := MCPConfig{DefaultProject: "otherproj"}
+
+	res, err := handleReview(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"action": "list",
+		"limit":  10.0,
+	}}})
+	if err != nil {
+		t.Fatalf("handleReview list error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("expected mem_review list to succeed for a non-enabled project, got error: %s", callResultText(t, res))
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "sqlite-only fact") {
+		t.Fatalf("expected review list to surface the sqlite observation for a non-enabled project, got %q", text)
 	}
 }
 
