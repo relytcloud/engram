@@ -2084,7 +2084,7 @@ func TestProjectCurrentDoctorJudgeAndCompareRoutes(t *testing.T) {
 		t.Fatalf("expected relation envelope, got %#v", judgeResp)
 	}
 
-	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(fmt.Sprintf(`{"memory_id_a":%d,"memory_id_b":%d,"relation":"related","confidence":0.91,"reasoning":"same auth topic","model":"test-model"}`, idA, idB)))
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(fmt.Sprintf(`{"memory_id_a":%q,"memory_id_b":%q,"relation":"related","confidence":0.91,"reasoning":"same auth topic","model":"test-model"}`, obsA.SyncID, obsB.SyncID)))
 	compareReq.Header.Set("Content-Type", "application/json")
 	compareRec := httptest.NewRecorder()
 	h.ServeHTTP(compareRec, compareReq)
@@ -2114,25 +2114,39 @@ func TestJudgeAndCompareRoutesValidateInput(t *testing.T) {
 		t.Fatalf("expected missing judgment_id 400, got %d body=%q", judgeRec.Code, judgeRec.Body.String())
 	}
 
-	missingConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","reasoning":"missing confidence"}`))
+	missingConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-1","memory_id_b":"obs-2","relation":"related","reasoning":"missing confidence"}`))
 	missingConfidenceRec := httptest.NewRecorder()
 	h.ServeHTTP(missingConfidenceRec, missingConfidenceReq)
 	if missingConfidenceRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected missing confidence 400, got %d body=%q", missingConfidenceRec.Code, missingConfidenceRec.Body.String())
 	}
 
-	invalidConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":1,"memory_id_b":2,"relation":"related","confidence":1.5,"reasoning":"invalid confidence"}`))
+	invalidConfidenceReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-1","memory_id_b":"obs-2","relation":"related","confidence":1.5,"reasoning":"invalid confidence"}`))
 	invalidConfidenceRec := httptest.NewRecorder()
 	h.ServeHTTP(invalidConfidenceRec, invalidConfidenceReq)
 	if invalidConfidenceRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid confidence 400, got %d body=%q", invalidConfidenceRec.Code, invalidConfidenceRec.Body.String())
 	}
 
-	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":999,"memory_id_b":1000,"relation":"related","confidence":0.9,"reasoning":"missing"}`))
+	compareReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-missing-999","memory_id_b":"obs-missing-1000","relation":"related","confidence":0.9,"reasoning":"missing"}`))
 	compareRec := httptest.NewRecorder()
 	h.ServeHTTP(compareRec, compareReq)
 	if compareRec.Code != http.StatusNotFound {
 		t.Fatalf("expected missing observation 404, got %d body=%q", compareRec.Code, compareRec.Body.String())
+	}
+
+	emptyIDAReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"","memory_id_b":"obs-2","relation":"related","confidence":0.9,"reasoning":"empty id a"}`))
+	emptyIDARec := httptest.NewRecorder()
+	h.ServeHTTP(emptyIDARec, emptyIDAReq)
+	if emptyIDARec.Code != http.StatusBadRequest {
+		t.Fatalf("expected empty memory_id_a 400, got %d body=%q", emptyIDARec.Code, emptyIDARec.Body.String())
+	}
+
+	emptyIDBReq := httptest.NewRequest(http.MethodPost, "/conflicts/compare", strings.NewReader(`{"memory_id_a":"obs-1","memory_id_b":"","relation":"related","confidence":0.9,"reasoning":"empty id b"}`))
+	emptyIDBRec := httptest.NewRecorder()
+	h.ServeHTTP(emptyIDBRec, emptyIDBReq)
+	if emptyIDBRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected empty memory_id_b 400, got %d body=%q", emptyIDBRec.Code, emptyIDBRec.Body.String())
 	}
 }
 

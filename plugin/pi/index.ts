@@ -610,8 +610,8 @@ const MEMORY_TOOL_SCHEMAS: Record<string, ReturnType<typeof Type.Object>> = {
     session_id: optionalString("Session ID for provenance"),
   }),
   mem_compare: Type.Object({
-    memory_id_a: Type.Number({ description: "Integer id of the first observation" }),
-    memory_id_b: Type.Number({ description: "Integer id of the second observation" }),
+    memory_id_a: Type.String({ description: "sync_id of the first observation" }),
+    memory_id_b: Type.String({ description: "sync_id of the second observation" }),
     relation: Type.String({ description: "Verdict: related | compatible | scoped | conflicts_with | supersedes | not_conflict" }),
     confidence: Type.Number({ description: "Confidence score 0.0..1.0" }),
     reasoning: Type.String({ description: "Brief explanation of the verdict" }),

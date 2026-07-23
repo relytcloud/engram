@@ -265,14 +265,14 @@ Status codes:
 
 #### POST /conflicts/compare
 
-Persist an agent-supplied semantic verdict for two observation IDs.
+Persist an agent-supplied semantic verdict for two observations, addressed by sync_id.
 
 Body:
 
 ```json
 {
-  "memory_id_a": 5,
-  "memory_id_b": 6,
+  "memory_id_a": "obs-abc123",
+  "memory_id_b": "obs-def456",
   "relation": "related|compatible|scoped|conflicts_with|supersedes|not_conflict",
   "confidence": 0.99,
   "reasoning": "brief explanation",
@@ -968,8 +968,8 @@ Available in the `agent` profile (`engram mcp --tools=agent`).
 
 Parameters:
 
-- **memory_id_a** (required): int — observation ID of the first memory
-- **memory_id_b** (required): int — observation ID of the second memory
+- **memory_id_a** (required): string — sync_id of the first memory
+- **memory_id_b** (required): string — sync_id of the second memory
 - **relation** (required): string — one of `conflicts_with` | `supersedes` | `scoped` | `related` | `compatible` | `not_conflict`
 - **confidence** (required): float 0.0..1.0
 - **reasoning** (required): string — explanation of the verdict (max 200 chars)

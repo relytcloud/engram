@@ -44,7 +44,7 @@ test("compactToolArg prefers short meaningful identifiers", () => {
   assert.equal(compactToolArg("mem_save", { title: "Fixed the session recovery issue" }), "“Fixed the session recovery issue”");
   assert.equal(compactToolArg("mem_get_observation", { id: 42 }), "#42");
   assert.equal(compactToolArg("mem_context", { project: "engram" }), "“engram”");
-  assert.equal(compactToolArg("mem_compare", { memory_id_a: 42, memory_id_b: 43 }), "#42");
+  assert.equal(compactToolArg("mem_compare", { memory_id_a: "obs-42", memory_id_b: "obs-43" }), "#obs-42");
   assert.equal(compactToolArg("mem_judge", { judgment_id: "rel-abc", relation: "related" }), "“rel-abc”");
   assert.equal(compactToolArg("mem_review", { action: "list", project: "engram", limit: 5 }), "list “engram” limit 5");
   assert.equal(compactToolArg("mem_review", { action: "mark_reviewed", observation_id: 42 }), "mark_reviewed #42");

@@ -1398,11 +1398,18 @@ func (s *Server) handleJudgeConflict(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCompareMemories serves POST /conflicts/compare.
-// Body: {"memory_id_a":1,"memory_id_b":2,"relation":"related", "confidence":0.9, "reasoning":"..."}
+// Body: {"memory_id_a":"obs-abc","memory_id_b":"obs-def","relation":"related", "confidence":0.9, "reasoning":"..."}
+//
+// memory_id_a/memory_id_b are sync_ids — the opaque by-id handle used across
+// the whole observation surface (see backendForObservation's doc comment) —
+// not the legacy int64 primary key. This is what makes /conflicts/compare
+// work for MemoryLake-enabled projects, whose observations have no int64 id:
+// both sides are expected to belong to the same project/backend, so the
+// backend is resolved once from memory_id_a via backendForObservation.
 func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		MemoryIDA  int64    `json:"memory_id_a"`
-		MemoryIDB  int64    `json:"memory_id_b"`
+		MemoryIDA  string   `json:"memory_id_a"`
+		MemoryIDB  string   `json:"memory_id_b"`
 		Relation   string   `json:"relation"`
 		Confidence *float64 `json:"confidence"`
 		Reasoning  string   `json:"reasoning"`
@@ -1412,11 +1419,11 @@ func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if body.MemoryIDA == 0 {
+	if strings.TrimSpace(body.MemoryIDA) == "" {
 		jsonError(w, http.StatusBadRequest, "memory_id_a is required")
 		return
 	}
-	if body.MemoryIDB == 0 {
+	if strings.TrimSpace(body.MemoryIDB) == "" {
 		jsonError(w, http.StatusBadRequest, "memory_id_b is required")
 		return
 	}
@@ -1438,20 +1445,19 @@ func (s *Server) handleCompareMemories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obsA, err := s.store.GetObservation(body.MemoryIDA)
-	if err != nil {
-		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%d not found: %s", body.MemoryIDA, err))
+	backend := s.backendForObservation(body.MemoryIDA)
+	if _, err := backend.GetObservation(body.MemoryIDA); err != nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%s not found: %s", body.MemoryIDA, err))
 		return
 	}
-	obsB, err := s.store.GetObservation(body.MemoryIDB)
-	if err != nil {
-		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%d not found: %s", body.MemoryIDB, err))
+	if _, err := backend.GetObservation(body.MemoryIDB); err != nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("observation id=%s not found: %s", body.MemoryIDB, err))
 		return
 	}
 
-	syncID, err := s.store.JudgeBySemantic(store.JudgeBySemanticParams{
-		SourceID:   obsA.SyncID,
-		TargetID:   obsB.SyncID,
+	syncID, err := backend.JudgeBySemantic(store.JudgeBySemanticParams{
+		SourceID:   body.MemoryIDA,
+		TargetID:   body.MemoryIDB,
 		Relation:   body.Relation,
 		Confidence: confidence,
 		Reasoning:  body.Reasoning,
