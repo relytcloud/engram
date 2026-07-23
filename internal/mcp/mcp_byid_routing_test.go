@@ -56,18 +56,20 @@ func twoBackendSelector(sqlite, ml MemoryBackend, enabledProject string) Backend
 // byIDRoutingFixture seeds one observation in each backend so tests can
 // assert which backend actually answered a by-id call.
 type byIDRoutingFixture struct {
-	sqlite   *store.Store
-	ml       *memoryLakeStubBackend
-	sel      BackendSelector
-	sqliteID int64 // "otherproj" observation, sqlite-only
-	mlID     int64 // "mlproj" observation, ml-only
+	sqlite       *store.Store
+	ml           *memoryLakeStubBackend
+	sel          BackendSelector
+	sqliteID     int64  // "otherproj" observation, sqlite-only
+	mlID         int64  // "mlproj" observation, ml-only
+	sqliteSyncID string // sync_id of sqliteID — the key by-id handlers accept post sync_id migration
+	mlSyncID     string // sync_id of mlID
 }
 
 func newByIDRoutingFixture(t *testing.T) *byIDRoutingFixture {
 	t.Helper()
 	sqlite := newMCPTestStore(t)
 	ml := &memoryLakeStubBackend{Store: newMCPTestStore(t)}
-	sel := twoBackendSelector(sqlite, ml, "mlproj")
+	sel := twoBackendSelector(newSQLiteBackend(sqlite), ml, "mlproj")
 
 	if err := sqlite.CreateSession("s-sqlite", "otherproj", "/work/otherproj"); err != nil {
 		t.Fatalf("create sqlite session: %v", err)
@@ -87,6 +89,10 @@ func newByIDRoutingFixture(t *testing.T) *byIDRoutingFixture {
 	if err != nil {
 		t.Fatalf("seed sqlite observation: %v", err)
 	}
+	sqliteObs, err := sqlite.GetObservation(sqliteID)
+	if err != nil {
+		t.Fatalf("reload sqlite observation for sync_id: %v", err)
+	}
 
 	if err := ml.Store.CreateSession("s-ml", "mlproj", "/work/mlproj"); err != nil {
 		t.Fatalf("create ml session: %v", err)
@@ -97,12 +103,20 @@ func newByIDRoutingFixture(t *testing.T) *byIDRoutingFixture {
 	if err != nil {
 		t.Fatalf("seed ml observation: %v", err)
 	}
+	mlObs, err := ml.Store.GetObservation(mlID)
+	if err != nil {
+		t.Fatalf("reload ml observation for sync_id: %v", err)
+	}
 
 	if sqliteID == mlID {
 		t.Fatalf("test fixture invariant violated: sqliteID (%d) must differ from mlID (%d) for cross-backend assertions to be meaningful", sqliteID, mlID)
 	}
 
-	return &byIDRoutingFixture{sqlite: sqlite, ml: ml, sel: sel, sqliteID: sqliteID, mlID: mlID}
+	return &byIDRoutingFixture{
+		sqlite: sqlite, ml: ml, sel: sel,
+		sqliteID: sqliteID, mlID: mlID,
+		sqliteSyncID: sqliteObs.SyncID, mlSyncID: mlObs.SyncID,
+	}
 }
 
 // ─── mem_get_observation ────────────────────────────────────────────────────
@@ -112,7 +126,7 @@ func TestByIDHandlers_GetObservationRoutesToDetectedMemoryLakeProject(t *testing
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 
 	res, err := handleGetObservation(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(f.mlID),
+		"id": f.mlSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handleGetObservation error: %v", err)
@@ -135,7 +149,7 @@ func TestByIDHandlers_GetObservationForeignIDNotFound(t *testing.T) {
 	// proving detected-project routing cannot accidentally surface another
 	// project's data via a numeric id collision or fallback.
 	res, err := handleGetObservation(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(f.sqliteID),
+		"id": f.sqliteSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handleGetObservation error: %v", err)
@@ -153,7 +167,7 @@ func TestByIDHandlers_GetObservationSQLiteUnchangedWhenProjectNotEnabled(t *test
 	cfg := MCPConfig{DefaultProject: "otherproj"}
 
 	res, err := handleGetObservation(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(f.sqliteID),
+		"id": f.sqliteSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handleGetObservation error: %v", err)
@@ -174,7 +188,7 @@ func TestByIDHandlers_UpdateRoutesToDetectedMemoryLakeProject(t *testing.T) {
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 
 	res, err := handleUpdate(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(f.mlID),
+		"id":    f.mlSyncID,
 		"title": "ml fact updated",
 	}}})
 	if err != nil {
@@ -206,7 +220,7 @@ func TestByIDHandlers_UpdateForeignIDNotFound(t *testing.T) {
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 
 	res, err := handleUpdate(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id":    float64(f.sqliteID),
+		"id":    f.sqliteSyncID,
 		"title": "should not apply",
 	}}})
 	if err != nil {
@@ -224,7 +238,7 @@ func TestByIDHandlers_DeleteRoutesToDetectedMemoryLakeProject(t *testing.T) {
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 
 	res, err := handleDelete(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(f.mlID),
+		"id": f.mlSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handleDelete error: %v", err)
@@ -251,7 +265,7 @@ func TestByIDHandlers_PinRoutesToDetectedMemoryLakeProject(t *testing.T) {
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 
 	res, err := handlePin(f.sel, cfg, true)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(f.mlID),
+		"id": f.mlSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handlePin error: %v", err)
@@ -284,7 +298,7 @@ func TestByIDHandlers_TimelineRoutesToDetectedMemoryLakeProject(t *testing.T) {
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 
 	res, err := handleTimeline(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"observation_id": float64(f.mlID),
+		"observation_id": f.mlSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handleTimeline error: %v", err)
@@ -305,7 +319,7 @@ func TestByIDHandlers_TimelineExplicitProjectOverrideStillWorks(t *testing.T) {
 	cfg := MCPConfig{DefaultProject: "otherproj"}
 
 	res, err := handleTimeline(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"observation_id": float64(f.mlID),
+		"observation_id": f.mlSyncID,
 		"project":        "mlproj",
 	}}})
 	if err != nil {
@@ -325,7 +339,7 @@ func TestByIDHandlers_TimelineForeignIDNotFound(t *testing.T) {
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 
 	res, err := handleTimeline(f.sel, cfg)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"observation_id": float64(f.sqliteID),
+		"observation_id": f.sqliteSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handleTimeline error: %v", err)
@@ -340,7 +354,7 @@ func TestByIDHandlers_TimelineForeignIDNotFound(t *testing.T) {
 func TestByIDHandlers_CompareRoutesToDetectedMemoryLakeProject(t *testing.T) {
 	sqlite := newMCPTestStore(t)
 	ml := &memoryLakeStubBackend{Store: newMCPTestStore(t)}
-	sel := twoBackendSelector(sqlite, ml, "mlproj")
+	sel := twoBackendSelector(newSQLiteBackend(sqlite), ml, "mlproj")
 
 	if err := ml.Store.CreateSession("s-ml-compare", "mlproj", "/work/mlproj"); err != nil {
 		t.Fatalf("create ml session: %v", err)
@@ -357,11 +371,19 @@ func TestByIDHandlers_CompareRoutesToDetectedMemoryLakeProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed ml obs B: %v", err)
 	}
+	obsA, err := ml.Store.GetObservation(idA)
+	if err != nil {
+		t.Fatalf("reload ml obs A for sync_id: %v", err)
+	}
+	obsB, err := ml.Store.GetObservation(idB)
+	if err != nil {
+		t.Fatalf("reload ml obs B for sync_id: %v", err)
+	}
 
 	cfg := MCPConfig{DefaultProject: "mlproj"}
 	res, err := handleCompare(sel, cfg, NewSessionActivity(0))(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
-		"memory_id_b": float64(idB),
+		"memory_id_a": obsA.SyncID,
+		"memory_id_b": obsB.SyncID,
 		"relation":    "related",
 		"confidence":  float64(0.9),
 		"reasoning":   "both are ml-backend decisions",
@@ -383,7 +405,7 @@ func TestByIDHandlers_CompareRoutesToDetectedMemoryLakeProject(t *testing.T) {
 func TestResolveByIDBackend_NotEnabledProjectMatchesDefaultBackend(t *testing.T) {
 	sqlite := newMCPTestStore(t)
 	ml := &memoryLakeStubBackend{Store: newMCPTestStore(t)}
-	sel := twoBackendSelector(sqlite, ml, "mlproj")
+	sel := twoBackendSelector(newSQLiteBackend(sqlite), ml, "mlproj")
 
 	cfg := MCPConfig{DefaultProject: "not-enabled-project"}
 	backend, detRes, err := resolveByIDBackend(sel, cfg)
@@ -404,7 +426,7 @@ func TestResolveByIDBackend_NotEnabledProjectMatchesDefaultBackend(t *testing.T)
 func TestResolveByIDBackend_EnabledProjectMatchesRoutedBackend(t *testing.T) {
 	sqlite := newMCPTestStore(t)
 	ml := &memoryLakeStubBackend{Store: newMCPTestStore(t)}
-	sel := twoBackendSelector(sqlite, ml, "mlproj")
+	sel := twoBackendSelector(newSQLiteBackend(sqlite), ml, "mlproj")
 
 	backend, detRes, err := resolveByIDBackend(sel, MCPConfig{DefaultProject: "mlproj"})
 	if err != nil {
@@ -437,7 +459,7 @@ func TestResolveByIDBackend_AmbiguousCwdFallsBackWithoutPanicOrEscalatedError(t 
 
 	sqlite := newMCPTestStore(t)
 	ml := &memoryLakeStubBackend{Store: newMCPTestStore(t)}
-	sel := twoBackendSelector(sqlite, ml, "mlproj")
+	sel := twoBackendSelector(newSQLiteBackend(sqlite), ml, "mlproj")
 
 	backend, _, err := resolveByIDBackend(sel, MCPConfig{})
 	if err == nil {
@@ -466,7 +488,7 @@ func TestByIDHandlers_GetObservationAmbiguousCwdDegradesInsteadOfErroring(t *tes
 	f := newByIDRoutingFixture(t)
 
 	res, err := handleGetObservation(f.sel, MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"id": float64(f.sqliteID),
+		"id": f.sqliteSyncID,
 	}}})
 	if err != nil {
 		t.Fatalf("handleGetObservation error: %v", err)

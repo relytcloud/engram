@@ -764,7 +764,7 @@ func cmdServe(cfg store.Config) {
 	// selector `engram mcp` and `engram save`/`engram search` use, so the
 	// OpenCode/Pi HTTP session-tracking path no longer split-brains against
 	// an enabled project.
-	srv.SetBackendSelector(buildRoutingSelector(s))
+	srv.SetBackendSelector(buildRoutingSelector(mcp.NewSQLiteBackend(s)))
 
 	// Graceful shutdown context — cancelled on SIGINT/SIGTERM.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -922,7 +922,7 @@ func cmdMCP(cfg store.Config) {
 	// is enabled yet, not a startup failure. buildRoutingSelector is the same
 	// helper `engram save`/`engram search`/`engram serve` use, so all
 	// interfaces route enabled projects identically.
-	sel := buildRoutingSelector(s)
+	sel := buildRoutingSelector(mcp.NewSQLiteBackend(s))
 	mcpSrv := newMCPServerWithSelector(sel, mcpCfg, allowlist)
 
 	if err := serveMCP(mcpSrv); err != nil {
@@ -1001,7 +1001,7 @@ func cmdSearch(cfg store.Config) {
 	// detection) is enabled; otherwise backend is `s` itself and behavior is
 	// byte-for-byte unchanged from before routing existed. This is the same
 	// selector `engram mcp` and `engram serve` use.
-	sel := buildRoutingSelector(s)
+	sel := buildRoutingSelector(mcp.NewSQLiteBackend(s))
 	backend := sel(resolveCLIRoutingProject(opts.Project))
 
 	results, err := backendSearch(backend, query, opts)
@@ -1076,7 +1076,7 @@ func cmdSave(cfg store.Config) {
 	// detection) is enabled; otherwise backend is `s` itself and behavior is
 	// byte-for-byte unchanged from before routing existed. This is the same
 	// selector `engram mcp` and `engram serve` use.
-	sel := buildRoutingSelector(s)
+	sel := buildRoutingSelector(mcp.NewSQLiteBackend(s))
 	backend := sel(resolveCLIRoutingProject(project))
 
 	sessionID := "manual-save"

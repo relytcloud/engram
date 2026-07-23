@@ -68,7 +68,7 @@ var suggestTopicKey = store.SuggestTopicKey
 // project's backend flows through unchanged instead of requiring a type
 // assertion down to SQLite at the call site: mem_stats and automatic prompt
 // capture now work for any MemoryBackend implementation, not just SQLite.
-var addPromptIfMissing = func(s MemoryBackend, params store.AddPromptParams) (int64, bool, error) {
+var addPromptIfMissing = func(s MemoryBackend, params store.AddPromptParams) (string, bool, error) {
 	return s.AddPromptIfMissing(params)
 }
 
@@ -248,7 +248,7 @@ func NewServerWithTools(s *store.Store, allowlist map[string]bool) *server.MCPSe
 // NewServerWithConfig creates an MCP server with full configuration including
 // default project detection and optional tool allowlist.
 func NewServerWithConfig(s *store.Store, cfg MCPConfig, allowlist map[string]bool) *server.MCPServer {
-	return newServerWithActivity(StaticSelector(s), cfg, allowlist, NewSessionActivity(10*time.Minute))
+	return newServerWithActivity(StaticSelector(newSQLiteBackend(s)), cfg, allowlist, NewSessionActivity(10*time.Minute))
 }
 
 func newServerWithActivity(sel BackendSelector, cfg MCPConfig, allowlist map[string]bool, activity *SessionActivity) *server.MCPServer {
@@ -401,9 +401,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(false),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id",
+				mcp.WithString("id",
 					mcp.Required(),
-					mcp.Description("Observation ID to update"),
+					mcp.Description("Observation sync_id to update (from mem_search/mem_save/mem_get_observation results)"),
 				),
 				mcp.WithString("title",
 					mcp.Description("New title"),
@@ -439,8 +439,8 @@ Examples:
 				mcp.WithString("action", mcp.Required(), mcp.Description("Action: list | mark_reviewed")),
 				mcp.WithString("project", mcp.Description("Optional project filter for action=list; omit to list all projects.")),
 				mcp.WithNumber("limit", mcp.Description("Max results for action=list (default: 10).")),
-				mcp.WithNumber("observation_id", mcp.Description("Observation id for action=mark_reviewed.")),
-				mcp.WithNumber("id", mcp.Description("Backward-compatible alias for observation_id.")),
+				mcp.WithString("observation_id", mcp.Description("Observation sync_id for action=mark_reviewed (from mem_search/mem_save/mem_get_observation results).")),
+				mcp.WithString("id", mcp.Description("Backward-compatible alias for observation_id.")),
 			),
 			queuedWriteHandler(writeQueue, handleReview(sel, cfg)),
 		)
@@ -482,9 +482,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(true),
 				mcp.WithIdempotentHintAnnotation(false),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id",
+				mcp.WithString("id",
 					mcp.Required(),
-					mcp.Description("Observation ID to delete"),
+					mcp.Description("Observation sync_id to delete (from mem_search/mem_save/mem_get_observation results)"),
 				),
 				mcp.WithBoolean("hard_delete",
 					mcp.Description("If true, permanently deletes the observation"),
@@ -536,7 +536,7 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id", mcp.Required(), mcp.Description("Observation ID to pin")),
+				mcp.WithString("id", mcp.Required(), mcp.Description("Observation sync_id to pin (from mem_search/mem_save/mem_get_observation results)")),
 			),
 			handlePin(sel, cfg, true),
 		)
@@ -551,7 +551,7 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id", mcp.Required(), mcp.Description("Observation ID to unpin")),
+				mcp.WithString("id", mcp.Required(), mcp.Description("Observation sync_id to unpin (from mem_search/mem_save/mem_get_observation results)")),
 			),
 			handlePin(sel, cfg, false),
 		)
@@ -609,9 +609,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("observation_id",
+				mcp.WithString("observation_id",
 					mcp.Required(),
-					mcp.Description("The observation ID to center the timeline on (from mem_search results)"),
+					mcp.Description("The observation sync_id to center the timeline on (from mem_search/mem_save/mem_get_observation results)"),
 				),
 				mcp.WithNumber("before",
 					mcp.Description("Number of observations to show before the focus (default: 5)"),
@@ -637,9 +637,9 @@ Examples:
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("id",
+				mcp.WithString("id",
 					mcp.Required(),
-					mcp.Description("The observation ID to retrieve"),
+					mcp.Description("The observation sync_id to retrieve (from mem_search/mem_save results)"),
 				),
 			),
 			handleGetObservation(sel, cfg),
@@ -905,8 +905,8 @@ Re-judging an already-judged ID overwrites the verdict (deliberate revision).`),
 WHEN TO CALL: After you have evaluated two memories and reached a verdict, call mem_compare to PERSIST that verdict into the relation store. You do the judgment; mem_compare records it.
 
 PARAMS:
-  memory_id_a  (required) — integer id of the first observation (from mem_search or mem_get_observation)
-  memory_id_b  (required) — integer id of the second observation
+  memory_id_a  (required) — sync_id of the first observation (from mem_search, mem_save, or mem_get_observation)
+  memory_id_b  (required) — sync_id of the second observation
   relation     (required) — one of: related, compatible, scoped, conflicts_with, supersedes, not_conflict
   confidence   (required) — float 0..1; your self-reported confidence in the verdict
   reasoning    (required) — explanation of the verdict, max 200 chars
@@ -925,13 +925,13 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithNumber("memory_id_a",
+				mcp.WithString("memory_id_a",
 					mcp.Required(),
-					mcp.Description("Integer id of the first observation (from mem_search #id)"),
+					mcp.Description("sync_id of the first observation (from mem_search/mem_save/mem_get_observation results)"),
 				),
-				mcp.WithNumber("memory_id_b",
+				mcp.WithString("memory_id_b",
 					mcp.Required(),
-					mcp.Description("Integer id of the second observation (from mem_search #id)"),
+					mcp.Description("sync_id of the second observation (from mem_search/mem_save/mem_get_observation results)"),
 				),
 				mcp.WithString("relation",
 					mcp.Required(),
@@ -1177,8 +1177,8 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 
 func handlePin(sel BackendSelector, cfg MCPConfig, pinned bool) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		id := int64(intArg(req, "id", 0))
-		if id == 0 {
+		id, _ := req.GetArguments()["id"].(string)
+		if strings.TrimSpace(id) == "" {
 			return mcp.NewToolResultError("id is required"), nil
 		}
 		// Pin/unpin is addressed purely by observation id, but the id may
@@ -1207,7 +1207,7 @@ func handlePin(sel BackendSelector, cfg MCPConfig, pinned bool) server.ToolHandl
 			state = "pinned"
 		}
 		out, _ := jsonMarshal(map[string]any{
-			"result":  fmt.Sprintf("Memory #%d %s", id, state),
+			"result":  fmt.Sprintf("Memory %s %s", id, state),
 			"id":      obs.ID,
 			"sync_id": obs.SyncID,
 			"pinned":  obs.Pinned,
@@ -1296,7 +1296,7 @@ func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) s
 
 		truncated := len(content) > s.MaxObservationLength()
 
-		savedID, err := s.AddObservation(store.AddObservationParams{
+		savedSyncID, err := s.AddObservation(store.AddObservationParams{
 			SessionID: sessionID,
 			Type:      typ,
 			Title:     title,
@@ -1356,18 +1356,19 @@ func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) s
 		if cfg.Limit != nil {
 			candOpts.Limit = *cfg.Limit
 		}
-		candidates, candErr := s.FindCandidates(savedID, candOpts)
+		candidates, candErr := s.FindCandidates(savedSyncID, candOpts)
 		if candErr != nil {
 			// Log only — do not fail the save.
 			fmt.Fprintf(os.Stderr, "engram: FindCandidates error (non-fatal): %v\n", candErr)
 		}
 
-		// Fetch the saved observation's sync_id for the envelope (REQ-001).
-		var savedSyncID string
-		if obs, obsErr := s.GetObservation(savedID); obsErr == nil {
-			savedSyncID = obs.SyncID
-			extra["id"] = savedID
-			extra["sync_id"] = savedSyncID
+		// Fetch the saved observation's fields for the envelope (REQ-001).
+		// savedSyncID is already the observation's sync_id (AddObservation's
+		// return value post sync_id migration — see backend.go), so no
+		// separate sync_id lookup is needed here.
+		if obs, obsErr := s.GetObservation(savedSyncID); obsErr == nil {
+			extra["id"] = obs.ID
+			extra["sync_id"] = obs.SyncID
 			extra["state"] = obs.State()
 			if obs.ReviewAfter != nil {
 				extra["review_after"] = *obs.ReviewAfter
@@ -1428,8 +1429,8 @@ func handleSuggestTopicKey() server.ToolHandlerFunc {
 
 func handleUpdate(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		id := int64(intArg(req, "id", 0))
-		if id == 0 {
+		id, _ := req.GetArguments()["id"].(string)
+		if strings.TrimSpace(id) == "" {
 			return mcp.NewToolResultError("id is required"), nil
 		}
 		// Update is addressed purely by observation id, but the id may belong
@@ -1557,11 +1558,11 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 			return respondWithProject(detRes, b.String(), map[string]any{"observations": structured}), nil
 
 		case "mark_reviewed":
-			id := int64(intArg(req, "observation_id", 0))
-			if id == 0 {
-				id = int64(intArg(req, "id", 0))
+			id, _ := req.GetArguments()["observation_id"].(string)
+			if strings.TrimSpace(id) == "" {
+				id, _ = req.GetArguments()["id"].(string)
 			}
-			if id == 0 {
+			if strings.TrimSpace(id) == "" {
 				return mcp.NewToolResultError("observation_id is required for mark_reviewed"), nil
 			}
 			if err := s.MarkReviewed(id); err != nil {
@@ -1591,8 +1592,8 @@ func handleReview(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 
 func handleDelete(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		id := int64(intArg(req, "id", 0))
-		if id == 0 {
+		id, _ := req.GetArguments()["id"].(string)
+		if strings.TrimSpace(id) == "" {
 			return mcp.NewToolResultError("id is required"), nil
 		}
 		// Delete is addressed purely by observation id, but the id may belong
@@ -1611,7 +1612,7 @@ func handleDelete(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		if hardDelete {
 			mode = "permanently deleted"
 		}
-		return mcp.NewToolResultText(fmt.Sprintf("Memory #%d %s", id, mode)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("Memory %s %s", id, mode)), nil
 	}
 }
 
@@ -1775,7 +1776,7 @@ func handleStats(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 
 // DoctorToolHandler returns a tool handler function for mem_doctor.
 func DoctorToolHandler(s *store.Store) server.ToolHandlerFunc {
-	return handleDoctor(StaticSelector(s), MCPConfig{})
+	return handleDoctor(StaticSelector(newSQLiteBackend(s)), MCPConfig{})
 }
 
 func handleDoctor(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
@@ -1802,7 +1803,8 @@ func handleDoctor(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		// cannot run those checks, so mem_doctor substitutes a lightweight
 		// MemoryBackend-only connectivity/latency suite (runMemoryLakeDoctor)
 		// instead of hard-erroring. The SQLite path below is unchanged.
-		if sqliteStore, ok := s.(*store.Store); ok {
+		if sb, ok := s.(*sqliteBackend); ok {
+			sqliteStore := sb.underlyingStore()
 			runner := diagnostic.NewRunner()
 			scope := diagnostic.Scope{Store: sqliteStore, Project: project, Now: time.Now()}
 			if strings.TrimSpace(check) != "" {
@@ -1830,8 +1832,8 @@ func handleDoctor(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 
 func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		observationID := int64(intArg(req, "observation_id", 0))
-		if observationID == 0 {
+		observationID, _ := req.GetArguments()["observation_id"].(string)
+		if strings.TrimSpace(observationID) == "" {
 			return mcp.NewToolResultError("observation_id is required"), nil
 		}
 		before := intArg(req, "before", 5)
@@ -1905,8 +1907,8 @@ func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 // handleGetObservation returns a tool handler function for mem_get_observation.
 func handleGetObservation(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		id := int64(intArg(req, "id", 0))
-		if id == 0 {
+		id, _ := req.GetArguments()["id"].(string)
+		if strings.TrimSpace(id) == "" {
 			return mcp.NewToolResultError("id is required"), nil
 		}
 
@@ -1920,7 +1922,7 @@ func handleGetObservation(sel BackendSelector, cfg MCPConfig) server.ToolHandler
 
 		obs, err := s.GetObservation(id)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Observation #%d not found", id)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("Observation %s not found", id)), nil
 		}
 
 		// Tolerant: don't fail the fetch on resolution error; degrade to
@@ -2224,8 +2226,9 @@ func handleJudge(sel BackendSelector, activity *SessionActivity) server.ToolHand
 //
 // Tool description contract (REQ-011, Design §9):
 // "Persist a semantic verdict you have already judged externally into Engram.
-// Accepts int IDs for both observations, resolves them to sync_ids, then
-// calls JudgeBySemantic. Returns the persisted relation's sync_id."
+// Accepts sync_ids for both observations (from mem_search/mem_save/
+// mem_get_observation results) and calls JudgeBySemantic directly. Returns
+// the persisted relation's sync_id."
 func handleCompare(sel BackendSelector, cfg MCPConfig, _ *SessionActivity) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Compare resolves both sides by observation id, not an explicit
@@ -2235,17 +2238,15 @@ func handleCompare(sel BackendSelector, cfg MCPConfig, _ *SessionActivity) serve
 		// unaware default. See resolveByIDBackend's doc comment for why this
 		// is safe and SQLite-behavior-neutral.
 		s, _, _ := resolveByIDBackend(sel, cfg)
-		// --- required numeric IDs ---
-		rawA, okA := req.GetArguments()["memory_id_a"].(float64)
-		rawB, okB := req.GetArguments()["memory_id_b"].(float64)
-		if !okA {
-			return mcp.NewToolResultError("memory_id_a is required (integer observation id)"), nil
+		// --- required sync_ids ---
+		idA, okA := req.GetArguments()["memory_id_a"].(string)
+		idB, okB := req.GetArguments()["memory_id_b"].(string)
+		if !okA || strings.TrimSpace(idA) == "" {
+			return mcp.NewToolResultError("memory_id_a is required (sync_id of the first observation)"), nil
 		}
-		if !okB {
-			return mcp.NewToolResultError("memory_id_b is required (integer observation id)"), nil
+		if !okB || strings.TrimSpace(idB) == "" {
+			return mcp.NewToolResultError("memory_id_b is required (sync_id of the second observation)"), nil
 		}
-		idA := int64(rawA)
-		idB := int64(rawB)
 
 		// --- required string fields ---
 		relation, _ := req.GetArguments()["relation"].(string)
@@ -2269,19 +2270,22 @@ func handleCompare(sel BackendSelector, cfg MCPConfig, _ *SessionActivity) serve
 		// --- optional model ---
 		model, _ := req.GetArguments()["model"].(string)
 
-		// Resolve integer IDs to sync_ids.
-		obsA, err := s.GetObservation(idA)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("observation id=%d not found: %s", idA, err)), nil
+		// Verify both sync_ids resolve to real observations before persisting
+		// the verdict — JudgeBySemantic itself does not error on an unknown
+		// source/target sync_id (see internal/store/relations.go's
+		// validateCrossProjectGuard, which tolerates a missing row), so this
+		// handler-level check is what makes an unknown id surface as a tool
+		// error instead of silently recording a dangling relation.
+		if _, err := s.GetObservation(idA); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("observation id=%s not found: %s", idA, err)), nil
 		}
-		obsB, err := s.GetObservation(idB)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("observation id=%d not found: %s", idB, err)), nil
+		if _, err := s.GetObservation(idB); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("observation id=%s not found: %s", idB, err)), nil
 		}
 
 		syncID, err := s.JudgeBySemantic(store.JudgeBySemanticParams{
-			SourceID:   obsA.SyncID,
-			TargetID:   obsB.SyncID,
+			SourceID:   idA,
+			TargetID:   idB,
 			Relation:   relation,
 			Confidence: rawConf,
 			Reasoning:  reasoning,

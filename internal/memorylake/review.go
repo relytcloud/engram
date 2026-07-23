@@ -149,7 +149,11 @@ func (b *MemoryLakeBackend) ObservationsNeedingReview(project string, limit int)
 // review would always compute to the exact same instant as the first one.
 // Types absent from decayReviewAfterMonths clear the override entirely,
 // mirroring store resetting review_after to NULL for untracked types.
-func (b *MemoryLakeBackend) MarkReviewed(id int64) error {
+func (b *MemoryLakeBackend) MarkReviewed(syncID string) error {
+	id, ok := parseSyncID(syncID)
+	if !ok {
+		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
+	}
 	factID, ok := b.factForID(id)
 	if !ok {
 		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}

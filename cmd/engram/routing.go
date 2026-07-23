@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -255,23 +256,38 @@ func resolveCLIRoutingProject(flagProject string) string {
 }
 
 // backendSearch runs a search against the resolved backend b. When b is the
-// local sqlite *store.Store, it goes through the overridable storeSearch hook
-// so existing test stubbing (main_extra_test.go) keeps working unchanged; any
-// other backend (a genuine MemoryLake backend) is called directly through the
-// mcp.MemoryBackend interface.
+// local sqlite backend, it goes through the overridable storeSearch hook
+// (via mcp.StoreOf to reach the underlying *store.Store — *store.Store no
+// longer implements mcp.MemoryBackend directly post sync_id migration, see
+// internal/mcp/backend.go) so existing test stubbing (main_extra_test.go)
+// keeps working unchanged; any other backend (a genuine MemoryLake backend)
+// is called directly through the mcp.MemoryBackend interface.
 func backendSearch(b mcp.MemoryBackend, query string, opts store.SearchOptions) ([]store.SearchResult, error) {
-	if ss, ok := b.(*store.Store); ok {
+	if ss, ok := mcp.StoreOf(b); ok {
 		return storeSearch(ss, query, opts)
 	}
 	return b.Search(query, opts)
 }
 
 // backendAddObservation mirrors backendSearch for AddObservation: sqlite goes
-// through the overridable storeAddObservation hook, everything else (a
-// genuine MemoryLake backend) is called directly.
+// through the overridable storeAddObservation hook (returning the int64 row
+// id CLI output has always printed), everything else (a genuine MemoryLake
+// backend) calls AddObservation directly through the interface and converts
+// its returned sync_id back to int64 — safe because a MemoryLake backend's
+// interim sync_id is presently just the decimal string of its own internal
+// numeric id (see internal/memorylake's minimal sync_id compat shim for this
+// phase; Phase 3B replaces it with the real fact id).
 func backendAddObservation(b mcp.MemoryBackend, p store.AddObservationParams) (int64, error) {
-	if ss, ok := b.(*store.Store); ok {
+	if ss, ok := mcp.StoreOf(b); ok {
 		return storeAddObservation(ss, p)
 	}
-	return b.AddObservation(p)
+	syncID, err := b.AddObservation(p)
+	if err != nil {
+		return 0, err
+	}
+	id, convErr := strconv.ParseInt(syncID, 10, 64)
+	if convErr != nil {
+		return 0, fmt.Errorf("unexpected non-numeric sync_id %q from MemoryLake backend: %w", syncID, convErr)
+	}
+	return id, nil
 }

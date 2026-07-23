@@ -3,32 +3,38 @@ package mcp
 import "github.com/Gentleman-Programming/engram/internal/store"
 
 // MemoryBackend abstracts the storage capabilities that mem_* tool handlers
-// depend on. *store.Store (SQLite, the default local backend) implements it
-// today; a future *memorylake.MemoryLakeBackend can implement it as an
-// opt-in per-project alternative. Parameter/result types are reused from the
-// store package so handler bodies require zero changes when depending on
-// this interface instead of the concrete *store.Store.
+// depend on. A thin sqliteBackend adapter (sqlite_backend.go) implements it
+// today for the local SQLite store; a future *memorylake.MemoryLakeBackend
+// implements it as an opt-in per-project alternative.
+//
+// By-id methods are keyed by the opaque string sync_id (SQLite:
+// store.Observation.SyncID, already exposed by search/save responses;
+// MemoryLake: the fact id) rather than the SQLite-only int64 primary key —
+// see docs/superpowers/specs/2026-07-23-memorylake-thin-adapter-design.md §3
+// (A1'). store.Observation.ID stays int64 and *store.Store's own methods are
+// unchanged; sqliteBackend is what translates sync_id <-> int64 at the
+// interface boundary via store.GetObservationBySyncID.
 //
 // The method set below is the call surface that existing mem_* handlers in
-// mcp.go actually invoke on *store.Store, verified against the real
-// signatures in internal/store/*.go (not merely the handler call sites).
+// mcp.go actually invoke on a backend, verified against the real signatures
+// in internal/store/*.go (not merely the handler call sites).
 type MemoryBackend interface {
 	// Observation CRUD
-	AddObservation(p store.AddObservationParams) (int64, error)
-	GetObservation(id int64) (*store.Observation, error)
-	UpdateObservation(id int64, p store.UpdateObservationParams) (*store.Observation, error)
-	DeleteObservation(id int64, hardDelete bool) error
+	AddObservation(p store.AddObservationParams) (string, error)
+	GetObservation(syncID string) (*store.Observation, error)
+	UpdateObservation(syncID string, p store.UpdateObservationParams) (*store.Observation, error)
+	DeleteObservation(syncID string, hardDelete bool) error
 	Search(query string, opts store.SearchOptions) ([]store.SearchResult, error)
-	Timeline(observationID int64, before, after int) (*store.TimelineResult, error)
+	Timeline(syncID string, before, after int) (*store.TimelineResult, error)
 	FormatContext(project, scope string) (string, error)
 	Stats() (*store.Stats, error)
 	MaxObservationLength() int
 
 	// Pin / review
-	PinObservation(id int64) error
-	UnpinObservation(id int64) error
+	PinObservation(syncID string) error
+	UnpinObservation(syncID string) error
 	ObservationsNeedingReview(project string, limit int) ([]store.Observation, error)
-	MarkReviewed(id int64) error
+	MarkReviewed(syncID string) error
 
 	// Sessions
 	CreateSession(id, project, directory string) error
@@ -38,8 +44,8 @@ type MemoryBackend interface {
 	RecentSessions(project string, limit int) ([]store.SessionSummary, error)
 
 	// Prompts / passive capture
-	AddPrompt(p store.AddPromptParams) (int64, error)
-	AddPromptIfMissing(p store.AddPromptParams) (int64, bool, error)
+	AddPrompt(p store.AddPromptParams) (string, error)
+	AddPromptIfMissing(p store.AddPromptParams) (string, bool, error)
 	PassiveCapture(p store.PassiveCaptureParams) (*store.PassiveCaptureResult, error)
 
 	// Projects
@@ -49,12 +55,8 @@ type MemoryBackend interface {
 	MergeProjects(sources []string, canonical string) (*store.MergeResult, error)
 
 	// Relations / conflict judging
-	FindCandidates(savedID int64, opts store.CandidateOptions) ([]store.Candidate, error)
+	FindCandidates(savedSyncID string, opts store.CandidateOptions) ([]store.Candidate, error)
 	GetRelationsForObservations(syncIDs []string) (map[string]store.ObservationRelations, error)
 	JudgeRelation(p store.JudgeRelationParams) (*store.Relation, error)
 	JudgeBySemantic(p store.JudgeBySemanticParams) (string, error)
 }
-
-// Compile-time assertion that *store.Store (SQLite) implements MemoryBackend.
-// Re-asserted in backend_test.go via TestStoreSatisfiesMemoryBackend.
-var _ MemoryBackend = (*store.Store)(nil)

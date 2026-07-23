@@ -253,7 +253,7 @@ func TestReadHandlerDoesNotWaitBehindBlockedQueuedWrite(t *testing.T) {
 
 func TestQueuedHandleSavePersistsMemory(t *testing.T) {
 	s := newMCPTestStore(t)
-	h := queuedWriteHandler(newWriteQueue(1), handleSave(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute)))
+	h := queuedWriteHandler(newWriteQueue(1), handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute)))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
 		"title":   "Queued save architecture",

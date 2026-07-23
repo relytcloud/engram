@@ -19,8 +19,10 @@ import (
 )
 
 // seedCompareFixture creates a session and two observations.
-// Returns the integer IDs of both observations.
-func seedCompareFixture(t *testing.T, s *store.Store) (idA, idB int64) {
+// Returns the sync_ids of both observations — the key mem_compare's
+// memory_id_a/memory_id_b args accept post the sync_id migration (Phase 3
+// Task 1+2; see internal/mcp/backend.go).
+func seedCompareFixture(t *testing.T, s *store.Store) (syncIDA, syncIDB string) {
 	t.Helper()
 	if err := s.CreateSession("s-compare", "engram", "/tmp"); err != nil {
 		t.Fatalf("create session: %v", err)
@@ -47,7 +49,7 @@ func seedCompareFixture(t *testing.T, s *store.Store) (idA, idB int64) {
 	if err != nil {
 		t.Fatalf("add obs B: %v", err)
 	}
-	return a, b
+	return syncIDOf(t, s, a), syncIDOf(t, s, b)
 }
 
 // TestHandleCompare_HappyPath — valid params persists a relation row and returns sync_id.
@@ -56,10 +58,10 @@ func TestHandleCompare_HappyPath(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
-		"memory_id_b": float64(idB),
+		"memory_id_a": idA,
+		"memory_id_b": idB,
 		"relation":    "supersedes",
 		"confidence":  float64(0.98),
 		"reasoning":   "newer post supersedes the older one",
@@ -92,10 +94,10 @@ func TestHandleCompare_NotConflict_NoRow(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
-		"memory_id_b": float64(idB),
+		"memory_id_a": idA,
+		"memory_id_b": idB,
 		"relation":    "not_conflict",
 		"confidence":  float64(0.99),
 		"reasoning":   "these are about different topics",
@@ -128,9 +130,9 @@ func TestHandleCompare_MissingMemoryIDB(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, _ := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
+		"memory_id_a": idA,
 		// memory_id_b omitted
 		"relation":   "compatible",
 		"confidence": float64(0.9),
@@ -152,10 +154,10 @@ func TestHandleCompare_InvalidRelation(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
-		"memory_id_b": float64(idB),
+		"memory_id_a": idA,
+		"memory_id_b": idB,
 		"relation":    "totally_invalid_verb",
 		"confidence":  float64(0.9),
 		"reasoning":   "some reasoning",
@@ -176,10 +178,11 @@ func TestHandleCompare_NonExistentObservation(t *testing.T) {
 	s := newMCPTestStore(t)
 	_, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	const unknownSyncID = "obs-does-not-exist-9999"
+	h := handleCompare(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(9999),
-		"memory_id_b": float64(idB),
+		"memory_id_a": unknownSyncID,
+		"memory_id_b": idB,
 		"relation":    "conflicts_with",
 		"confidence":  float64(0.8),
 		"reasoning":   "they conflict",
@@ -190,9 +193,9 @@ func TestHandleCompare_NonExistentObservation(t *testing.T) {
 		t.Fatalf("handleCompare error: %v", err)
 	}
 	if !res.IsError {
-		t.Fatalf("expected IsError=true for non-existent observation id=9999")
+		t.Fatalf("expected IsError=true for non-existent observation id=%s", unknownSyncID)
 	}
-	if !strings.Contains(callResultText(t, res), "9999") {
+	if !strings.Contains(callResultText(t, res), unknownSyncID) {
 		t.Fatalf("expected error message to mention the unknown id, got %q", callResultText(t, res))
 	}
 }
@@ -203,12 +206,12 @@ func TestHandleCompare_Idempotency(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	// First call: supersedes
 	req1 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
-		"memory_id_b": float64(idB),
+		"memory_id_a": idA,
+		"memory_id_b": idB,
 		"relation":    "supersedes",
 		"confidence":  float64(0.8),
 		"reasoning":   "first verdict",
@@ -223,8 +226,8 @@ func TestHandleCompare_Idempotency(t *testing.T) {
 
 	// Second call: compatible (overwrite)
 	req2 := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
-		"memory_id_b": float64(idB),
+		"memory_id_a": idA,
+		"memory_id_b": idB,
 		"relation":    "compatible",
 		"confidence":  float64(0.95),
 		"reasoning":   "second verdict overwrite",
@@ -257,10 +260,10 @@ func TestHandleCompare_ModelOptional(t *testing.T) {
 	s := newMCPTestStore(t)
 	idA, idB := seedCompareFixture(t, s)
 
-	h := handleCompare(StaticSelector(s), MCPConfig{}, NewSessionActivity(10*time.Minute))
+	h := handleCompare(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
-		"memory_id_a": float64(idA),
-		"memory_id_b": float64(idB),
+		"memory_id_a": idA,
+		"memory_id_b": idB,
 		"relation":    "related",
 		"confidence":  float64(0.85),
 		"reasoning":   "they are related topics",

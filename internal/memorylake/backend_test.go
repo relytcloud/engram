@@ -21,20 +21,20 @@ import (
 // assertion; this local check guarantees *MemoryLakeBackend stays assignable to
 // it by keeping the signatures aligned.
 type memoryBackend interface {
-	AddObservation(p store.AddObservationParams) (int64, error)
-	GetObservation(id int64) (*store.Observation, error)
-	UpdateObservation(id int64, p store.UpdateObservationParams) (*store.Observation, error)
-	DeleteObservation(id int64, hardDelete bool) error
+	AddObservation(p store.AddObservationParams) (string, error)
+	GetObservation(syncID string) (*store.Observation, error)
+	UpdateObservation(syncID string, p store.UpdateObservationParams) (*store.Observation, error)
+	DeleteObservation(syncID string, hardDelete bool) error
 	Search(query string, opts store.SearchOptions) ([]store.SearchResult, error)
-	Timeline(observationID int64, before, after int) (*store.TimelineResult, error)
+	Timeline(syncID string, before, after int) (*store.TimelineResult, error)
 	FormatContext(project, scope string) (string, error)
 	Stats() (*store.Stats, error)
 	MaxObservationLength() int
 
-	PinObservation(id int64) error
-	UnpinObservation(id int64) error
+	PinObservation(syncID string) error
+	UnpinObservation(syncID string) error
 	ObservationsNeedingReview(project string, limit int) ([]store.Observation, error)
-	MarkReviewed(id int64) error
+	MarkReviewed(syncID string) error
 
 	CreateSession(id, project, directory string) error
 	GetSession(id string) (*store.Session, error)
@@ -42,8 +42,8 @@ type memoryBackend interface {
 	MostRecentActiveSession(project string) (string, bool, error)
 	RecentSessions(project string, limit int) ([]store.SessionSummary, error)
 
-	AddPrompt(p store.AddPromptParams) (int64, error)
-	AddPromptIfMissing(p store.AddPromptParams) (int64, bool, error)
+	AddPrompt(p store.AddPromptParams) (string, error)
+	AddPromptIfMissing(p store.AddPromptParams) (string, bool, error)
 	PassiveCapture(p store.PassiveCaptureParams) (*store.PassiveCaptureResult, error)
 
 	ProjectExists(name string) (bool, error)
@@ -51,7 +51,7 @@ type memoryBackend interface {
 	CountObservationsForProject(name string) (int, error)
 	MergeProjects(sources []string, canonical string) (*store.MergeResult, error)
 
-	FindCandidates(savedID int64, opts store.CandidateOptions) ([]store.Candidate, error)
+	FindCandidates(savedSyncID string, opts store.CandidateOptions) ([]store.Candidate, error)
 	GetRelationsForObservations(syncIDs []string) (map[string]store.ObservationRelations, error)
 	JudgeRelation(p store.JudgeRelationParams) (*store.Relation, error)
 	JudgeBySemantic(p store.JudgeBySemanticParams) (string, error)

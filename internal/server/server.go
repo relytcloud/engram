@@ -157,7 +157,7 @@ func (s *Server) SetBackendSelector(sel mcp.BackendSelector) {
 // treats project as an opaque routing key.
 func (s *Server) backendForProject(project string) mcp.MemoryBackend {
 	if s.selector == nil {
-		return s.store
+		return mcp.NewSQLiteBackend(s.store)
 	}
 	return s.selector(project)
 }
@@ -169,24 +169,53 @@ func (s *Server) backendForProject(project string) mcp.MemoryBackend {
 // anything not in the cache.
 func (s *Server) backendForSession(sessionID string) mcp.MemoryBackend {
 	if s.selector == nil {
-		return s.store
+		return mcp.NewSQLiteBackend(s.store)
 	}
 	if v, ok := s.sessionProject.Load(sessionID); ok {
 		return s.selector(v.(string))
 	}
-	return s.store
+	return mcp.NewSQLiteBackend(s.store)
 }
 
 // backendForObservation mirrors backendForSession for an observation id
 // (see obsProject, populated at AddObservation time).
 func (s *Server) backendForObservation(id int64) mcp.MemoryBackend {
 	if s.selector == nil {
-		return s.store
+		return mcp.NewSQLiteBackend(s.store)
 	}
 	if v, ok := s.obsProject.Load(id); ok {
 		return s.selector(v.(string))
 	}
-	return s.store
+	return mcp.NewSQLiteBackend(s.store)
+}
+
+// syncIDForLegacyID resolves a numeric observation id — the HTTP API's
+// existing wire contract, unchanged by this task (see Task 3 in the phase-3
+// plan for the pending full migration of the HTTP surface to sync_id) — to
+// the sync_id string MemoryBackend's by-id methods now expect. For an id that
+// lives in the local sqlite store this is a real lookup, so behavior for the
+// default (non-MemoryLake) path is exactly preserved. For an id that was
+// routed to a non-sqlite backend (a MemoryLake-enabled project), the decimal
+// string of id IS already the right key: that backend's interim sync_id
+// scheme is the decimal string of its own internal numeric id (see
+// internal/memorylake's minimal sync_id compat shim for this phase).
+func (s *Server) syncIDForLegacyID(id int64) string {
+	if obs, err := s.store.GetObservation(id); err == nil {
+		return obs.SyncID
+	}
+	return strconv.FormatInt(id, 10)
+}
+
+// legacyIDForSyncID is syncIDForLegacyID's inverse: given a sync_id a
+// MemoryBackend.AddObservation call just returned, recovers the numeric id
+// this HTTP endpoint's JSON response and obsProject cache still key by (see
+// syncIDForLegacyID's doc comment for why this round-trips correctly for
+// both the sqlite and interim MemoryLake cases).
+func (s *Server) legacyIDForSyncID(syncID string) (int64, error) {
+	if obs, err := s.store.GetObservationBySyncID(syncID); err == nil {
+		return obs.ID, nil
+	}
+	return strconv.ParseInt(syncID, 10, 64)
 }
 
 // notifyWrite calls the onWrite callback if configured (best-effort, non-blocking).
@@ -428,9 +457,17 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 
 	project, _ := store.NormalizeProject(body.Project)
 	backend := s.backendForProject(project)
-	id, err := backend.AddObservation(body)
+	syncID, err := backend.AddObservation(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// The HTTP wire contract still keys observations by the numeric id (see
+	// syncIDForLegacyID's doc comment) — recover it from the sync_id
+	// AddObservation just returned rather than changing the response shape.
+	id, err := s.legacyIDForSyncID(syncID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "saved but failed to resolve observation id: "+err.Error())
 		return
 	}
 	if s.selector != nil {
@@ -533,7 +570,7 @@ func (s *Server) handleGetObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obs, err := s.backendForObservation(id).GetObservation(id)
+	obs, err := s.backendForObservation(id).GetObservation(s.syncIDForLegacyID(id))
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "observation not found")
 		return
@@ -561,7 +598,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	obs, err := s.backendForObservation(id).UpdateObservation(id, body)
+	obs, err := s.backendForObservation(id).UpdateObservation(s.syncIDForLegacyID(id), body)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -580,7 +617,7 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 	}
 
 	hard := queryBool(r, "hard", false)
-	if err := s.backendForObservation(id).DeleteObservation(id, hard); err != nil {
+	if err := s.backendForObservation(id).DeleteObservation(s.syncIDForLegacyID(id), hard); err != nil {
 		switch {
 		case errors.Is(err, store.ErrObservationNotFound):
 			jsonError(w, http.StatusNotFound, err.Error())
@@ -614,7 +651,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	before := queryInt(r, "before", 5)
 	after := queryInt(r, "after", 5)
 
-	result, err := s.backendForObservation(id).Timeline(id, before, after)
+	result, err := s.backendForObservation(id).Timeline(s.syncIDForLegacyID(id), before, after)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -665,7 +702,8 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 	}
 
 	backend := s.backendForObservation(id)
-	if err := backend.MarkReviewed(id); err != nil {
+	syncID := s.syncIDForLegacyID(id)
+	if err := backend.MarkReviewed(syncID); err != nil {
 		if errors.Is(err, store.ErrObservationNotFound) {
 			jsonError(w, http.StatusNotFound, err.Error())
 			return
@@ -673,7 +711,7 @@ func (s *Server) handleReviewMarkReviewed(w http.ResponseWriter, r *http.Request
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	obs, err := backend.GetObservation(id)
+	obs, err := backend.GetObservation(syncID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "marked reviewed but failed to reload observation: "+err.Error())
 		return
@@ -726,14 +764,24 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	project, _ := store.NormalizeProject(body.Project)
-	id, err := s.backendForProject(project).AddPrompt(body)
+	promptID, err := s.backendForProject(project).AddPrompt(body)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	s.notifyWrite()
-	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
+	// AddPrompt's returned id is the decimal string of the prompt row's
+	// numeric id (see sqliteBackend.AddPrompt) — parse it back to a number to
+	// preserve this endpoint's existing JSON response shape. No downstream
+	// caller looks a prompt back up by id, so a non-numeric id (were a future
+	// backend to ever return one) degrades to being echoed as-is rather than
+	// failing the request.
+	var idField any = promptID
+	if n, convErr := strconv.ParseInt(promptID, 10, 64); convErr == nil {
+		idField = n
+	}
+	jsonResponse(w, http.StatusCreated, map[string]any{"id": idField, "status": "saved"})
 }
 
 func (s *Server) handleRecentPrompts(w http.ResponseWriter, r *http.Request) {

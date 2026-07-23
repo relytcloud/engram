@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -137,6 +138,22 @@ func (b *MemoryLakeBackend) factForID(id int64) (string, bool) {
 	return factID, true
 }
 
+// parseSyncID decodes the string sync_id MemoryBackend's by-id methods now
+// accept (see internal/mcp/backend.go's Phase 3 Task 1+2 sync_id migration)
+// back into the int64 IDMap key this backend's methods use internally. This
+// is an interim shim: for a MemoryLakeBackend, sync_id is presently just the
+// decimal string form of the IDMap int64 id (see AddObservation) rather than
+// the MemoryLake fact id directly — Phase 3B (Task 6) drops the IDMap
+// entirely and makes sync_id the fact id, at which point this shim goes
+// away. ok is false for a malformed (non-numeric) sync_id.
+func parseSyncID(syncID string) (int64, bool) {
+	id, err := strconv.ParseInt(syncID, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
 // ─── Observation CRUD (Tier A: core) ────────────────────────────────────────
 
 // AddObservation writes an observation to MemoryLake and returns a stable
@@ -157,7 +174,22 @@ func (b *MemoryLakeBackend) factForID(id int64) (string, bool) {
 // (the fact will materialize later; a subsequent AddObservation with identical
 // content is idempotent on the message custom_id). Callers treat this as a
 // successful, pending save.
-func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (int64, error) {
+//
+// AddObservation itself is a thin string-sync_id wrapper (Phase 3 Task 1+2:
+// MemoryBackend's by-id surface is keyed by sync_id string, not int64 — see
+// internal/mcp/backend.go) around addObservationInt, which keeps this
+// backend's actual int64 IDMap-based logic unchanged. The returned sync_id is
+// presently just the decimal string of that int64 id; Phase 3B (Task 6) makes
+// sync_id the real MemoryLake fact id once the IDMap is retired.
+func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (string, error) {
+	id, err := b.addObservationInt(p)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(id, 10), nil
+}
+
+func (b *MemoryLakeBackend) addObservationInt(p store.AddObservationParams) (int64, error) {
 	// Serialize the snapshot→append→backfill sequence against concurrent
 	// AddObservation calls on this same project (see writeMu's doc comment):
 	// without it, two concurrent saves can each claim the other's extracted
@@ -334,10 +366,15 @@ func (b *MemoryLakeBackend) upsertTopicKeyFact(current Fact, p store.AddObservat
 	return b.idmap.IntFor(b.projID, current.ID), nil
 }
 
-// GetObservation resolves the int64 id through the IDMap to a MemoryLake fact
-// id, fetches the fact, and decodes it back into a store.Observation (Content
-// preferring the verbatim engram_raw metadata over MemoryLake's paraphrase).
-func (b *MemoryLakeBackend) GetObservation(id int64) (*store.Observation, error) {
+// GetObservation resolves the string sync_id (see parseSyncID) through the
+// IDMap to a MemoryLake fact id, fetches the fact, and decodes it back into a
+// store.Observation (Content preferring the verbatim engram_raw metadata over
+// MemoryLake's paraphrase).
+func (b *MemoryLakeBackend) GetObservation(syncID string) (*store.Observation, error) {
+	id, ok := parseSyncID(syncID)
+	if !ok {
+		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
+	}
 	factID, ok := b.factForID(id)
 	if !ok {
 		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
@@ -348,6 +385,7 @@ func (b *MemoryLakeBackend) GetObservation(id int64) (*store.Observation, error)
 	}
 	obs := ObservationFromFact(f)
 	obs.ID = id
+	obs.SyncID = syncID
 	obs.CreatedAt = f.CreatedAt
 	obs.UpdatedAt = f.UpdatedAt
 	return &obs, nil
@@ -357,7 +395,11 @@ func (b *MemoryLakeBackend) GetObservation(id int64) (*store.Observation, error)
 // metadata and PATCHes the fact. When Content changes, the fact's own text is
 // updated too (V3 FactUpdateRequest carries `content`) and engram_raw is kept in
 // sync so future reads return the verbatim edited text.
-func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservationParams) (*store.Observation, error) {
+func (b *MemoryLakeBackend) UpdateObservation(syncID string, p store.UpdateObservationParams) (*store.Observation, error) {
+	id, ok := parseSyncID(syncID)
+	if !ok {
+		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
+	}
 	factID, ok := b.factForID(id)
 	if !ok {
 		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
@@ -421,6 +463,7 @@ func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservatio
 
 	obs := ObservationFromFact(updated)
 	obs.ID = id
+	obs.SyncID = syncID
 	obs.CreatedAt = updated.CreatedAt
 	obs.UpdatedAt = updated.UpdatedAt
 	return &obs, nil
@@ -441,8 +484,12 @@ func (b *MemoryLakeBackend) UpdateObservation(id int64, p store.UpdateObservatio
 // succeeded, and a failure to persist it does not resurface the C1 data-loss
 // bug (self-healed on the next hit), so it is logged rather than returned as
 // this call's error.
-func (b *MemoryLakeBackend) DeleteObservation(id int64, hardDelete bool) error {
+func (b *MemoryLakeBackend) DeleteObservation(syncID string, hardDelete bool) error {
 	_ = hardDelete // MemoryLake only supports soft delete (forget); see doc comment.
+	id, ok := parseSyncID(syncID)
+	if !ok {
+		return nil
+	}
 	factID, ok := b.factForID(id)
 	if !ok {
 		return nil
@@ -469,12 +516,20 @@ func (b *MemoryLakeBackend) MaxObservationLength() int {
 }
 
 // PinObservation sets the pinned flag in the fact's metadata.
-func (b *MemoryLakeBackend) PinObservation(id int64) error {
+func (b *MemoryLakeBackend) PinObservation(syncID string) error {
+	id, ok := parseSyncID(syncID)
+	if !ok {
+		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
+	}
 	return b.setPinned(id, true)
 }
 
 // UnpinObservation clears the pinned flag in the fact's metadata.
-func (b *MemoryLakeBackend) UnpinObservation(id int64) error {
+func (b *MemoryLakeBackend) UnpinObservation(syncID string) error {
+	id, ok := parseSyncID(syncID)
+	if !ok {
+		return &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
+	}
 	return b.setPinned(id, false)
 }
 
@@ -505,7 +560,7 @@ func (b *MemoryLakeBackend) setPinned(id int64, pinned bool) error {
 // First-cut: session grouping and prompts are not modeled (facts carry no
 // engram session id). SessionInfo is left nil. TODO(spec §6): richer timeline
 // fidelity once fact metadata carries session linkage.
-func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*store.TimelineResult, error) {
+func (b *MemoryLakeBackend) Timeline(syncID string, before, after int) (*store.TimelineResult, error) {
 	if before <= 0 {
 		before = 5
 	}
@@ -513,6 +568,10 @@ func (b *MemoryLakeBackend) Timeline(observationID int64, before, after int) (*s
 		after = 5
 	}
 
+	observationID, ok := parseSyncID(syncID)
+	if !ok {
+		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}
+	}
 	anchorFactID, ok := b.factForID(observationID)
 	if !ok {
 		return nil, &APIError{Code: "NOT_FOUND", Message: "no MemoryLake fact mapped for observation id"}

@@ -242,7 +242,13 @@ func isValidConflictRelationVerb(v string) bool {
 // opts.Scope, by contrast, IS honored: candidates whose engram_scope
 // metadata doesn't match are filtered out client-side, mirroring the local
 // store's scope-filtered FTS5 query.
-func (b *MemoryLakeBackend) FindCandidates(savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+func (b *MemoryLakeBackend) FindCandidates(savedSyncID string, opts store.CandidateOptions) ([]store.Candidate, error) {
+	savedID, ok := parseSyncID(savedSyncID)
+	if !ok {
+		// Malformed sync_id: fail-safe, mirroring the "nothing to find
+		// candidates for" contract below rather than erroring the save.
+		return nil, nil
+	}
 	factID, ok := b.factForID(savedID)
 	if !ok {
 		// No fact mapped yet for this id (e.g. a still-pending provisional id

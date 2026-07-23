@@ -1,6 +1,8 @@
 package memorylake
 
 import (
+	"strconv"
+
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
@@ -49,28 +51,34 @@ func (b *MemoryLakeBackend) appendPrompt(p store.AddPromptParams) (int64, error)
 
 // AddPrompt persists p as a MemoryLake conversation message. See
 // appendPrompt's doc comment for how this differs from internal/store's
-// always-distinct-row AddPrompt.
-func (b *MemoryLakeBackend) AddPrompt(p store.AddPromptParams) (int64, error) {
+// always-distinct-row AddPrompt. Returns the decimal string of the IDMap
+// int64 id (see backend.go's parseSyncID doc comment for why this backend's
+// sync_id is presently that decimal string, not yet the real fact id).
+func (b *MemoryLakeBackend) AddPrompt(p store.AddPromptParams) (string, error) {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
-	return b.appendPrompt(p)
+	id, err := b.appendPrompt(p)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(id, 10), nil
 }
 
 // AddPromptIfMissing mirrors internal/store's AddPromptIfMissing: a prior
 // call with the same session_id+project+content (see promptDedupKey) returns
 // the existing id and inserted=false without any MemoryLake round trip;
 // otherwise it behaves like AddPrompt and reports inserted=true.
-func (b *MemoryLakeBackend) AddPromptIfMissing(p store.AddPromptParams) (int64, bool, error) {
+func (b *MemoryLakeBackend) AddPromptIfMissing(p store.AddPromptParams) (string, bool, error) {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
 
 	key := promptDedupKey(p.SessionID, p.Project, p.Content)
 	if id, ok := b.idmap.IntIfExists(b.projID, key); ok {
-		return id, false, nil
+		return strconv.FormatInt(id, 10), false, nil
 	}
 	id, err := b.appendPrompt(p)
 	if err != nil {
-		return 0, false, err
+		return "", false, err
 	}
-	return id, true, nil
+	return strconv.FormatInt(id, 10), true, nil
 }

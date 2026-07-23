@@ -29,32 +29,32 @@ type fakeBackend struct {
 
 var _ MemoryBackend = (*fakeBackend)(nil)
 
-func (f *fakeBackend) AddObservation(p store.AddObservationParams) (int64, error) { panic("unused") }
-func (f *fakeBackend) GetObservation(id int64) (*store.Observation, error)         { panic("unused") }
-func (f *fakeBackend) UpdateObservation(id int64, p store.UpdateObservationParams) (*store.Observation, error) {
+func (f *fakeBackend) AddObservation(p store.AddObservationParams) (string, error) { panic("unused") }
+func (f *fakeBackend) GetObservation(syncID string) (*store.Observation, error)    { panic("unused") }
+func (f *fakeBackend) UpdateObservation(syncID string, p store.UpdateObservationParams) (*store.Observation, error) {
 	panic("unused")
 }
-func (f *fakeBackend) DeleteObservation(id int64, hardDelete bool) error { panic("unused") }
+func (f *fakeBackend) DeleteObservation(syncID string, hardDelete bool) error { panic("unused") }
 func (f *fakeBackend) Search(query string, opts store.SearchOptions) ([]store.SearchResult, error) {
 	panic("unused")
 }
-func (f *fakeBackend) Timeline(observationID int64, before, after int) (*store.TimelineResult, error) {
+func (f *fakeBackend) Timeline(syncID string, before, after int) (*store.TimelineResult, error) {
 	panic("unused")
 }
 func (f *fakeBackend) FormatContext(project, scope string) (string, error) { panic("unused") }
-func (f *fakeBackend) Stats() (*store.Stats, error)                       { panic("unused") }
-func (f *fakeBackend) MaxObservationLength() int                         { panic("unused") }
+func (f *fakeBackend) Stats() (*store.Stats, error)                        { panic("unused") }
+func (f *fakeBackend) MaxObservationLength() int                           { panic("unused") }
 
-func (f *fakeBackend) PinObservation(id int64) error   { panic("unused") }
-func (f *fakeBackend) UnpinObservation(id int64) error { panic("unused") }
+func (f *fakeBackend) PinObservation(syncID string) error   { panic("unused") }
+func (f *fakeBackend) UnpinObservation(syncID string) error { panic("unused") }
 func (f *fakeBackend) ObservationsNeedingReview(project string, limit int) ([]store.Observation, error) {
 	panic("unused")
 }
-func (f *fakeBackend) MarkReviewed(id int64) error { panic("unused") }
+func (f *fakeBackend) MarkReviewed(syncID string) error { panic("unused") }
 
 func (f *fakeBackend) CreateSession(id, project, directory string) error { panic("unused") }
 func (f *fakeBackend) GetSession(id string) (*store.Session, error)      { panic("unused") }
-func (f *fakeBackend) EndSession(id string, summary string) error       { panic("unused") }
+func (f *fakeBackend) EndSession(id string, summary string) error        { panic("unused") }
 func (f *fakeBackend) MostRecentActiveSession(project string) (string, bool, error) {
 	panic("unused")
 }
@@ -62,8 +62,8 @@ func (f *fakeBackend) RecentSessions(project string, limit int) ([]store.Session
 	panic("unused")
 }
 
-func (f *fakeBackend) AddPrompt(p store.AddPromptParams) (int64, error) { panic("unused") }
-func (f *fakeBackend) AddPromptIfMissing(p store.AddPromptParams) (int64, bool, error) {
+func (f *fakeBackend) AddPrompt(p store.AddPromptParams) (string, error) { panic("unused") }
+func (f *fakeBackend) AddPromptIfMissing(p store.AddPromptParams) (string, bool, error) {
 	panic("unused")
 }
 func (f *fakeBackend) PassiveCapture(p store.PassiveCaptureParams) (*store.PassiveCaptureResult, error) {
@@ -79,7 +79,7 @@ func (f *fakeBackend) MergeProjects(sources []string, canonical string) (*store.
 	panic("unused")
 }
 
-func (f *fakeBackend) FindCandidates(savedID int64, opts store.CandidateOptions) ([]store.Candidate, error) {
+func (f *fakeBackend) FindCandidates(savedSyncID string, opts store.CandidateOptions) ([]store.Candidate, error) {
 	panic("unused")
 }
 func (f *fakeBackend) GetRelationsForObservations(syncIDs []string) (map[string]store.ObservationRelations, error) {

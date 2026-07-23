@@ -261,7 +261,7 @@ func NewSQLiteBackend(t *testing.T) mcp.MemoryBackend {
 		t.Fatalf("paritytest: store.New: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return s
+	return mcp.NewSQLiteBackend(s)
 }
 
 // RequireMemoryLake loads MemoryLake configuration from the environment and

@@ -59,10 +59,58 @@ func (m *memoryLakeStubBackend) ProjectExists(name string) (bool, error) {
 	return m.Store.ProjectExists(name)
 }
 
-func (m *memoryLakeStubBackend) AddPromptIfMissing(p store.AddPromptParams) (int64, bool, error) {
+// memoryLakeSyncBackend lazily wraps the stub's embedded *store.Store with
+// the same sqliteBackend adapter production code uses, so the by-id and
+// AddObservation/AddPrompt* methods below can delegate to it instead of
+// duplicating the sync_id<->int64 translation logic (see sqlite_backend.go).
+func (m *memoryLakeStubBackend) memoryLakeSyncBackend() *sqliteBackend {
+	return newSQLiteBackend(m.Store)
+}
+
+func (m *memoryLakeStubBackend) AddObservation(p store.AddObservationParams) (string, error) {
+	return m.memoryLakeSyncBackend().AddObservation(p)
+}
+
+func (m *memoryLakeStubBackend) GetObservation(syncID string) (*store.Observation, error) {
+	return m.memoryLakeSyncBackend().GetObservation(syncID)
+}
+
+func (m *memoryLakeStubBackend) UpdateObservation(syncID string, p store.UpdateObservationParams) (*store.Observation, error) {
+	return m.memoryLakeSyncBackend().UpdateObservation(syncID, p)
+}
+
+func (m *memoryLakeStubBackend) DeleteObservation(syncID string, hardDelete bool) error {
+	return m.memoryLakeSyncBackend().DeleteObservation(syncID, hardDelete)
+}
+
+func (m *memoryLakeStubBackend) PinObservation(syncID string) error {
+	return m.memoryLakeSyncBackend().PinObservation(syncID)
+}
+
+func (m *memoryLakeStubBackend) UnpinObservation(syncID string) error {
+	return m.memoryLakeSyncBackend().UnpinObservation(syncID)
+}
+
+func (m *memoryLakeStubBackend) Timeline(syncID string, before, after int) (*store.TimelineResult, error) {
+	return m.memoryLakeSyncBackend().Timeline(syncID, before, after)
+}
+
+func (m *memoryLakeStubBackend) MarkReviewed(syncID string) error {
+	return m.memoryLakeSyncBackend().MarkReviewed(syncID)
+}
+
+func (m *memoryLakeStubBackend) FindCandidates(savedSyncID string, opts store.CandidateOptions) ([]store.Candidate, error) {
+	return m.memoryLakeSyncBackend().FindCandidates(savedSyncID, opts)
+}
+
+func (m *memoryLakeStubBackend) AddPrompt(p store.AddPromptParams) (string, error) {
+	return m.memoryLakeSyncBackend().AddPrompt(p)
+}
+
+func (m *memoryLakeStubBackend) AddPromptIfMissing(p store.AddPromptParams) (string, bool, error) {
 	m.promptCalls++
 	m.promptParams = append(m.promptParams, p)
-	return m.Store.AddPromptIfMissing(p)
+	return m.memoryLakeSyncBackend().AddPromptIfMissing(p)
 }
 
 func newMemoryLakeStubBackend(t *testing.T) *memoryLakeStubBackend {
@@ -288,7 +336,7 @@ func TestMemDoctorSQLiteBehaviorUnchangedByMemoryLakeSeam(t *testing.T) {
 	if err := s.CreateSession("manual-save-engram", "engram", "/work/engram"); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	res, err := handleDoctor(StaticSelector(s), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "check": "manual_session_name_project_mismatch"}}})
+	res, err := handleDoctor(StaticSelector(newSQLiteBackend(s)), MCPConfig{})(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"project": "engram", "check": "manual_session_name_project_mismatch"}}})
 	if err != nil {
 		t.Fatalf("handleDoctor: %v", err)
 	}
