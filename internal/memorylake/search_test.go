@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -118,46 +119,36 @@ func TestSearchFacts_FiltersByType(t *testing.T) {
 	}
 }
 
-// TestSearchFacts_TopicKeySlashPinsFuzzyHits verifies the topic_key fast
-// path: when query contains "/", SearchFacts must additionally issue a GET
-// .../memories/facts?fact_fuzzy=<query> substring lookup, and any fact it
-// hits must be placed ahead of the purely-semantic results, deduplicated by
-// fact id against the semantic set.
-func TestSearchFacts_TopicKeySlashPinsFuzzyHits(t *testing.T) {
-	var fuzzyCalled bool
-	var fuzzyTerm string
-
+// TestSearchFacts_SlashQueryDoesNotTriggerFactFuzzy is the Task 9 regression:
+// retrieval is now purely semantic. A query containing "/" (the shape of an
+// engram topic_key, e.g. "architecture/auth-model") used to additionally
+// trigger a GET .../memories/facts?fact_fuzzy=<query> substring lookup; that
+// fast-path is retired, so such a query must issue only the semantic POST
+// and nothing else.
+func TestSearchFacts_SlashQueryDoesNotTriggerFactFuzzy(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/search":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["query"] != "architecture/auth-model" {
+				t.Errorf("query=%v, want 'architecture/auth-model'", body["query"])
+			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"success": true,
 				"data": map[string]any{
 					"facts": []map[string]any{
 						{
-							"id":       "fact-semantic",
-							"fact":     "semantic-only hit",
-							"score":    0.95,
-							"metadata": map[string]any{},
-						},
-					},
-				},
-			})
-		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
-			fuzzyCalled = true
-			fuzzyTerm = r.URL.Query().Get("fact_fuzzy")
-			json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data": map[string]any{
-					"items": []map[string]any{
-						{
 							"id":       "fact-topic",
 							"fact":     "topic key hit",
+							"score":    0.9,
 							"metadata": map[string]any{metaTopicKey: "architecture/auth-model"},
 						},
 					},
 				},
 			})
+		case strings.Contains(r.URL.RawQuery, "fact_fuzzy"):
+			t.Fatalf("unexpected fact_fuzzy request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -170,103 +161,42 @@ func TestSearchFacts_TopicKeySlashPinsFuzzyHits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchFacts: %v", err)
 	}
-	if !fuzzyCalled {
-		t.Fatal("expected a fact_fuzzy GET request, got none")
-	}
-	if fuzzyTerm != "architecture/auth-model" {
-		t.Fatalf("fact_fuzzy=%q, want 'architecture/auth-model'", fuzzyTerm)
-	}
-	if len(results) != 2 {
-		t.Fatalf("got %d results, want 2 (topic hit + semantic hit)", len(results))
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1 (semantic hit only)", len(results))
 	}
 	if results[0].Content != "topic key hit" {
-		t.Fatalf("results[0].Content=%q, want the fact_fuzzy hit pinned first", results[0].Content)
+		t.Fatalf("Content=%q, want 'topic key hit'", results[0].Content)
 	}
-	if results[1].Content != "semantic-only hit" {
-		t.Fatalf("results[1].Content=%q, want the semantic hit second", results[1].Content)
+	if results[0].SyncID != "fact-topic" {
+		t.Fatalf("SyncID=%q, want fact-topic", results[0].SyncID)
 	}
 }
 
-// TestSearchFacts_FuzzyFailureDegradesToSemanticOnly is the FIX #7 regression:
-// the fact_fuzzy lookup is only a fast-path that pins topic_key hits ahead of
-// the semantic results. When it fails, SearchFacts must NOT discard the
-// already-successful semantic results by returning an error — it degrades to
-// semantic-only (logging to stderr) and returns them.
-func TestSearchFacts_FuzzyFailureDegradesToSemanticOnly(t *testing.T) {
+// TestSearchFacts_MissingTypeScopeMetadataPassesFilter verifies that under
+// the Option A thin adapter (engram no longer stamps engram_type/engram_scope
+// onto a fact at save time), a fact whose metadata lacks those keys is not
+// filtered out just because a caller passed opts.Type/opts.Scope — absence of
+// the metadata is treated as "undecided", not "mismatch".
+func TestSearchFacts_MissingTypeScopeMetadataPassesFilter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/search":
-			json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data": map[string]any{
-					"facts": []map[string]any{
-						{"id": "fact-semantic", "fact": "semantic hit", "score": 0.9, "metadata": map[string]any{}},
-					},
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"facts": []map[string]any{
+					{"id": "fact-1", "fact": "no metadata at all", "score": 0.7, "metadata": map[string]any{}},
 				},
-			})
-		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
-			// Fuzzy lookup fails hard.
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": map[string]any{"code": "BOOM", "message": "fuzzy exploded"}})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
+			},
+		})
 	}))
 	defer srv.Close()
 
 	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
 
-	// query contains "/" so the fuzzy fast-path is attempted (and fails).
-	results, err := c.SearchFacts("ws-1", "proj-1", "actor-1", "architecture/auth-model", store.SearchOptions{})
-	if err != nil {
-		t.Fatalf("SearchFacts: %v, want nil (fuzzy failure must degrade to semantic-only, not error)", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("got %d results, want 1 (the semantic hit must survive the fuzzy failure)", len(results))
-	}
-	if results[0].Content != "semantic hit" {
-		t.Fatalf("Content=%q, want 'semantic hit'", results[0].Content)
-	}
-}
-
-// TestSearchFacts_DedupesOverlapBetweenFuzzyAndSemantic verifies that when
-// the same fact id appears in both the fact_fuzzy substring hits and the
-// semantic search results, it is kept exactly once — pinned at its fuzzy
-// position, not duplicated.
-func TestSearchFacts_DedupesOverlapBetweenFuzzyAndSemantic(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/search":
-			json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data": map[string]any{
-					"facts": []map[string]any{
-						{"id": "fact-shared", "fact": "shared", "score": 0.5, "metadata": map[string]any{}},
-					},
-				},
-			})
-		case r.Method == "GET":
-			json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data": map[string]any{
-					"items": []map[string]any{
-						{"id": "fact-shared", "fact": "shared", "metadata": map[string]any{}},
-					},
-				},
-			})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer srv.Close()
-
-	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
-
-	results, err := c.SearchFacts("ws-1", "proj-1", "actor-1", "architecture/auth-model", store.SearchOptions{})
+	results, err := c.SearchFacts("ws-1", "proj-1", "actor-1", "anything", store.SearchOptions{Type: "decision", Scope: "global"})
 	if err != nil {
 		t.Fatalf("SearchFacts: %v", err)
 	}
 	if len(results) != 1 {
-		t.Fatalf("got %d results, want 1 (deduped by fact id)", len(results))
+		t.Fatalf("got %d results, want 1 (missing metadata must not be filtered out)", len(results))
 	}
 }
