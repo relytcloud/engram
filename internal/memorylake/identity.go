@@ -89,6 +89,28 @@ func (c *Client) EnsureProject(ws, name string) (string, error) {
 	}
 	body := map[string]any{"custom_id": name, "name": name}
 	if err := c.doJSON("POST", "/api/v3/workspaces/"+ws+"/projects", body, &created); err != nil {
+		// Concurrent creation: another process/machine created a project with
+		// this custom_id between our list above and this POST. Project create
+		// is NOT idempotent — a duplicate custom_id returns 409
+		// CUSTOM_ID_CONFLICT rather than the existing row. Recover by
+		// re-listing and returning the id the winner created, so the losing
+		// caller still routes to the shared MemoryLake project instead of
+		// silently falling back to local SQLite.
+		if apiErr, ok := err.(*APIError); !ok || apiErr.Code != "CUSTOM_ID_CONFLICT" {
+			return "", err
+		}
+		items, listErr := c.listAllProjects(ws)
+		if listErr != nil {
+			return "", listErr
+		}
+		for _, p := range items {
+			if p.CustomID == name || p.Name == name {
+				return p.ID, nil
+			}
+		}
+		// Conflict reported but the project isn't in the list (e.g. a race
+		// with a delete, or a list endpoint not yet reflecting the write) —
+		// surface the original conflict rather than a confusing not-found.
 		return "", err
 	}
 	return created.ID, nil

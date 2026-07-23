@@ -392,6 +392,57 @@ func TestEnsureProject_PaginatesAcrossPages(t *testing.T) {
 // carrying that custom_id (here, only on page 2), then bind that recovered
 // id to the workspace exactly as it would for a freshly created actor —
 // never creating a second, orphaned actor for the same identity.
+func TestEnsureProject_CustomIDConflict_RecoversWinnerID(t *testing.T) {
+	// Simulates concurrent first-use of the same project from two machines:
+	// our list finds nothing, our POST loses the race and gets 409
+	// CUSTOM_ID_CONFLICT, and we must recover the winner's project id from a
+	// re-list rather than erroring (which would fall back to local SQLite and
+	// split-brain the losing caller's write).
+	type project struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		CustomID string `json:"custom_id"`
+	}
+	var visible []project
+	var getCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			atomic.AddInt32(&getCount, 1)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"items": visible},
+			})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			// The concurrent winner already created it; make it visible to the
+			// recovery re-list, then reject this POST with the real 409 shape.
+			visible = []project{{ID: "proj-winner", Name: "phoenix", CustomID: "phoenix"}}
+			w.WriteHeader(409)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success":    false,
+				"message":    "custom_id 'phoenix' already exists",
+				"error_code": "CUSTOM_ID_CONFLICT",
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
+	id, err := c.EnsureProject("ws-1", "phoenix")
+	if err != nil {
+		t.Fatalf("EnsureProject after 409 conflict should recover, got error: %v", err)
+	}
+	if id != "proj-winner" {
+		t.Fatalf("id=%q, want proj-winner (recovered from post-conflict re-list)", id)
+	}
+	if atomic.LoadInt32(&getCount) < 2 {
+		t.Fatalf("want a second GET to recover the winner's id, got %d GET(s)", getCount)
+	}
+}
+
 func TestEnsureActor_CustomIDConflict_RecoversExistingActorID(t *testing.T) {
 	var actorPosts, actorGets, bindPosts int32
 	var boundActorID string
