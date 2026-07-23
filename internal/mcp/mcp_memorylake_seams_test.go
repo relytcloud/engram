@@ -39,9 +39,34 @@ type memoryLakeStubBackend struct {
 
 	promptCalls  int
 	promptParams []store.AddPromptParams
+
+	// skipCandidateGeneration controls SkipsCandidateGeneration()'s return
+	// value below (default false, matching sqliteBackend's absence of the
+	// method — see candidateOptOut's doc comment in backend.go). Tests that
+	// want to exercise the MemoryLake-style skip-candidates path set this to
+	// true. findCandidatesCalls counts every FindCandidates invocation so
+	// those tests can assert handleSave never reaches it when skipping.
+	skipCandidateGeneration bool
+	findCandidatesCalls     int
 }
 
 var _ MemoryBackend = (*memoryLakeStubBackend)(nil)
+
+// var _ candidateOptOut = (*memoryLakeStubBackend)(nil) documents that this
+// stub always implements candidateOptOut (SkipsCandidateGeneration always
+// exists as a method below; its return value is merely field-controlled,
+// defaulting to false so every pre-existing test using this stub keeps
+// behaving exactly as before).
+var _ candidateOptOut = (*memoryLakeStubBackend)(nil)
+
+// SkipsCandidateGeneration reports skipCandidateGeneration. Unlike the real
+// *memorylake.MemoryLakeBackend (which always returns true), this stub
+// defaults to false so it can also double as a MemoryLake-shaped backend that
+// does NOT opt out of candidate generation, for tests that don't care about
+// this seam.
+func (m *memoryLakeStubBackend) SkipsCandidateGeneration() bool {
+	return m.skipCandidateGeneration
+}
 
 func (m *memoryLakeStubBackend) Stats() (*store.Stats, error) {
 	m.statsCalls++
@@ -100,6 +125,7 @@ func (m *memoryLakeStubBackend) MarkReviewed(syncID string) error {
 }
 
 func (m *memoryLakeStubBackend) FindCandidates(savedSyncID string, opts store.CandidateOptions) ([]store.Candidate, error) {
+	m.findCandidatesCalls++
 	return m.memoryLakeSyncBackend().FindCandidates(savedSyncID, opts)
 }
 
@@ -325,6 +351,110 @@ func TestHandleDoctorMemoryLakeBackendUnknownCheckIsNotApplicableNotHardError(t 
 	first := checks[0].(map[string]any)
 	if first["reason_code"] != "check_not_applicable_memorylake" {
 		t.Fatalf("expected check_not_applicable_memorylake reason code, got %v", first)
+	}
+}
+
+// TestHandleSaveSkipsCandidateGenerationForCandidateOptOutBackend is the
+// RED->GREEN case for the candidateOptOut seam (backend.go): mem_save must
+// skip FindCandidates entirely — and omit judgment_required/candidates from
+// the response envelope entirely, not merely report them false/empty — for
+// any backend whose SkipsCandidateGeneration() returns true. This is the
+// shape *memorylake.MemoryLakeBackend presents (see conflict.go), simulated
+// here via memoryLakeStubBackend with skipCandidateGeneration set.
+//
+// Observation B below deliberately overlaps observation A's title/content
+// closely enough that, on the SQLite path, it always produces at least one
+// FindCandidates hit (this is the same fixture TestConflictLoop_SaveJudgeSearch
+// uses to prove the opposite, SQLite-does-generate-candidates behavior) — so
+// a passing test here is not vacuous: it proves the skip actively suppressed
+// a real would-be candidate, not merely that none happened to exist.
+func TestHandleSaveSkipsCandidateGenerationForCandidateOptOutBackend(t *testing.T) {
+	stub := newMemoryLakeStubBackend(t)
+	stub.skipCandidateGeneration = true
+	if err := stub.Store.CreateSession("s-ml-optout", "mlproj", "/work/mlproj"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleSave(StaticSelector(stub), MCPConfig{}, activity)
+
+	resA, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "We use sessions for authentication middleware",
+		"content": "Session-based auth in the middleware layer keeps state server-side",
+		"type":    "architecture",
+		"project": "mlproj",
+	}}})
+	if err != nil {
+		t.Fatalf("save A: %v", err)
+	}
+	if resA.IsError {
+		t.Fatalf("save A unexpected error: %s", callResultText(t, resA))
+	}
+
+	resB, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Switched from sessions to JWT authentication",
+		"content": "JWT tokens replace session-based auth for better scalability across services",
+		"type":    "architecture",
+		"project": "mlproj",
+	}}})
+	if err != nil {
+		t.Fatalf("save B: %v", err)
+	}
+	if resB.IsError {
+		t.Fatalf("save B unexpected error: %s", callResultText(t, resB))
+	}
+
+	if stub.findCandidatesCalls != 0 {
+		t.Fatalf("expected FindCandidates to never be called for a candidateOptOut backend, got %d calls", stub.findCandidatesCalls)
+	}
+
+	envB := parseEnvelope(t, "candidateOptOut save B", resB)
+	if _, present := envB["judgment_required"]; present {
+		t.Fatalf("expected envelope to omit judgment_required entirely for a candidateOptOut backend, got %v", envB["judgment_required"])
+	}
+	if _, present := envB["candidates"]; present {
+		t.Fatalf("expected envelope to omit candidates entirely for a candidateOptOut backend, got %v", envB["candidates"])
+	}
+}
+
+// TestHandleSaveGeneratesCandidatesWhenBackendDoesNotOptOut is the contrast
+// case for the test above: memoryLakeStubBackend without
+// skipCandidateGeneration set (the zero value, matching sqliteBackend's
+// absence of the candidateOptOut method) must still drive handleSave through
+// the normal FindCandidates path — proving the opt-out is what suppresses
+// candidate generation above, not something specific to the stub type itself.
+func TestHandleSaveGeneratesCandidatesWhenBackendDoesNotOptOut(t *testing.T) {
+	stub := newMemoryLakeStubBackend(t)
+	if err := stub.Store.CreateSession("s-ml-noopt", "mlproj", "/work/mlproj"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	activity := NewSessionActivity(10 * time.Minute)
+	h := handleSave(StaticSelector(stub), MCPConfig{}, activity)
+
+	if _, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "We use sessions for authentication middleware",
+		"content": "Session-based auth in the middleware layer keeps state server-side",
+		"type":    "architecture",
+		"project": "mlproj",
+	}}}); err != nil {
+		t.Fatalf("save A: %v", err)
+	}
+
+	resB, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
+		"title":   "Switched from sessions to JWT authentication",
+		"content": "JWT tokens replace session-based auth for better scalability across services",
+		"type":    "architecture",
+		"project": "mlproj",
+	}}})
+	if err != nil {
+		t.Fatalf("save B: %v", err)
+	}
+
+	if stub.findCandidatesCalls == 0 {
+		t.Fatal("expected FindCandidates to be called for a backend that does not opt out")
+	}
+	envB := parseEnvelope(t, "non-opt-out save B", resB)
+	if jr, _ := envB["judgment_required"].(bool); !jr {
+		t.Fatalf("expected judgment_required=true when the backend does not opt out, envelope=%v", envB)
 	}
 }
 

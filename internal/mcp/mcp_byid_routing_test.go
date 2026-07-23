@@ -18,16 +18,17 @@ package mcp
 // while remaining a distinct Go type from *store.Store — the same shape a
 // real internal/memorylake.MemoryLakeBackend presents to these handlers.
 //
-// factForID (internal/memorylake) is what makes routing-by-detected-project
-// safe against a real cross-project id collision: the process-global IDMap
-// binds every id to the project it was minted for, so an id from a
-// different project reads as not-found on the wrong backend rather than
-// leaking (see memorylake.MemoryLakeBackend.factForID and its own tests in
-// internal/memorylake). At this package's level — where the two backends are
-// simply two independent *store.Store instances rather than one shared
-// IDMap — the equivalent, observable guarantee is: an id that only exists in
-// one backend's store is not found when routed to the other backend. That is
-// exactly what TestByIDHandlers_ForeignIDNotFoundAcrossBackends checks.
+// Real *memorylake.MemoryLakeBackend is what makes routing-by-detected-project
+// safe against a real cross-project id collision: getFact/patchFact/
+// forgetFact (internal/memorylake/backend.go) each scope their request URL to
+// that backend's own bound project (.../projects/{b.projID}/...), so an id
+// from a different project simply 404s server-side on the wrong backend
+// rather than leaking (see memorylake's own tests). At this package's level —
+// where the two backends are simply two independent *store.Store instances
+// rather than one shared MemoryLake tenant — the equivalent, observable
+// guarantee is: an id that only exists in one backend's store is not found
+// when routed to the other backend. That is exactly what
+// TestByIDHandlers_ForeignIDNotFoundAcrossBackends checks.
 
 import (
 	"context"

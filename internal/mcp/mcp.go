@@ -1864,10 +1864,11 @@ func handleTimeline(sel BackendSelector, cfg MCPConfig) server.ToolHandlerFunc {
 		// Timeline is addressed by observation_id, but that id may belong to a
 		// MemoryLake-enabled project, so the resolved project also selects the
 		// backend below (not always the project-unaware default) — otherwise
-		// a MemoryLake observation id could never be found. factForID's
-		// project guard (see resolveByIDBackend's doc comment on the sibling
-		// by-id handlers) means a mismatched id still just reads as
-		// not-found, never a cross-project leak.
+		// a MemoryLake observation id could never be found. Each MemoryLake
+		// fact request is itself scoped to that backend's own project (see
+		// resolveByIDBackend's doc comment on the sibling by-id handlers), so
+		// a mismatched id still just reads as not-found, never a cross-project
+		// leak.
 		detRes, err := resolveReadProjectWithProcessOverride(sel, projectOverride, cfg.DefaultProject)
 		if err != nil {
 			var upe *unknownProjectError
@@ -2902,12 +2903,12 @@ func resolveReadProjectWithProcessOverride(sel BackendSelector, override, defaul
 //
 // Safety: this only affects WHICH backend answers the id lookup, never
 // whether it can succeed against the wrong project. Every affected
-// MemoryLakeBackend method resolves an id through factForID first, which
-// binds the id to the project it was minted for; an id belonging to a
-// different project reads as not-found on the wrong backend rather than
-// leaking (see memorylake.MemoryLakeBackend.factForID). So misdetecting the
-// project here can at worst turn a real hit into a false not-found — it can
-// never return or mutate another project's data.
+// MemoryLakeBackend method (getFact/patchFact/forgetFact, see
+// internal/memorylake/backend.go) scopes its request URL to that backend's
+// own bound project (.../projects/{b.projID}/...); an id belonging to a
+// different project simply 404s server-side rather than leaking. So
+// misdetecting the project here can at worst turn a real hit into a false
+// not-found — it can never return or mutate another project's data.
 //
 // When detection fails (ambiguous cwd, detection error, ...) this degrades to
 // the project-unaware default backend (sel("")) instead of failing the call

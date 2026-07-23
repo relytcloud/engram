@@ -113,6 +113,29 @@ func newConflictBackend(t *testing.T, s *conflictTestServer) *MemoryLakeBackend 
 	return newTestBackend(t, srv.URL)
 }
 
+// ─── SkipsCandidateGeneration ─────────────────────────────────────────────────
+
+// TestSkipsCandidateGeneration_AlwaysTrue locks in the candidateOptOut
+// contract *MemoryLakeBackend advertises to internal/mcp (see backend.go's
+// candidateOptOut doc comment): mem_save must never call FindCandidates or
+// surface judgment_required/candidates for a MemoryLake-backed project,
+// because mem0 already owns dedup/conflict detection asynchronously
+// downstream of a save. This must hold unconditionally — no field on the
+// backend flips it off — so a zero-value struct is enough to prove it, plus
+// a fully wired instance (via NewBackend's construction path) for good
+// measure.
+func TestSkipsCandidateGeneration_AlwaysTrue(t *testing.T) {
+	if got := (&MemoryLakeBackend{}).SkipsCandidateGeneration(); !got {
+		t.Fatalf("zero-value MemoryLakeBackend.SkipsCandidateGeneration() = %v, want true", got)
+	}
+
+	s := newConflictTestServer()
+	b := newConflictBackend(t, s)
+	if got := b.SkipsCandidateGeneration(); !got {
+		t.Fatalf("wired MemoryLakeBackend.SkipsCandidateGeneration() = %v, want true", got)
+	}
+}
+
 // ─── FindCandidates ───────────────────────────────────────────────────────────
 
 func TestFindCandidates_MapsUnresolvedConflictToCandidate(t *testing.T) {

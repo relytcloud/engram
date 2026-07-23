@@ -15,7 +15,11 @@ import (
 // conversation content, so engram's write path is always "ensure a
 // conversation exists, then append the observation's content as a message to
 // it" and lets MemoryLake's own extraction pipeline turn that message into a
-// fact asynchronously (see BackfillFacts for the other half of that flow).
+// fact asynchronously, out of band. engram does not poll or backfill that
+// extraction result back onto the observation it just appended — mem_save
+// returns right after this append (see mcp.go's handleSave), and any
+// resulting fact is only observed later via the normal read paths (Search,
+// Timeline, FormatContext, ...).
 //
 // convCustomID identifies the conversation (callers typically pass something
 // stable per engram session, e.g. the session ID) — AppendObservation ensures
@@ -99,28 +103,6 @@ func contentHash(s string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-// listFacts fetches the facts MemoryLake currently has recorded for project
-// projID within workspace ws.
-//
-// This intentionally reads only the first page (page_size=200) and is used
-// exclusively by the write path (AddObservation's pre-append snapshot,
-// BackfillFacts' poll loop): both need a fast, frequent read rather than an
-// exhaustive one, and a project accumulating >200 unbackfilled/stale facts
-// between polls is already outside the bounds this backend is designed for.
-// Read-side aggregate methods (Stats, CountObservationsForProject, Timeline,
-// FormatContext) need the *complete* fact list to be accurate and use
-// listAllFacts instead. See spec §11.5.
-func (c *Client) listFacts(ws, projID string) ([]Fact, error) {
-	var out struct {
-		Items []Fact `json:"items"`
-	}
-	path := "/api/v3/workspaces/" + ws + "/projects/" + projID + "/memories/facts?page_size=200"
-	if err := c.doJSON("GET", path, nil, &out); err != nil {
-		return nil, err
-	}
-	return out.Items, nil
-}
-
 // maxListAllFactsPages bounds how many pages listAllFacts will follow via
 // continuation_token before giving up. At the fixed page_size=200 this caps a
 // single call at 200,000 facts — generously beyond any project this backend
@@ -185,8 +167,7 @@ func listAllPages[T any](c *Client, maxPages int, what string, pathForPage func(
 // server stops returning one or maxListAllFactsPages is reached (see its doc
 // comment) — whichever comes first. Used by read/aggregate paths that must
 // count or enumerate the whole project (Stats, CountObservationsForProject,
-// Timeline, FormatContext) rather than the bounded, single-page listFacts
-// used by the write path.
+// Timeline, FormatContext).
 func (c *Client) listAllFacts(ws, projID string) ([]Fact, error) {
 	what := fmt.Sprintf("listAllFacts for project %s (ws %s)", projID, ws)
 	return listAllPages[Fact](c, maxListAllFactsPages, what, func(token string) string {
