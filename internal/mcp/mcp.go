@@ -208,6 +208,15 @@ DEFERRED TOOLS (use ToolSearch when needed):
 
 PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.
 
+## MemoryLake-backed projects
+
+If the current project uses the MemoryLake backend (check with "engram memorylake status"),
+dedup, updating existing memories, and merging contradictions are handled AUTOMATICALLY by the
+backend — you only need mem_save / mem_search / mem_context; you do NOT need to call mem_update,
+mem_judge, or mem_compare yourself (mem_save never returns judgment_required there, so the conflict
+loop below simply won't trigger). Projects on the default SQLite backend are unaffected — keep
+following the topic-key/upsert and conflict-surfacing rules below.
+
 ## CONFLICT SURFACING — when mem_save returns candidates
 
 After every mem_save call, check the response envelope for judgment_required.
