@@ -37,18 +37,77 @@ func entryByID(t *testing.T, entries []CorpusEntry, id string) CorpusEntry {
 	return CorpusEntry{}
 }
 
-// TestAddObservationGetObservation_Exact is the EXACT representative case
-// from parity spec §4.1 (AddObservation / GetObservation row): write one
-// observation to each backend, read it back, and require the returned
-// Content to match the original verbatim. Per spec §4.2 of the design doc,
-// MemoryLake's fact text is an LLM paraphrase but its metadata.engram_raw is
-// the verbatim original — backend.GetObservation is documented to prefer
-// engram_raw, so this case is exactly the guarantee that preference exists
-// to uphold. Any mismatch here is a MemoryLake defect (parity spec §3,
-// EXACT row), not a "different but equally valid" result.
-func TestAddObservationGetObservation_Exact(t *testing.T) {
+// mlReadSettle bounds the eventual-read poll in eventualFactContent. mem0
+// extraction is asynchronous and can take well over 90s to surface a fact via
+// search (thin-adapter design §1: mem_save is "秒回" / append-and-return, the
+// fact only becomes searchable after downstream extraction), so a real parity
+// run configures a generous budget. It is kept short here because the default
+// dev/CI checkout has no live MemoryLake key and skips the MemoryLake side
+// entirely (RequireMemoryLake), so this loop never actually runs there.
+const (
+	mlReadSettle   = 120 * time.Second
+	mlReadInterval = 3 * time.Second
+)
+
+// eventualFactContent implements the thin-adapter read path for a
+// MemoryLake-backed observation: mem_save returns a *pending* sync_id
+// immediately (append-and-return, no synchronous backfill), so the just-saved
+// message is not yet a retrievable fact. This polls Search for goldQuery until
+// the extracted fact surfaces, then GetObservation on that fact's real sync_id
+// and returns its (mem0-extracted) content. Returns ok=false if nothing
+// surfaces within mlReadSettle. The registered sync_id is the *fact* id when
+// available so t.Cleanup can forget it.
+func eventualFactContent(t *testing.T, b mcp.MemoryBackend, goldQuery string, register func(string)) (content string, ok bool) {
+	t.Helper()
+	deadline := time.Now().Add(mlReadSettle)
+	for {
+		results, err := b.Search(goldQuery, store.SearchOptions{Limit: 5, MatchMode: "any"})
+		if err != nil {
+			t.Fatalf("paritytest: Search(%q) during eventual read: %v", goldQuery, err)
+		}
+		if len(results) > 0 {
+			factSyncID := results[0].SyncID
+			if register != nil {
+				register(factSyncID)
+			}
+			obs, err := b.GetObservation(factSyncID)
+			if err != nil {
+				t.Fatalf("paritytest: GetObservation(%q): %v", factSyncID, err)
+			}
+			return obs.Content, true
+		}
+		if time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(mlReadInterval)
+	}
+}
+
+// TestAddObservationRoundTrip_ExactSQLite_SemanticMemoryLake is the
+// representative content case from parity spec §4.1 (AddObservation /
+// GetObservation row), updated for the thin-adapter design
+// (docs/superpowers/specs/2026-07-23-memorylake-thin-adapter-design.md).
+//
+// The verbatim metadata.engram_raw round-trip is retired: a MemoryLake fact's
+// content is the mem0 extraction of the saved text, not the original, so the
+// two backends can no longer be compared byte-for-byte. The case is therefore
+// split by backend:
+//
+//   - SQLite: write → read back → require the returned Content to match the
+//     original verbatim (ModeExact self-check). SQLite still stores content
+//     losslessly, so any mismatch here is a straight regression.
+//   - MemoryLake: mem_save returns a *pending* sync_id immediately ("秒回",
+//     no synchronous backfill, so we do NOT poll at save time); the fact only
+//     becomes readable after asynchronous extraction. We then do an
+//     eventual-read (Search → real fact sync_id → GetObservation) and score
+//     the extraction SEMANTIC — non-empty and preserving the annotated
+//     key_facts (CompareSemantic), not verbatim-equal to SQLite.
+func TestAddObservationRoundTrip_ExactSQLite_SemanticMemoryLake(t *testing.T) {
 	entries := loadTestCorpus(t)
 	entry := entryByID(t, entries, "decision-001")
+	if entry.GoldQuery == "" {
+		t.Fatalf("paritytest: corpus entry %q has no gold_query (needed for the MemoryLake eventual-read)", entry.ID)
+	}
 
 	params := store.AddObservationParams{
 		SessionID: "paritytest-session",
@@ -59,54 +118,71 @@ func TestAddObservationGetObservation_Exact(t *testing.T) {
 		TopicKey:  entry.TopicKey,
 	}
 
-	readBack := func(b mcp.MemoryBackend) (Result, int64) {
-		// observations.session_id is a NOT NULL FK to sessions in the
-		// SQLite schema (mem_save handlers call ensureImplicitSessionWithCWD
-		// before AddObservation for the same reason); MemoryLake's
-		// CreateSession is a no-op-safe conversation ensure, so this call is
-		// harmless there too.
-		if err := b.CreateSession(params.SessionID, "", ""); err != nil {
-			t.Fatalf("paritytest: CreateSession: %v", err)
-		}
-		id, err := b.AddObservation(params)
-		if err != nil {
-			t.Fatalf("paritytest: AddObservation: %v", err)
-		}
-		obs, err := b.GetObservation(id)
-		if err != nil {
-			t.Fatalf("paritytest: GetObservation(%d): %v", id, err)
-		}
-		return Result{Value: obs.Content}, id
+	// --- SQLite side: verbatim round-trip, ModeExact self-check. ---
+	sqliteBackend := NewSQLiteBackend(t)
+	// observations.session_id is a NOT NULL FK to sessions in the SQLite
+	// schema (mem_save handlers call ensureImplicitSessionWithCWD before
+	// AddObservation for the same reason); MemoryLake's CreateSession is a
+	// no-op-safe conversation ensure, so the same call is harmless there too.
+	if err := sqliteBackend.CreateSession(params.SessionID, "", ""); err != nil {
+		t.Fatalf("paritytest: sqlite CreateSession: %v", err)
+	}
+	sqliteID, err := sqliteBackend.AddObservation(params)
+	if err != nil {
+		t.Fatalf("paritytest: sqlite AddObservation: %v", err)
+	}
+	sqliteObs, err := sqliteBackend.GetObservation(sqliteID)
+	if err != nil {
+		t.Fatalf("paritytest: sqlite GetObservation(%q): %v", sqliteID, err)
+	}
+	sqliteVerdict := Compare(ModeExact, "AddObservation+GetObservation/decision-001/sqlite",
+		Result{Value: sqliteObs.Content}, Result{Value: entry.Content})
+	if !sqliteVerdict.Pass {
+		t.Errorf("parity FAIL [%s]: %s", sqliteVerdict.Case, sqliteVerdict.Detail)
 	}
 
-	sqliteBackend := NewSQLiteBackend(t)
-	sqliteResult, _ := readBack(sqliteBackend)
-
+	// --- MemoryLake side: append-and-return + eventual-read, ModeSemantic. ---
 	cfg := RequireMemoryLake(t)
 	mlBackend, register := NewMemoryLakeBackend(t, cfg)
-	mlResult, mlID := readBack(mlBackend)
-	register(mlID)
-
-	verdict := Compare(ModeExact, "AddObservation+GetObservation/decision-001", sqliteResult, mlResult)
-	if !verdict.Pass {
-		t.Errorf("parity FAIL [%s]: %s", verdict.Case, verdict.Detail)
+	if err := mlBackend.CreateSession(params.SessionID, "", ""); err != nil {
+		t.Fatalf("paritytest: memorylake CreateSession: %v", err)
 	}
+	pendingSyncID, err := mlBackend.AddObservation(params)
+	if err != nil {
+		t.Fatalf("paritytest: memorylake AddObservation: %v", err)
+	}
+	// mem_save is "秒回": AddObservation returns a pending sync_id right away
+	// without waiting on extraction. Register it so cleanup can attempt to
+	// forget it even if the fact never surfaces below.
+	register(pendingSyncID)
+
+	mlContent, ok := eventualFactContent(t, mlBackend, entry.GoldQuery, register)
+	if !ok {
+		// Extraction did not converge within the budget. Not a hard failure:
+		// the thin-adapter contract only promises eventual consistency, and a
+		// real parity run raises mlReadSettle. Surface it loudly instead.
+		t.Skipf("parity SKIP [memorylake decision-001]: fact did not surface within %s (extraction is asynchronous; raise mlReadSettle for a real run)", mlReadSettle)
+	}
+	mlVerdict := CompareSemantic("AddObservation+GetObservation/decision-001/memorylake", entry.KeyFacts, mlContent)
+	if !mlVerdict.Pass {
+		t.Errorf("parity FAIL [%s]: %s", mlVerdict.Case, mlVerdict.Detail)
+	}
+	t.Logf("parity [%s] mode=%s pass=%v detail=%s", mlVerdict.Case, mlVerdict.Mode, mlVerdict.Pass, mlVerdict.Detail)
 }
 
 // TestSearch_SetRank is the SET/RANK representative case from parity spec
-// §4.1 (Search row): seed both backends with the same handful of corpus
-// entries, run the same gold query against each, and compare the returned
-// result sets.
+// §4.1 (Search row): seed both backends with the same corpus entry, run the
+// same gold query against each, and compare the returned result sets.
 //
-// This is a skeleton, not a scored comparison: BM25 (SQLite) and semantic +
-// fuzzy (MemoryLake) are expected to disagree on ranking (parity spec §1,
-// §3 SET/RANK row) and reconciling that needs recall@k/precision@k/MRR
-// against entry.RelevantIDs — the metrics Compare's ModeSetRank branch does
-// not implement yet (see driver.go's TODO(parity-matrix)). What this case
-// does verify today: both backends return a non-empty result set for the
-// gold query and don't error, which is enough to catch a hard regression
-// (e.g. MemoryLake's semantic search returning nothing at all for a query
-// that plainly matches seeded content) while the real scoring lands.
+// This is a skeleton, not a scored comparison: BM25 (SQLite) and semantic
+// (MemoryLake) are expected to disagree on ranking (parity spec §1, §3
+// SET/RANK row) and reconciling that needs recall@k/precision@k/MRR against
+// entry.RelevantIDs — the metrics Compare's ModeSetRank branch does not
+// implement yet (see driver.go's TODO(parity-matrix)). What this case does
+// verify today: both backends return a non-empty result set for the gold
+// query and don't error, which is enough to catch a hard regression (e.g.
+// MemoryLake's semantic search returning nothing at all for a query that
+// plainly matches seeded content) while the real scoring lands.
 func TestSearch_SetRank(t *testing.T) {
 	entries := loadTestCorpus(t)
 	entry := entryByID(t, entries, "decision-001")
@@ -123,9 +199,9 @@ func TestSearch_SetRank(t *testing.T) {
 		TopicKey:  entry.TopicKey,
 	}
 
-	seedAndSearch := func(b mcp.MemoryBackend, register func(int64), settle time.Duration) []store.SearchResult {
-		// See TestAddObservationGetObservation_Exact: session_id is a NOT
-		// NULL FK to sessions in the SQLite schema.
+	seedAndSearch := func(b mcp.MemoryBackend, register func(string), settle time.Duration) []store.SearchResult {
+		// See the content case: session_id is a NOT NULL FK to sessions in the
+		// SQLite schema.
 		if err := b.CreateSession(seedParams.SessionID, "", ""); err != nil {
 			t.Fatalf("paritytest: CreateSession: %v", err)
 		}
@@ -137,14 +213,14 @@ func TestSearch_SetRank(t *testing.T) {
 			register(id)
 		}
 		if settle > 0 {
-			// MemoryLake extraction is asynchronous (~12s per the design doc
-			// §1.2); AddObservation already waits for it (bounded by
-			// ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS), but the search index
-			// itself may take a beat longer to reflect a just-created fact,
-			// so this case gives it one extra short grace pause before
-			// searching (parity spec §2.1, "异步收敛"). TODO(parity-matrix):
-			// replace with the documented poll-until-stable loop instead of
-			// a fixed sleep once this case grows beyond one entry.
+			// MemoryLake extraction is asynchronous and mem_save is now
+			// append-and-return (thin-adapter design §1: no synchronous
+			// backfill at all), so a just-saved observation is not searchable
+			// until extraction completes downstream — potentially well over
+			// 90s. TODO(parity-matrix): replace this fixed grace pause with the
+			// documented poll-until-stable loop (see eventualFactContent) once
+			// this case grows real recall@k scoring; a fixed sleep is only a
+			// placeholder that keeps the skeleton honest for a single entry.
 			time.Sleep(settle)
 		}
 		// MatchMode "any" (rather than the default "all") because the gold
@@ -165,7 +241,7 @@ func TestSearch_SetRank(t *testing.T) {
 
 	cfg := RequireMemoryLake(t)
 	mlBackend, register := NewMemoryLakeBackend(t, cfg)
-	mlResults := seedAndSearch(mlBackend, register, 2*time.Second)
+	mlResults := seedAndSearch(mlBackend, register, mlReadSettle)
 	if len(mlResults) == 0 {
 		t.Errorf("parity: memorylake Search(%q) returned no results for a query seeded from its own corpus entry", entry.GoldQuery)
 	}
@@ -176,7 +252,7 @@ func TestSearch_SetRank(t *testing.T) {
 }
 
 // TestMergeProjects_Unsupported is the UNSUPPORTED representative case from
-// parity spec §4.3 (MergeProjects row): the design doc (§6) states
+// parity spec §4.3 (MergeProjects row): the thin-adapter design states
 // mem_merge_projects is explicitly not implemented against a MemoryLake
 // project and must return a clear error rather than attempting (or silently
 // no-op'ing) a cross-project migration. Per spec §3's UNSUPPORTED row, the

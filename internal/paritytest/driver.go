@@ -33,11 +33,18 @@
 // The parity spec's §4 matrix lists ~20 MemoryBackend methods x >=3 cases
 // each. This package wires the driver plus a small number of representative
 // cases (see parity_test.go) covering the two ends of the compare-mode
-// spectrum: an EXACT case (verbatim content round-trip, where any
-// disagreement is a MemoryLake defect by definition) and a SET/RANK case
-// (Search, where disagreement is expected and must be scored against gold
-// annotations rather than asserted equal). The remaining matrix rows are
-// tracked as follow-up:
+// spectrum. NOTE: under the thin-adapter design
+// (docs/superpowers/specs/2026-07-23-memorylake-thin-adapter-design.md) the
+// verbatim `metadata.engram_raw` round-trip is retired — a MemoryLake fact's
+// content is now the mem0 extraction, not the original text — so the former
+// cross-backend EXACT content comparison no longer holds. The representative
+// content case is therefore split: the SQLite side still round-trips
+// verbatim (ModeExact, self-check against the original), while the MemoryLake
+// side is scored SEMANTIC (non-empty extraction that preserves the annotated
+// key_facts, via CompareSemantic). The second representative case is a
+// SET/RANK Search case, where disagreement is expected and must be scored
+// against gold annotations rather than asserted equal. The remaining matrix
+// rows are tracked as follow-up:
 //
 //	TODO(parity-matrix): UpdateObservation, DeleteObservation (BEHAVIOR +
 //	  UNSUPPORTED hard-delete), Timeline, FormatContext, Stats/Count
@@ -57,6 +64,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,12 +78,17 @@ import (
 type CompareMode int
 
 const (
-	// ModeExact requires byte-for-byte equality (e.g. GetObservation.Content
-	// sourced from engram_raw). Any difference is a MemoryLake defect.
+	// ModeExact requires byte-for-byte equality. Under the thin-adapter
+	// design this only applies to the SQLite side (a verbatim read-back
+	// self-check against the original content) — the MemoryLake side no
+	// longer stores the original text (engram_raw is retired), so it is
+	// scored SEMANTIC instead. Any EXACT difference on the SQLite path is a
+	// regression.
 	ModeExact CompareMode = iota
-	// ModeSemantic requires an LLM-judge equivalence check against
-	// annotated key_facts (spec §3.1). Not yet wired to a real judge — see
-	// Verdict.
+	// ModeSemantic scores a MemoryLake read-back against annotated key_facts
+	// (spec §3.1). CompareSemantic implements a lightweight token-overlap
+	// stand-in (non-empty extraction that preserves the key_facts) until the
+	// real two-reviewer LLM judge lands — see CompareSemantic and Verdict.
 	ModeSemantic
 	// ModeSetRank compares ranked/unordered result sets against gold
 	// annotations (recall@k, precision@k, MRR, set IoU per spec §3).
@@ -148,13 +161,18 @@ type Verdict struct {
 // equality) since it is the one mode with an objective pass/fail rule that
 // does not need domain-specific scoring or an LLM judge.
 //
-// TODO(parity-matrix): ModeSemantic and ModeSetRank need the LLM-judge
-// protocol (spec §3.1: two independent reviewers + a tiebreaker, scoring
-// 0-5 on completeness and hallucination-freeness) and the recall@k/MRR/IoU
-// metrics respectively; ModeBehavior needs per-method post-condition
-// equality checks; ModeUnsupported needs a per-method "is this the expected
-// degradation error" predicate. Each Case that uses those modes documents,
-// in its own comment, what "compare" is expected to mean until this lands.
+// ModeSemantic is handled by the dedicated CompareSemantic helper (it needs
+// the annotated key_facts, which the two-Result shape here does not carry),
+// not by this function.
+//
+// TODO(parity-matrix): ModeSemantic's CompareSemantic is a token-overlap
+// stand-in for the real LLM-judge protocol (spec §3.1: two independent
+// reviewers + a tiebreaker, scoring 0-5 on completeness and
+// hallucination-freeness); ModeSetRank still needs the recall@k/MRR/IoU
+// metrics; ModeBehavior needs per-method post-condition equality checks;
+// ModeUnsupported needs a per-method "is this the expected degradation error"
+// predicate. Each Case that uses those modes documents, in its own comment,
+// what "compare" is expected to mean until this lands.
 func Compare(mode CompareMode, name string, sqlite, ml Result) Verdict {
 	v := Verdict{Case: name, Mode: mode}
 	switch mode {
@@ -183,6 +201,97 @@ func Compare(mode CompareMode, name string, sqlite, ml Result) Verdict {
 		v.Detail = mode.String() + " comparison is not implemented yet (TODO(parity-matrix))"
 		return v
 	}
+}
+
+// CompareSemantic scores a MemoryLake read-back (mlContent, the mem0
+// extraction of the original observation) against the human-annotated
+// keyFacts for one Case, per parity spec §3.1 and the thin-adapter design
+// (engram_raw retired → no verbatim comparison, only semantic preservation).
+//
+// It is deliberately a lightweight, deterministic stand-in for the real
+// two-reviewer LLM judge (TODO(parity-matrix)): it passes when the extraction
+// is non-empty and preserves a majority of the salient tokens drawn from the
+// annotated key_facts (semanticKeyFactRecall >= semanticPassThreshold). This
+// catches the hard regressions that matter today (empty/garbage extraction,
+// or an extraction that dropped the observation's key facts entirely) without
+// pretending to the precision of an LLM equivalence judge. When keyFacts is
+// empty the bar degrades to "extraction is non-empty".
+func CompareSemantic(name string, keyFacts []string, mlContent string) Verdict {
+	v := Verdict{Case: name, Mode: ModeSemantic, Winner: "memorylake", Metrics: map[string]float64{}}
+	if strings.TrimSpace(mlContent) == "" {
+		v.Pass = false
+		v.Detail = "empty MemoryLake extraction (expected a non-empty semantic fact)"
+		return v
+	}
+	recall := semanticKeyFactRecall(keyFacts, mlContent)
+	v.Metrics["key_fact_token_recall"] = recall
+	if recall >= semanticPassThreshold {
+		v.Pass = true
+		v.Detail = fmt.Sprintf("non-empty extraction preserves key_facts (token recall %.2f >= %.2f)", recall, semanticPassThreshold)
+		return v
+	}
+	v.Pass = false
+	v.Detail = fmt.Sprintf("extraction dropped too many key_facts (token recall %.2f < %.2f): %q", recall, semanticPassThreshold, mlContent)
+	return v
+}
+
+// semanticPassThreshold is the fraction of salient key_fact tokens that must
+// survive into the MemoryLake extraction for CompareSemantic to pass. It is
+// intentionally lenient — mem0 paraphrases and compresses, so the goal is to
+// detect facts being lost entirely, not to demand verbatim retention.
+const semanticPassThreshold = 0.5
+
+// semanticKeyFactRecall returns the fraction of salient tokens (deduplicated
+// across all key_facts) that appear, case-insensitively, in content. Returns
+// 1.0 when there are no key_facts to check (so a non-empty extraction passes
+// by default) and 1.0 when there are key_facts but none yield salient tokens.
+func semanticKeyFactRecall(keyFacts []string, content string) float64 {
+	haystack := strings.ToLower(content)
+	want := map[string]bool{}
+	for _, kf := range keyFacts {
+		for _, tok := range salientTokens(kf) {
+			want[tok] = true
+		}
+	}
+	if len(want) == 0 {
+		return 1.0
+	}
+	hits := 0
+	for tok := range want {
+		if strings.Contains(haystack, tok) {
+			hits++
+		}
+	}
+	return float64(hits) / float64(len(want))
+}
+
+// salientTokens lowercases s and returns its content-bearing tokens: those
+// longer than three characters that are not common English/Spanish stop
+// words, so recall is measured on distinctive terms (identifiers, numbers,
+// domain nouns) rather than filler.
+func salientTokens(s string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r == '.' || r == '/' || r == '_' || r == '-' ||
+			(r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+	var out []string
+	for _, f := range fields {
+		f = strings.Trim(f, "./-_")
+		if len(f) <= 3 || semanticStopWords[f] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// semanticStopWords are short, high-frequency words excluded from
+// salientTokens so key_fact recall is measured on distinctive terms.
+var semanticStopWords = map[string]bool{
+	"the": true, "and": true, "for": true, "with": true, "from": true,
+	"that": true, "this": true, "into": true, "not": true, "are": true,
+	"was": true, "reason": true, "still": true, "para": true, "como": true,
+	"solo": true, "antes": true, "sobre": true, "cuando": true,
 }
 
 // CorpusEntry is one line of testdata/corpus.jsonl: a representative
@@ -280,8 +389,9 @@ func RequireMemoryLake(t *testing.T) memorylake.Config {
 // NewMemoryLakeBackend provisions a throwaway MemoryLake project
 // (engram-parity-<random>) under cfg.Workspace and returns a
 // *memorylake.MemoryLakeBackend bound to it, plus a register func that case
-// bodies call with every observation id they create so t.Cleanup can forget
-// (soft-delete) them afterward — isolation per parity spec §2.1.
+// bodies call with every observation sync_id (fact id string) they create so
+// t.Cleanup can forget (soft-delete) them afterward — isolation per parity
+// spec §2.1.
 //
 // TODO(parity-matrix): the parity spec (§2.1) also calls for deleting the
 // throwaway project itself and unbinding the actor once the case finishes;
@@ -291,7 +401,7 @@ func RequireMemoryLake(t *testing.T) memorylake.Config {
 // (soft-deleting) facts. The throwaway project itself is left behind in the
 // MemoryLake tenant; it is empty of live facts and named distinctly
 // (engram-parity-*) so it is easy to bulk-clean out of band.
-func NewMemoryLakeBackend(t *testing.T, cfg memorylake.Config) (backend *memorylake.MemoryLakeBackend, register func(id int64)) {
+func NewMemoryLakeBackend(t *testing.T, cfg memorylake.Config) (backend *memorylake.MemoryLakeBackend, register func(id string)) {
 	t.Helper()
 	client := memorylake.NewClient(cfg)
 
@@ -306,16 +416,19 @@ func NewMemoryLakeBackend(t *testing.T, cfg memorylake.Config) (backend *memoryl
 		t.Fatalf("paritytest: EnsureProject(%q): %v", projName, err)
 	}
 
-	idmap, err := memorylake.LoadIDMap(filepath.Join(t.TempDir(), "memorylake-idmap.json"))
-	if err != nil {
-		t.Fatalf("paritytest: memorylake.LoadIDMap: %v", err)
-	}
-	backend, err = memorylake.NewBackend(cfg, cfg.Workspace, projID, idmap)
+	// Thin-adapter NewBackend(cfg, ws, projID): the idmap is gone (a
+	// MemoryLake sync_id is the fact id directly, no int64<->id translation
+	// table) and NewBackend resolves the workspace and ensures the actor
+	// internally, so only the workspace *name* and the resolved project id
+	// are passed here.
+	backend, err = memorylake.NewBackend(cfg, cfg.Workspace, projID)
 	if err != nil {
 		t.Fatalf("paritytest: memorylake.NewBackend: %v", err)
 	}
 
-	var createdIDs []int64
+	// Observation ids are now opaque sync_id strings (fact ids), per the
+	// thin-adapter interface contract.
+	var createdIDs []string
 	t.Cleanup(func() {
 		for _, id := range createdIDs {
 			// Best-effort: forgetting is soft-delete, never hard, per
@@ -324,7 +437,7 @@ func NewMemoryLakeBackend(t *testing.T, cfg memorylake.Config) (backend *memoryl
 		}
 	})
 
-	register = func(id int64) { createdIDs = append(createdIDs, id) }
+	register = func(id string) { createdIDs = append(createdIDs, id) }
 	return backend, register
 }
 
