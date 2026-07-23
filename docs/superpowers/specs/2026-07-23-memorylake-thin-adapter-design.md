@@ -69,6 +69,30 @@ AddObservation(…) (string, error)   // 返回不透明 id(见 §4)
 - **sessions/prompts/passive** 的 Engram 语义包装。
 - SQLite 后端(默认)**完整保留**所有原生能力,一字不改(除 id 呈现为字符串)。
 
+## 5.5 MemoryLake 路径:最小工具面 + 精简 agent 协议
+
+**约束前提**:MCP 工具是 SQLite 与 MemoryLake **两个后端共用、全局注册一次**的;默认 SQLite 后端仍需要 update/delete/judge 等显式管理。所以**不删工具**,只做两件事:(a) MemoryLake 路径上把 mem0 已代劳的工具**变薄/退化**;(b) **精简 agent 协议**引导,让 agent 对 MemoryLake 项目回归"save + search + context"核心。
+
+### (a) MemoryLake 路径工具分层
+
+| 层 | 工具 | MemoryLake 路径行为 |
+|---|---|---|
+| **核心(agent 主要用)** | `mem_save` `mem_search` `mem_context` | save 喂对话→mem0 抽取/去重/合并;search 语义召回;context 拉最近+pinned |
+| **显式控制(仍需要)** | `mem_delete`(forget)`mem_get_observation` | mem0 的 FORGET 只对显式遗忘触发,故保留;get 按 fact-id 直取 |
+| **Engram 增量(mem0 没有)** | `mem_review`(衰减)`mem_pin/unpin` `mem_session_*` `mem_save_prompt`/`passive` | 保留;prompt/session = 对话消息(见 §关于 prompts) |
+| **退化/交给 mem0** | `mem_update` `mem_judge` `mem_compare` `mem_suggest_topic_key` | **mem_update**:仍允许显式 PATCH,但正确姿势是"再 save 一次让 mem0 合并";**mem_judge/mem_compare**:Engram 不再本地生成候选 → 这条 loop 自然沉默;可选择改读 conflict API 暴露 mem0 已检出的冲突,或直接不引导 agent 用;**suggest_topic_key**:topic_key 语义弱化(mem0 自管合并),保留纯函数但不强调 |
+| **不支持** | `mem_merge_projects` 硬删 `mem_doctor`(重定义) | 不变 |
+
+### (b) agent 协议精简(memory protocol)
+
+现协议(SessionStart 注入,全局)引导 agent:save 后若 `judgment_required` 就走 `mem_judge` 冲突循环、并强调主动 dedup/update。在 MemoryLake 下:
+
+- **冲突判定循环天然沉默**:MemoryLake 路径 `mem_save` **不再返回 candidates/judgment_required**(本地候选生成已删)→ agent 永远不会进入 `mem_judge`/`mem_compare` 环节。**这是"精简"的主要来源 —— 靠行为自然达成,不需逐项目发不同协议。**
+- **协议文案调整**(plugin 可改,已批准):核心仍是"主动 `mem_save` / 用 `mem_search` 回忆 / 开场 `mem_context`"(对两后端都对);**新增一句**:"若该 project 使用 MemoryLake 后端,去重/更新/矛盾合并由后端自动完成 —— 你只需 save 和 search,**不必手动 update/judge/compare**。" 
+- **协议是会话级、非逐项目**(一个会话可能跨 SQLite/MemoryLake 项目),故采取:①核心引导普适;②冲突循环在 MemoryLake 上因无 candidates 自然不触发;③加上述一句条件说明。不追求"给 MemoryLake 项目单独一套协议"。
+
+**净效果**:MemoryLake 项目上,agent 的实际用法收敛为 **save / search / context (+ 必要时 delete)**,其余交给 mem0 —— 达成用户要的"最小工具面",且不破坏 SQLite。
+
 ## 6. 给 MemoryLake 团队的接口需求(并行推进,不阻塞本重构)
 1. **对外 search 完成 BM25 融合**(当前 `search_memories` 有 TODO,只返回向量结果)—— 补上后关键词场景不必 Engram 兜底。
 2. **V3 conflict list 修复**(`MemoryConflictV3ServiceImpl.listConflicts` 现 `return null`)—— 否则 mem_judge/compare 只能走 v2。
@@ -95,5 +119,6 @@ AddObservation(…) (string, error)   // 返回不透明 id(见 §4)
 6. **mem_save** 去掉同步回填 → append 即返回(秒回);
 7. **保留** `mem_review` 衰减、pinned、sessions/prompts/passive;SQLite 默认路径**逻辑**不变(仅 id 呈现为字符串)。
 8. 更新 parity/差分测试(不再比逐字,改比语义召回+行为等价)。
+9. **最小工具面 + 精简 agent 协议**(§5.5):MemoryLake 路径 `mem_save` 不再返回冲突候选 → judge/compare 循环自然沉默;调整 memory-protocol 文案(plugin 可改),引导 MemoryLake 项目只用 save/search/context(+delete),其余交 mem0。工具集不删(SQLite 仍用),仅行为变薄 + 协议引导。
 
 **分阶段安全落地建议**:先做 (2)(4)(5) 的 id→string 契约统一(SQLite 全绿、plugin 更新),再做 (1)(3)(6) 的 MemoryLake 能力下沉 —— 两步各自可独立验证回归。
