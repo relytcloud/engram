@@ -175,6 +175,9 @@ Call `mem_save` IMMEDIATELY after ANY of these:
 
 **Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
 
+### MemoryLake-backed projects
+If the current project uses the MemoryLake backend (check with `engram memorylake status`), dedup, updating existing memories, and merging contradictions are handled automatically by the backend — you only need mem_save / mem_search / mem_context; you do not need to call mem_update, mem_judge, or mem_compare yourself. Default SQLite projects are unaffected — keep following the protocol above.
+
 ### SEARCH MEMORY when:
 - User asks to recall anything ("remember", "what did we do", or the equivalent in the user's language)
 - Starting work on something that might have been done before
