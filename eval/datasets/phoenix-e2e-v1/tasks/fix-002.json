@@ -1,7 +1,7 @@
 {
   "id": "fix-002",
   "category": "small-fix",
-  "prompt": "In the UDP interconnect code, `handleAcks()` calls `recv()`/checks for a non-blocking condition, and under load we occasionally see it take the wrong branch (treating a real error as EWOULDBLOCK/EINTR or vice versa) right after a call to `ML_CHECK_FOR_INTERRUPTS()`. Find the bug in how errno is being used around that interrupt check and propose the fix.",
+  "prompt": "In the interconnect (motion) layer, receiving data sometimes misbehaves when an interrupt arrives while a segment is in the middle of receiving on a socket: reads sporadically error out or take an incorrect branch even though the connection is actually fine. It shows up on both the TCP and UDP receive paths. Investigate the receive path, find the bug, and propose the fix (which file/function(s) need to change and how).",
   "rubric": {
     "answer_points": [
       "Bug is in src/backend/cdb/motion/ic_udpifc.c, in handleAcks()",

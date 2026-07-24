@@ -1,7 +1,7 @@
 {
   "id": "fix-004",
   "category": "small-fix",
-  "prompt": "After DROP TABLE on a ZDB relation, we're seeing segfile keys (and their on-disk files) in FDB's BACKUP space stay orphaned much longer than expected — sometimes effectively forever, sometimes just very slowly drained when a shard's per-task file batch size is small. Investigate the dropped-table backup/GC task generation on the Phoenix (PG) side and propose a fix. Note: some of the underlying key-lifecycle logic lives in the gmeta submodule, which may not be checked out in your worktree — be explicit about what you can and can't verify there.",
+  "prompt": "After dropping a large ZDB table, the table's on-disk files and their associated metadata in FDB stick around far longer than the configured retention window — sometimes they appear to linger almost indefinitely rather than being cleaned up promptly. Investigate the dropped-table cleanup path on the Phoenix (PG) side and propose a fix (which file/function(s) need to change and how).",
   "rubric": {
     "answer_points": [
       "Relevant code is in contrib/zdb/src/storage/zdb_vacuum.c: GenerateBackupTaskForDroppedTable() and GenerateGCTaskForDroppedTable()",

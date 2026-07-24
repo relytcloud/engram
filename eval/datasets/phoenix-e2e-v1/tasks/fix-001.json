@@ -1,7 +1,7 @@
 {
   "id": "fix-001",
   "category": "small-fix",
-  "prompt": "Users report that some queries with a materialized CTE that's joined into two branches of the plan (via Share Input Scan under GPORCA) sometimes hang forever instead of finishing. It seems related to how the reader and writer sides of a shared scan coordinate across slices when a reader gets squelched early. Investigate the root cause in the executor and propose a fix (which file/function(s) need to change and how).",
+  "prompt": "Users report that certain queries hang intermittently instead of returning: the query appears to stall indefinitely and never completes. The hang shows up only under some plans (notably ones involving a LIMIT) where the plan contains a Share Input Scan node, and it happens only some of the time. Investigate the root cause in the executor and propose a fix (which file/function(s) need to change and how).",
   "rubric": {
     "answer_points": [
       "Root cause is in src/backend/executor/nodeShareInputScan.c: cross-slice shared-scan readers and the writer coordinate through a shared-memory hash table (shareinput_Xslice_hash) of per-share 'xslice state' entries",

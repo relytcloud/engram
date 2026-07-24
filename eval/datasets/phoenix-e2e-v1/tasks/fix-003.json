@@ -1,7 +1,7 @@
 {
   "id": "fix-003",
   "category": "small-fix",
-  "prompt": "The stats collector process (pgstat) was changed to call InitProcess() and use shared latches for some database operations (e.g. a backup-stats path), but backends waiting on those latch wakeups sometimes hang forever waiting on the collector. Investigate why the collector process wouldn't be waking up latch-waiters, and propose the fix.",
+  "prompt": "After recent changes to the stats collector (pgstat) subsystem, a segment sometimes hangs: backends that are waiting for the stats collector to finish an operation (for example a stats-backup step) block indefinitely and never make progress. Investigate why the collector fails to release the backends waiting on it, and propose the fix (which file/function(s) need to change and how).",
   "rubric": {
     "answer_points": [
       "The bug is in src/backend/postmaster/pgstat.c, in PgstatCollectorMain()",

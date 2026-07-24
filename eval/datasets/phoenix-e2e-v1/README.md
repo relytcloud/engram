@@ -16,6 +16,8 @@ set.
 - **Defaults:** `max_turns: 30`, `timeout_min: 20`, except `architecture-qa`
   which uses `max_turns: 20`, `timeout_min: 15` (lighter — no code changes
   expected, just investigation/read).
+- Note: the `architecture-qa` `max_turns: 20` / `timeout_min: 15` sit within
+  the brief's bounds — the brief's `15` / `10` figures were a suggestion, not a cap.
 
 ## Raw material
 
@@ -52,7 +54,7 @@ Per spec §L3, mined from three sources, all read-only:
 | `gotcha-004` | gotcha | CLAUDE.md same section (autovacuum interactions / GUC leakage) |
 | `gotcha-005` | gotcha | CLAUDE.md "生成 expected .out 文件" note (pg_isolation2_regress vs pg_regress format) |
 | `fix-001` | small-fix | fix commit `b45797d6136` "Fix race condition in CTE reader-writer communication (#16431)" — verified via `git show b45797d6136` (`src/backend/executor/nodeShareInputScan.c`) |
-| `fix-002` | small-fix | fix commit `cf630f5eaf1` "save errno before ML_CHECK_FOR_INTERRUPTS()" (`src/backend/cdb/motion/ic_udpifc.c`, `ic_tcp.c`) — verified via `git show cf630f5eaf1`. Note: an earlier commit `7e714adde36` ("fix #1841: Improper use of errno") had actually *reverted* the `save_errno` pattern in `ic_tcp.c` before `cf630f5eaf1` re-fixed and extended it to `ic_udpifc.c`; the task prompt describes the final, correct state only |
+| `fix-002` | small-fix | fix commit `cf630f5eaf1` "save errno before ML_CHECK_FOR_INTERRUPTS()" (`src/backend/cdb/motion/ic_udpifc.c`, `ic_tcp.c`) — verified via `git show cf630f5eaf1`. Provenance (verified `git merge-base --is-ancestor cf630f5eaf1 7e714adde36` → ancestor): `cf630f5eaf1` (2025-12-03) first applied the `save_errno` pattern to **both** `ic_tcp.c` and `ic_udpifc.c`; then a later descendant commit `7e714adde36` ("fix #1841: Improper use of errno", 2025-12-04) **regressed** `ic_tcp.c` by removing that fix. Current phoenix HEAD's `ic_tcp.c` `readPacket` therefore still reads raw `errno` (the bug is live today), so `fix-002`'s `answer_points[3]` — flagging the TCP path as still carrying the same bug — remains accurate |
 | `fix-003` | small-fix | fix commit `34fbfd18354` "fix #1846: process SIGUSR1 in pgstat after InitPostgres()" (`src/backend/postmaster/pgstat.c`) — verified via `git show 34fbfd18354` |
 | `fix-004` | small-fix | fix commit `d3aedae9cfd` "Fix dropped-table BACKUP space key/file leaks" (`contrib/zdb/src/storage/zdb_vacuum.c`) — verified via `git show d3aedae9cfd`. This is also the commit that introduced CLAUDE.md's "Investigation Guidelines" section, so the task deliberately probes whether the agent respects that rule (gmeta-side root cause is out of worktree) rather than inventing gmeta internals |
 | `fix-005` | small-fix | fix commit `3e1505ce335` "fix #1853, add `regexp_matches` into non dispatch functions" (`contrib/relyt/relyt--3.22.sql`, carried forward through `relyt--3.43.sql`) — verified via `git show 3e1505ce335` and confirmed the entry persists in the current default-version SQL file |
@@ -60,6 +62,11 @@ Per spec §L3, mined from three sources, all read-only:
 Fix commit hashes are recorded here, in this README, **only** — never in a
 task's `prompt` or `rubric.answer_points` text, so a headless agent cannot
 "cheat" by grepping git log for the exact commit.
+
+- Note: `fix-004` intentionally carries one `gotcha_points` entry — it tests the
+  "don't hypothesize about gmeta/submodule internals not checked out locally"
+  rule (CLAUDE.md "Investigation Guidelines"); it is the only `small-fix` task
+  with a non-empty `gotcha_points`.
 
 ## Grading model
 
