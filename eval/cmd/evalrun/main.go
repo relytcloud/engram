@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/eval/dataset"
+	"github.com/Gentleman-Programming/engram/eval/metrics"
 	"github.com/Gentleman-Programming/engram/eval/runner"
 	"github.com/Gentleman-Programming/engram/eval/scorecard"
+	"github.com/Gentleman-Programming/engram/eval/tokenmeter"
+	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/memorylake"
 )
 
@@ -21,17 +25,69 @@ func main() {
 	dsPath := flag.String("dataset", "", "dataset path (l1/l3)")
 	project := flag.String("project", "phoenix", "engram project name")
 	out := flag.String("out", "", "output scorecard path (default eval/results/<sha>-<date>-<suite>.json)")
+	searchCalls := flag.Float64("search-calls", 3.0, "assumed mem_search calls per session (L2 composite)")
+	l1Card := flag.String("l1-scorecard", "", "L1 scorecard to read avg_tokens_per_query from")
 	flag.Parse()
 
 	switch *suite {
 	case "l1":
 		runL1(*dsPath, *project, *out)
+	case "l2":
+		runL2(*project, *out, *searchCalls, *l1Card)
 	case "dump-facts":
 		dumpFacts(*project)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown or unimplemented suite %q\n", *suite)
 		os.Exit(2)
 	}
+}
+
+func runL2(project, out string, searchCalls float64, l1Card string) {
+	// Static slices: hook stdout + memory SKILL.md + MCP server instructions.
+	hookTok, err := tokenmeter.ScriptOutputTokens("plugin/claude-code/scripts/session-start.sh", os.Environ())
+	if err != nil {
+		fatal("hook script: %v (needs engram on PATH; run from repo root)", err)
+	}
+	skill, err := os.ReadFile("plugin/claude-code/skills/memory/SKILL.md")
+	if err != nil {
+		fatal("skill file: %v", err)
+	}
+	skillTok := metrics.ApproxTokens(string(skill))
+	instrTok := metrics.ApproxTokens(mcp.ServerInstructions())
+	static := hookTok + skillTok + instrTok
+
+	b := mustBackend(project)
+	ctxTok, err := tokenmeter.ContextTokens(b, project)
+	if err != nil {
+		fatal("FormatContext: %v", err)
+	}
+
+	avgSearch := 0.0
+	if l1Card != "" {
+		l1sc, err := scorecard.Load(l1Card)
+		if err != nil {
+			fatal("l1 scorecard: %v", err)
+		}
+		avgSearch = l1sc.Metrics["avg_tokens_per_query"]
+	}
+
+	sc := scorecard.Scorecard{
+		Suite: "l2", Date: time.Now().UTC().Format("2006-01-02"), GitSHA: gitSHA(),
+		Metrics: map[string]float64{
+			"static_hook_tokens":          float64(hookTok),
+			"static_skill_tokens":         float64(skillTok),
+			"static_mcp_instr_tokens":     float64(instrTok),
+			"context_tokens":              float64(ctxTok),
+			"avg_search_tokens":           avgSearch,
+			"injected_tokens_per_session": tokenmeter.Composite(static, ctxTok, avgSearch, searchCalls),
+		},
+		Env: map[string]string{
+			"project":              project,
+			"search_calls_assumed": fmt.Sprintf("%.1f", searchCalls),
+			"tokenizer":            "approx-bytes/4",
+		},
+	}
+	writeCard(sc, out)
 }
 
 func mustBackend(project string) *memorylake.MemoryLakeBackend {
