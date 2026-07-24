@@ -1554,10 +1554,12 @@ Both backends can be active at once on the same machine: project A can stay on S
 
 ### Environment Variables
 
+Connection settings resolve in precedence order **env var > saved `engram memorylake config` > built-in default** (see `engram memorylake config` above). The env vars here are the highest-precedence layer; the "Default" column is the value used when neither the env var nor the saved config supplies one.
+
 | Variable                                | Required to enable | Description                                                                                          | Default            |
 | ---------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------ |
-| `ENGRAM_MEMORYLAKE_BASE_URL`              | yes                  | MemoryLake V3 API base URL.                                                                                          | (unset)             |
-| `ENGRAM_MEMORYLAKE_API_KEY`               | yes                  | MemoryLake API key, sent as `Authorization: Bearer <key>`.                                                          | (unset)             |
+| `ENGRAM_MEMORYLAKE_BASE_URL`              | no                   | MemoryLake V3 API base URL. Overrides the saved config; falls back to the built-in default when unset everywhere.   | `https://app.memorylake.ai/openapi/memorylake` |
+| `ENGRAM_MEMORYLAKE_API_KEY`               | yes (env or config)  | MemoryLake API key, sent as `Authorization: Bearer <key>`. Set it here or via `engram memorylake config --api-key`. | (unset)             |
 | `ENGRAM_MEMORYLAKE_WORKSPACE`             | no                   | Workspace custom_id or `ws-...` id memories are stored under.                                                       | `engram`            |
 | `ENGRAM_MEMORYLAKE_ACTOR`                 | no                   | Actor custom_id for writes/reads from this machine; distinguishes contributors when a project is shared.            | (unset — hostname)  |
 | `ENGRAM_MEMORYLAKE_TIMEOUT_MS`            | no                   | Per-request HTTP timeout for the MemoryLake client.                                                                 | `30000`             |
@@ -1568,11 +1570,13 @@ Both backends can be active at once on the same machine: project A can stay on S
 ### `engram memorylake` CLI
 
 ```
+engram memorylake config [--url <url>] [--api-key <key>] [--workspace <ws>] [--actor <actor>] [--clear]
 engram memorylake enable  --project <name> [--migrate]   # opt this project into the MemoryLake backend
 engram memorylake disable --project <name>                # move this project back to local SQLite
 engram memorylake status                                  # list every known project and its current backend
 ```
 
+- `config` persists connection settings into `~/.engram/memorylake.json` (`connection`, file mode `0600` since it may hold the API key) and prints the resulting **effective** config; with no setter flags it just prints the effective config. Resolution precedence at runtime is **env var > this saved config > built-in default**, applied per field by `memorylake.LoadConfig` — so env vars still override the file for CI/one-off use, and the file overrides the defaults. When `--url` is never supplied (neither env nor saved), the base URL defaults to `https://app.memorylake.ai/openapi/memorylake`; workspace defaults to `engram`. The API key is masked in the printed output. `--clear` wipes the saved connection block (env vars/defaults then apply). This is the recommended alternative to exporting the `ENGRAM_MEMORYLAKE_*` env vars in every shell.
 - `enable` records the project in `~/.engram/memorylake.json` (`enabled_projects`). The first `mem_*` call for that project afterward resolves (and caches) the MemoryLake workspace/project id, auto-creating the MemoryLake project under the `engram` workspace if it doesn't already exist.
 - `disable` removes the project from that list; the project's `mem_*` calls immediately go back to SQLite. Any memories already written to MemoryLake are left in place (not deleted).
 - `status` prints every project engram knows about (from local SQLite plus the enablement list) and which backend each currently uses.

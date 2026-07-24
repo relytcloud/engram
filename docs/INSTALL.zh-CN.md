@@ -173,22 +173,33 @@ rm -f ~/.claude/mcp/engram.json       # 删 MCP 配置
 
 默认所有 project 都用**本地 SQLite**。只有你**显式 enable** 的 project 才会改用 MemoryLake(记忆以 V3 fact 形式存到 MemoryLake 的 `engram` workspace),其余 project 完全不受影响。二者可在同一台机器上并存。
 
-### 1) 配置连接(环境变量)
+### 1) 配置连接
 
-写进你的 shell 配置(`~/.zshrc` / `~/.bashrc`),这样 CLI 和 Claude Code 拉起的 MCP 子进程都能读到:
+**推荐:用 `engram memorylake config` 命令**(持久化到 `~/.engram/memorylake.json`,文件权限 `0600`,含 API key),一次配置,CLI 和 Claude Code 拉起的 MCP 子进程都能读到,不用每个 shell 都 export:
 
 ```bash
-# 必填:
+# base_url 不传就默认 https://app.memorylake.ai/openapi/memorylake
+engram memorylake config --api-key "sk-你的APIKey"
+
+# 需要时可一并指定:
+engram memorylake config --url "https://app.memorylake.ai/openapi/memorylake" \
+                         --api-key "sk-你的APIKey" --workspace engram
+
+engram memorylake config           # 无参数 = 查看当前生效配置(api_key 会掩码显示)
+engram memorylake config --clear   # 清空已保存的连接配置
+```
+
+**优先级:环境变量 > 上面保存的配置 > 内置默认**。所以 CI / 临时覆盖仍可用环境变量:
+
+```bash
 export ENGRAM_MEMORYLAKE_BASE_URL="https://app.memorylake.ai/openapi/memorylake"
 export ENGRAM_MEMORYLAKE_API_KEY="sk-你的APIKey"
-
-# 可选:
 export ENGRAM_MEMORYLAKE_WORKSPACE="engram"     # 默认 engram
 export ENGRAM_MEMORYLAKE_ACTOR="$(hostname)"    # 多人共享 project 时区分贡献者;默认取主机名
 ```
 
 > API key 决定了写入的租户(tenant),Engram 代码里没有独立的 "org" 概念。
-> `ENGRAM_MEMORYLAKE_BASE_URL` 必须带 `/openapi/memorylake` 前缀,客户端会在其后拼 `/api/v3/...`。
+> `--url` / `ENGRAM_MEMORYLAKE_BASE_URL` 必须带 `/openapi/memorylake` 前缀,客户端会在其后拼 `/api/v3/...`。
 
 ### 2) 对某个 project 启用 / 关闭 / 查看
 
