@@ -21,6 +21,10 @@ import (
 
 func testConfig(t *testing.T) store.Config {
 	t.Helper()
+	// These tests drive real command paths (cmdSave/cmdSearch/cmdMCP/...).
+	// Force sqlite routing so a developer's live MemoryLake enablement
+	// (~/.engram/memorylake.json) can never receive test writes.
+	t.Setenv("ENGRAM_BACKEND", "sqlite")
 	cfg, err := store.DefaultConfig()
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)

@@ -2496,6 +2496,11 @@ func TestCmdExportDefaultAndCmdImportErrors(t *testing.T) {
 func TestMainDispatchServeMCPAndTUI(t *testing.T) {
 	stubRuntimeHooks(t)
 
+	// This test drives main() directly, bypassing testConfig, so cmdMCP's
+	// buildRoutingSelector() would otherwise load the real
+	// ~/.engram/memorylake.json. Force sqlite routing so it never touches a
+	// developer's live MemoryLake enablement.
+	t.Setenv("ENGRAM_BACKEND", "sqlite")
 	t.Setenv("ENGRAM_DATA_DIR", t.TempDir())
 	withArgs(t, "engram", "serve", "8088")
 	_, stderr, recovered := captureOutputAndRecover(t, func() { main() })
@@ -2605,6 +2610,12 @@ func TestMainDispatchRemainingCommands(t *testing.T) {
 	stubRuntimeHooks(t)
 	stubExitWithPanic(t)
 	withCwd(t, t.TempDir())
+
+	// This test drives main() directly (including "save"/"search"), bypassing
+	// testConfig, so the CLI routing seam would otherwise load the real
+	// ~/.engram/memorylake.json. Force sqlite routing so it never touches a
+	// developer's live MemoryLake enablement.
+	t.Setenv("ENGRAM_BACKEND", "sqlite")
 
 	dataDir := t.TempDir()
 	t.Setenv("ENGRAM_DATA_DIR", dataDir)
