@@ -13,15 +13,17 @@ import (
 // and EndSession marks it ended with a summary that a subsequent GetSession
 // reflects.
 func TestBackend_Session_OpenReadEnd(t *testing.T) {
-	var convCreated, summaryAppended bool
+	var convCreated, summaryWritten bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
 			convCreated = true
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-sess-1"}})
-		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-sess-1/messages":
-			summaryAppended = true
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-summary"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			summaryWritten = true
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"facts": []map[string]any{{"id": "fact-summary", "fact": "Session summary"}},
+			}})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -51,8 +53,8 @@ func TestBackend_Session_OpenReadEnd(t *testing.T) {
 	if err := b.EndSession("sess-1", "wrapped up the feature"); err != nil {
 		t.Fatalf("EndSession: %v", err)
 	}
-	if !summaryAppended {
-		t.Fatal("expected EndSession to append a summary message to the session's conversation")
+	if !summaryWritten {
+		t.Fatal("expected EndSession to write the summary as a verbatim MemoryLake fact")
 	}
 
 	ended, err := b.GetSession("sess-1")

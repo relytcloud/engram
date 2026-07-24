@@ -646,14 +646,15 @@ func (b *MemoryLakeBackend) GetSession(id string) (*store.Session, error) {
 
 // EndSession records the session as ended with the given summary in the
 // local SessionIndex sidecar (a no-op, mirroring store.go's EndSession, when
-// id was never recorded), and — best-effort — also appends the summary as a
-// conversation message so MemoryLake retains a durable trace of the session
-// end. MemoryLake's conversation object has no confirmed "end"/"summary"
-// field to PATCH (see SessionIndex's doc comment), so a message is the only
-// tested write surface available for this; a failure appending it does not
-// fail EndSession, since the authoritative lifecycle record is the
-// SessionIndex sidecar, already persisted by the time the append is
-// attempted.
+// id was never recorded), and — best-effort — also writes the summary as a
+// verbatim MemoryLake fact (via the direct fact-add endpoint) so the session
+// wrap-up is a durable, immediately-searchable memory rather than a raw
+// conversation message subject to asynchronous mem0 extraction. A summary is
+// memory-like, so unlike prompts (which stay on the conversation-append path
+// to avoid polluting fact search) it is stored as a first-class fact. A
+// failure writing it does not fail EndSession, since the authoritative
+// lifecycle record is the SessionIndex sidecar, already persisted by the time
+// the write is attempted.
 func (b *MemoryLakeBackend) EndSession(id string, summary string) error {
 	if _, ok := b.sessions.Get(id); !ok {
 		return nil
@@ -663,13 +664,9 @@ func (b *MemoryLakeBackend) EndSession(id string, summary string) error {
 		return err
 	}
 	if summary != "" {
-		if _, err := b.client.AppendObservation(b.ws, b.projID, id, b.actorID, store.AddObservationParams{
-			SessionID: id,
-			Type:      "session_summary",
-			Title:     "Session summary",
-			Content:   summary,
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "[memorylake] EndSession: failed to append summary message for session %s: %v\n", id, err)
+		text := factText("Session summary", summary)
+		if _, err := b.client.AddFacts(b.ws, b.projID, []string{text}); err != nil {
+			fmt.Fprintf(os.Stderr, "[memorylake] EndSession: failed to write summary fact for session %s: %v\n", id, err)
 		}
 	}
 	return nil
