@@ -2,7 +2,7 @@
 
 Engram 是给 AI 编码 agent 用的**持久记忆**服务:单个 Go 二进制,内置 SQLite(默认、真源)+ 可选 MemoryLake 后端,通过 MCP(stdio)、CLI、HTTP、TUI 四种接口对外。本文覆盖 **macOS 和 Linux** 的安装,以及**如何把它接入 Claude Code 作为插件**。
 
-> 版本:以 [Releases](https://github.com/relytcloud/engram/releases) 页最新的 `vX.Y.Z` 为准,下文示例用 `v0.1.0`。
+> 版本:以 [Releases](https://github.com/relytcloud/engram/releases) 页最新的 `vX.Y.Z` 为准,下文示例用 `v0.2.0`。
 
 ---
 
@@ -28,16 +28,16 @@ uname -sm
 
 | 系统 | 架构 | 包名 |
 |---|---|---|
-| macOS Apple Silicon | `Darwin arm64` | `engram_0.1.0_darwin_arm64.tar.gz` |
-| macOS Intel | `Darwin x86_64` | `engram_0.1.0_darwin_amd64.tar.gz` |
-| Linux x86_64 | `Linux x86_64` | `engram_0.1.0_linux_amd64.tar.gz` |
-| Linux ARM64 | `Linux aarch64` | `engram_0.1.0_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `Darwin arm64` | `engram_0.2.0_darwin_arm64.tar.gz` |
+| macOS Intel | `Darwin x86_64` | `engram_0.2.0_darwin_amd64.tar.gz` |
+| Linux x86_64 | `Linux x86_64` | `engram_0.2.0_linux_amd64.tar.gz` |
+| Linux ARM64 | `Linux aarch64` | `engram_0.2.0_linux_arm64.tar.gz` |
 
 #### macOS(Apple Silicon 示例)
 
 ```bash
 cd /tmp
-VER=0.1.0
+VER=0.2.0
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_darwin_arm64.tar.gz"
 tar -xzf engram.tar.gz engram
@@ -54,7 +54,7 @@ xattr -d com.apple.quarantine ~/.local/bin/engram 2>/dev/null || true
 
 ```bash
 cd /tmp
-VER=0.1.0
+VER=0.2.0
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_linux_amd64.tar.gz"
 tar -xzf engram.tar.gz engram
@@ -97,7 +97,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # zsh
 exec $SHELL          # 或重开终端
 
 # 验证:
-engram version       # 应打印 0.1.0
+engram version       # 应打印 0.2.0
 which engram         # 应指向 ~/.local/bin/engram
 ```
 
@@ -217,7 +217,6 @@ enable 信息记录在 `~/.engram/memorylake.json`;首次对该 project 做 `mem
 - `--no-migrate`:跳过这次自动迁移。
 - `--migrate`:即使是重复 enable 也强制再同步一次(幂等)。
 - 若此时还没配 API key 或网络失败,**项目仍会 enable**,只打印告警,修好后重跑 `engram memorylake enable --project <名> --migrate` 即可。
-- 注意:逐字直写**仅用于迁移**;enable 之后正常的 `mem_save` 仍走对话-append + 异步 mem0 抽取路径。
 
 ### 3) 全局安全阀
 
@@ -229,9 +228,9 @@ export ENGRAM_BACKEND=sqlite
 
 ### MemoryLake 后端的已知差异
 
-- `mem_save` 走 MemoryLake 时是**追加即返回、异步抽取**:内容作为对话消息提交,由 MemoryLake 的抽取管线异步转成 fact,不阻塞等待。刚存的内容要过一会儿才在检索里出现。
-- 搜索是**纯语义**(向量),不再是 SQLite 的 FTS5/BM25 精确匹配;内容也会被 MemoryLake 抽取/改写,而非逐字保真。
-- 去重、更新、冲突检测、遗忘等由 MemoryLake 自身能力接管。
+- `mem_save` 走 MemoryLake 时是**逐字直写、同步返回**:内容通过 MemoryLake 的 add-fact 接口逐字入库,立即返回**真实 fact id**、**立即可检索**,并**保留 title**(拼在正文前)。PassiveCapture 和 session-end summary 同路径;prompt(`mem_save_prompt`)仍走对话-append(prompt 不是 memory,且 add-fact 无 metadata,写成 fact 会污染 `mem_search`)。
+- 搜索是**纯语义**(向量),不再是 SQLite 的 FTS5/BM25 精确匹配;但内容**逐字保真**(不再被 mem0 抽取/改写)。
+- **取舍**:直写接口**不做去重 / topic_key upsert / 冲突决策** —— 每次 `mem_save` 都是一条新 fact,`topic_key` 在 MemoryLake 项目上不再是 in-place upsert(迁移时会对已存 fact 去重,但 live save 不会)。
 
 ---
 

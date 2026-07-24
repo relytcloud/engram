@@ -81,14 +81,14 @@ Engram ships prebuilt, statically-linked binaries on the **[Releases page](https
 Pick your `os_arch` from the release assets (`uname -sm` tells you which):
 
 ```bash
-VER=0.1.2      # latest tag on the Releases page
+VER=0.2.0      # latest tag on the Releases page
 
 # macOS Apple Silicon shown; swap darwin_arm64 for darwin_amd64 / linux_amd64 / linux_arm64
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_darwin_arm64.tar.gz"
 tar -xzf engram.tar.gz engram
 install -m 0755 engram ~/.local/bin/engram      # make sure ~/.local/bin is on your PATH
-engram version                                   # → 0.1.2
+engram version                                   # → 0.2.0
 ```
 
 > macOS binaries are ad-hoc signed (not notarized). If Gatekeeper blocks the first run:
