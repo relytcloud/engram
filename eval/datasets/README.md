@@ -12,6 +12,12 @@ Frozen ground-truth datasets for the eval suites (spec:
 - **Case count:** 54, ids `r-001`…`r-054`.
 - **Categories:** `architecture` (20), `bugfix` (16), `decision` (10),
   `gotcha` (8).
+- **Corpus concentration caveat:** all 54 cases are mined from only 5 usable
+  facts (3 of those facts — the SP2 bugfix, the patent design writeup, and
+  the project-identity fact — supply most of the cases). Recall figures from
+  this dataset measure retrieval quality over a small, dense corpus, not a
+  broad one; interpret them accordingly and do not extrapolate directly to
+  larger/sparser projects.
 
 ### Sources
 

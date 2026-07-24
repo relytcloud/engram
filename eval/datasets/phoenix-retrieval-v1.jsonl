@@ -1,6 +1,6 @@
 {"id":"r-001","question":"这个环境里除了 engram 之外还有什么记忆机制？","expected_keywords":[["文件记忆系统"],["两套机制"]],"expected_fact_hint":"fact-3565cc8e (engram-first memory preference)","category":"decision"}
-{"id":"r-002","question":"以前哪条记忆内容被漏记到 engram，只存进了文件记忆系统？","expected_keywords":[["数仓项目"],["文件记忆系统"]],"expected_fact_hint":"fact-3565cc8e (engram-first memory preference)","category":"decision"}
-{"id":"r-003","question":"什么时候应该主动调用 mem_save？","expected_keywords":[["决策、约定、bug、发现、用户偏好"],["mem_save"]],"expected_fact_hint":"fact-3565cc8e (engram-first memory preference)","category":"decision"}
+{"id":"r-002","question":"以前哪条记忆内容被漏记到 engram，只存进了 .../memory/ 目录那套机制？","expected_keywords":[["数仓项目"],["文件记忆系统"]],"expected_fact_hint":"fact-3565cc8e (engram-first memory preference)","category":"decision"}
+{"id":"r-003","question":"什么时候应该主动调用 mem_save？","expected_keywords":[["决策、约定、bug、发现、用户偏好"],["写入 engram"]],"expected_fact_hint":"fact-3565cc8e (engram-first memory preference)","category":"decision"}
 {"id":"r-004","question":"用户对 engram 记录习惯提出了什么强制要求？","expected_keywords":[["所有需要记住的信息都必须记录到 engram"],["mem_save"]],"expected_fact_hint":"fact-3565cc8e (engram-first memory preference)","category":"decision"}
 {"id":"r-005","question":"同时保留文件记忆时，engram 这边有什么要求？","expected_keywords":[["可同时保留文件记忆"],["不能遗漏"]],"expected_fact_hint":"fact-3565cc8e (engram-first memory preference)","category":"decision"}
 {"id":"r-006","question":"Phoenix 底层数据库基于哪个开源项目及版本？","expected_keywords":[["Greenplum"],["PostgreSQL 12.12"]],"expected_fact_hint":"fact-f98441e5 (project identity)","category":"architecture"}
@@ -12,24 +12,24 @@
 {"id":"r-012","question":"Phoenix 项目的总体定位是什么？","expected_keywords":[["项目定位"],["数仓（数据仓库）项目"]],"expected_fact_hint":"fact-f98441e5 (project identity)","category":"architecture"}
 {"id":"r-013","question":"分区和分布式执行在 Phoenix 里属于什么范畴的默认工作负载特征？","expected_keywords":[["列存、分区、分布式执行"],["数仓工作负载"]],"expected_fact_hint":"fact-f98441e5 (project identity)","category":"architecture"}
 {"id":"r-014","question":"在 Phoenix 语境下，与 OLTP 相对的默认工作场景假设是什么？","expected_keywords":[["数仓工作负载"],["而非 OLTP"]],"expected_fact_hint":"fact-f98441e5 (project identity)","category":"architecture"}
-{"id":"r-015","question":"commit 7a39c8494b8 修复的是什么问题？","expected_keywords":[["7a39c8494b8"],["漏查"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
+{"id":"r-015","question":"SP2 阶段那次正确性 bug 修复解决的是什么问题？","expected_keywords":[["7a39c8494b8"],["漏查"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-016","question":"混合 heap/ZDB 分区树查询时出现了什么现象？","expected_keywords":[["消失"],["heap/ZDB 混合分区树"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-017","question":"为什么 GPDB 的 direct dispatch 在这个场景下会算错目标段？","expected_keywords":[["cdbhash"],["rd_cdbpolicy"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-018","question":"ZDB 列存关系的物理存储分布方式是什么，为什么和分布键 hash 对不上？","expected_keywords":[["按 shard 分布"],["rd_cdbpolicy"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-019","question":"独立的 ZDB 表为什么没有踩到这个漏查 bug？","expected_keywords":[["独立 ZDB 表"],["slice"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
-{"id":"r-020","question":"混合分区树里 Append 节点为什么会漏发数据？","expected_keywords":[["Append"],["单段直发"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
+{"id":"r-020","question":"混合分区树里负责合并子扫描结果的那个执行节点为什么会漏发数据？","expected_keywords":[["Append"],["单段直发"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-021","question":"这个 bug 具体是在哪个源码文件、哪个函数里修复的？","expected_keywords":[["cdbtargeteddispatch.c"],["GetContentIdsFromPlanForSingleRelation"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-022","question":"修复后 ZDB 关系的 direct dispatch 标志位是什么状态？","expected_keywords":[["RelationIsZDB"],["isDirectDispatch"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
-{"id":"r-023","question":"只禁用一个 ZDB 子扫描的 direct dispatch，为什么整棵计划树都会变成全段扫描？","expected_keywords":[["merge 逻辑"],["全段扫描"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
+{"id":"r-023","question":"只禁用一个 ZDB 子扫描的 direct dispatch，为什么整棵计划树最终都会退化成对所有段发送？","expected_keywords":[["merge 逻辑"],["全段扫描"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-024","question":"这个漏查 bug 修复后新增了什么回归测试？","expected_keywords":[["mixed_partition_dml"],["zdb_schedule"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-025","question":"mixed_partition_dml 测试覆盖了哪些 DML 操作场景？","expected_keywords":[["跨分区 UPDATE heap"],["COPY"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-026","question":"这次修复是在哪一天、哪个迭代阶段完成的？","expected_keywords":[["2026-07-17"],["SP2"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-027","question":"这个漏查 bug 的修复还有什么遗留问题没解决？","expected_keywords":[["ORCA 优化器路径"],["未决"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
-{"id":"r-028","question":"ORCA 优化器路径下对应的部分修复是哪个 commit？","expected_keywords":[["4f2b84033c5"],["部分修复"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
+{"id":"r-028","question":"ORCA 优化器路径下那次未完全解决的修复对应哪个 commit？","expected_keywords":[["4f2b84033c5"],["部分修复"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-029","question":"这个修复走的是 GPORCA 还是传统查询规划路径？","expected_keywords":[["Postgres planner 路径"],["4f2b84033c5"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-030","question":"触发这个漏查 bug 的查询条件长什么样？","expected_keywords":[["WHERE"],["分布键"]],"expected_fact_hint":"fact-ae290150 (SP2 bugfix)","category":"bugfix"}
 {"id":"r-031","question":"这个专利点要解决的是什么类型的问题？","expected_keywords":[["异构物理分布混合分区表"],["查询分发校正方法"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"architecture"}
-{"id":"r-032","question":"这个洞察为什么说是非显而易见的？","expected_keywords":[["非显而易见"],["rd_cdbpolicy.cdbhash"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"architecture"}
+{"id":"r-032","question":"这个关键洞察为什么算是不容易被发现的？","expected_keywords":[["非显而易见"],["rd_cdbpolicy.cdbhash"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"architecture"}
 {"id":"r-033","question":"分布键元数据和物理分布之间是什么关系？","expected_keywords":[["分布键元数据与物理分布解耦"],["非显而易见"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"architecture"}
 {"id":"r-034","question":"计划生成阶段是怎么判定并否决单段直发的？","expected_keywords":[["计划生成期"],["MergeDirectDispatchCalculationInfo"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"architecture"}
 {"id":"r-035","question":"heap-only 分区树是否受这个修复方法影响？","expected_keywords":[["heap-only 树"],["不受影响"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"architecture"}
@@ -41,11 +41,11 @@
 {"id":"r-041","question":"planner 路径的修复验证状态如何，对应哪个 commit？","expected_keywords":[["已完整验证"],["7a39c8494b8"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"architecture"}
 {"id":"r-042","question":"写这个专利点时还考虑过哪些别的候选方案？","expected_keywords":[["DISTRIBUTED BY substring 前缀分布键"],["ZDB CDC/Binlog"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"decision"}
 {"id":"r-043","question":"为什么最终选定了这个混合分区分发校正方案作为专利点而不是别的候选？","expected_keywords":[["专利支撑最扎实"],["跨两条优化器路径"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"decision"}
-{"id":"r-044","question":"DISTRIBUTED BY substring 前缀分布键这个候选方案对应哪个 commit？","expected_keywords":[["90ca2fd462b"],["DISTRIBUTED BY substring"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"decision"}
-{"id":"r-045","question":"ZDB CDC/Binlog 对标 Hologres 这个候选目前处于什么阶段？","expected_keywords":[["ZDB CDC/Binlog 对标 Hologres"],["仅设计阶段"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"decision"}
+{"id":"r-044","question":"写这个专利点时，那个基于分布键前缀截取子串的候选方案对应哪个 commit？","expected_keywords":[["90ca2fd462b"],["DISTRIBUTED BY substring"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"decision"}
+{"id":"r-045","question":"写这个专利点时提到的另一个跟随 Hologres 思路的候选方案目前处于什么阶段？","expected_keywords":[["ZDB CDC/Binlog 对标 Hologres"],["仅设计阶段"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"decision"}
 {"id":"r-046","question":"这个专利点可以结合父表的哪个特性作为应用场景权利要求？","expected_keywords":[["hot_partition_count"],["声明式冷热分层"]],"expected_fact_hint":"fact-9714b3a8 (patent design)","category":"decision"}
 {"id":"r-047","question":"ZDB 回归测试里给不存在的 relation 造假 OID 时应该用什么值？","expected_keywords":[["9999999"],["极大值"]],"expected_fact_hint":"fact-4c762f9b (ZDB regress OID gotcha)","category":"gotcha"}
-{"id":"r-048","question":"为什么不能用像 88888 这样偏小的假 OID？","expected_keywords":[["88888"],["Unstable UT"]],"expected_fact_hint":"fact-4c762f9b (ZDB regress OID gotcha)","category":"gotcha"}
+{"id":"r-048","question":"为什么不能用偏小数值的假 OID（而非极大值）？","expected_keywords":[["88888"],["Unstable UT"]],"expected_fact_hint":"fact-4c762f9b (ZDB regress OID gotcha)","category":"gotcha"}
 {"id":"r-049","question":"小值假 OID 冲突会导致测试出现什么问题？","expected_keywords":[["真实存在的 relation 冲突"],["Unstable UT"]],"expected_fact_hint":"fact-4c762f9b (ZDB regress OID gotcha)","category":"gotcha"}
 {"id":"r-050","question":"这条 ZDB 测试约定来自哪个修复提交，对应哪个 issue？","expected_keywords":[["8b3ccf6a929"],["#1889"]],"expected_fact_hint":"fact-4c762f9b (ZDB regress OID gotcha)","category":"gotcha"}
 {"id":"r-051","question":"这个假 OID 修复提交的作者和合并请求编号是什么？","expected_keywords":[["魏闯先"],["MR!2003"]],"expected_fact_hint":"fact-4c762f9b (ZDB regress OID gotcha)","category":"gotcha"}
