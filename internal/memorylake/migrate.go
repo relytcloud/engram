@@ -1,56 +1,107 @@
 package memorylake
 
-import "github.com/Gentleman-Programming/engram/internal/store"
+import (
+	"strings"
+
+	"github.com/Gentleman-Programming/engram/internal/store"
+)
 
 // MigrateResult summarizes a bulk migration of existing SQLite observations
 // into a MemoryLake-backed project (see MigrateObservations).
 type MigrateResult struct {
 	Total    int   // observations handed to MigrateObservations
-	Migrated int   // successfully appended into MemoryLake
-	Failed   int   // per-observation append failures (skipped, not fatal)
-	FirstErr error // first append error seen, if any (nil when Failed == 0)
+	Migrated int   // newly written into MemoryLake as verbatim facts
+	Skipped  int   // already present (same text) or empty — not re-written
+	Failed   int   // fact-add failures (a failed batch counts each of its items)
+	FirstErr error // first add error seen, if any (nil when Failed == 0)
 }
 
-// MigrateObservations appends each observation into this MemoryLake-backed
-// project through the normal AddObservation write path, so a migrated memory is
-// indistinguishable from one saved live (same params, same async fact
-// extraction downstream). Used by `engram memorylake enable` to seed a freshly
-// enabled project with the memories it already has in local SQLite.
+// migrationFactText renders one observation as the verbatim fact text to store.
+// The title is preserved (the conversation-append write path drops it, but the
+// direct fact-add path is verbatim so there is no reason to lose it): when a
+// distinct title exists it is prepended to the content, otherwise the content
+// (or the title alone) is used as-is.
+func migrationFactText(o store.Observation) string {
+	title := strings.TrimSpace(o.Title)
+	content := strings.TrimSpace(o.Content)
+	switch {
+	case title == "":
+		return content
+	case content == "":
+		return title
+	case strings.Contains(content, title):
+		return content
+	default:
+		return title + "\n\n" + content
+	}
+}
+
+// MigrateObservations seeds a freshly enabled project by writing its existing
+// SQLite observations into MemoryLake through the direct, verbatim fact-add
+// endpoint (Client.AddFacts) rather than the conversation-append path — so a
+// migrated memory is stored as-is and synchronously (with a real fact id),
+// instead of being paraphrased by an asynchronous mem0 extraction. Used by
+// `engram memorylake enable` on first enable. SQLite stays the source of truth;
+// nothing is deleted locally.
 //
-// The append is idempotent on content: AppendObservation keys each MemoryLake
-// message's custom_id off a hash of the content, so re-running a migration
-// re-sends only genuinely new content rather than duplicating what is already
-// there. A per-observation failure is counted and skipped rather than aborting
-// the whole run — FirstErr holds the first error seen (nil when none), so the
-// caller can surface "migrated N, failed M" and still keep the project enabled.
+// The direct endpoint does NOT deduplicate, so MigrateObservations makes itself
+// idempotent: it first lists the project's existing facts and skips any
+// observation whose rendered text is already present. Re-running a migration
+// therefore writes only genuinely new content instead of duplicating. New facts
+// are written in batches; a failed batch is counted and skipped rather than
+// aborting the run, with FirstErr holding the first error seen.
 func (b *MemoryLakeBackend) MigrateObservations(obs []store.Observation) MigrateResult {
 	res := MigrateResult{Total: len(obs)}
+
+	// Idempotency guard: build the set of texts already stored for this project.
+	// A listing failure is non-fatal — we proceed without dedup (at worst a
+	// re-run duplicates), rather than refusing to migrate at all.
+	existing := map[string]bool{}
+	if facts, err := b.client.listAllFacts(b.ws, b.projID); err == nil {
+		for _, f := range facts {
+			existing[strings.TrimSpace(f.Fact)] = true
+		}
+	}
+
+	// Collect the new (not-already-present, non-empty) fact texts to write.
+	var texts []string
 	for i := range obs {
-		o := obs[i]
-		p := store.AddObservationParams{
-			SessionID: o.SessionID,
-			Type:      o.Type,
-			Title:     o.Title,
-			Content:   o.Content,
-			Scope:     o.Scope,
+		t := migrationFactText(obs[i])
+		if t == "" {
+			res.Skipped++
+			continue
 		}
-		if o.Project != nil {
-			p.Project = *o.Project
+		if existing[strings.TrimSpace(t)] {
+			res.Skipped++
+			continue
 		}
-		if o.ToolName != nil {
-			p.ToolName = *o.ToolName
+		existing[strings.TrimSpace(t)] = true // dedup within this batch too
+		texts = append(texts, t)
+	}
+
+	// Write in bounded batches so one huge project doesn't post a giant body.
+	const batchSize = 100
+	for start := 0; start < len(texts); start += batchSize {
+		end := start + batchSize
+		if end > len(texts) {
+			end = len(texts)
 		}
-		if o.TopicKey != nil {
-			p.TopicKey = *o.TopicKey
-		}
-		if _, err := b.AddObservation(p); err != nil {
-			res.Failed++
+		chunk := texts[start:end]
+		created, err := b.client.AddFacts(b.ws, b.projID, chunk)
+		if err != nil {
+			res.Failed += len(chunk)
 			if res.FirstErr == nil {
 				res.FirstErr = err
 			}
 			continue
 		}
-		res.Migrated++
+		if n := len(created); n > 0 {
+			res.Migrated += n
+		} else {
+			// Endpoint accepted the write but echoed nothing back; count the
+			// chunk as migrated so the summary reflects what we sent.
+			res.Migrated += len(chunk)
+		}
 	}
 	return res
 }

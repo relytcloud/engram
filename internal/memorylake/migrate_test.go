@@ -13,85 +13,126 @@ import (
 
 func strptr(s string) *string { return &s }
 
-// TestMigrateObservations_AppendsEachAndCounts drives the happy path: every
-// observation is appended (one conversation ensure + one message post per
-// distinct content), and the result counts them all as migrated with no
-// failures.
-func TestMigrateObservations_AppendsEachAndCounts(t *testing.T) {
-	var msgPosts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// factsHandler is a minimal mock of the two endpoints MigrateObservations uses:
+// GET .../memories/facts (existing-fact listing, for the idempotency guard) and
+// POST .../memories/facts (the direct verbatim fact-add). `existing` seeds the
+// GET response; posted texts are appended to `got`.
+func factsHandler(t *testing.T, existing []string, got *[]string, postCalls *int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/memories/conversations"):
-			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"conv-1"}}`))
-		case r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/v3/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
-			atomic.AddInt32(&msgPosts, 1)
-			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"msg-x"}}`))
+		case r.Method == "GET" && strings.HasSuffix(strings.Split(r.URL.Path, "?")[0], "/memories/facts"):
+			items := make([]map[string]any, 0, len(existing))
+			for i, e := range existing {
+				items = append(items, map[string]any{"id": "f" + string(rune('0'+i)), "fact": e})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"items": items, "continuation_token": ""},
+			})
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/memories/facts"):
+			atomic.AddInt32(postCalls, 1)
+			var body struct {
+				Facts []string `json:"facts"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			created := make([]map[string]any, 0, len(body.Facts))
+			for i, f := range body.Facts {
+				*got = append(*got, f)
+				created = append(created, map[string]any{"id": "new" + string(rune('0'+i)), "fact": f})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"facts": created},
+			})
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-	}))
-	defer srv.Close()
-
-	b := newTestBackend(t, srv.URL)
-
-	obs := []store.Observation{
-		{SessionID: "s1", Type: "decision", Title: "Use Postgres", Content: "Postgres 15 for users.", Project: strptr("acme"), Scope: "project", TopicKey: strptr("db/choice")},
-		{SessionID: "s1", Type: "convention", Title: "Topic keys", Content: "slash-separated kebab.", Project: strptr("acme"), Scope: "project"},
-		{SessionID: "s2", Type: "bugfix", Title: "Fix N+1", Content: "Batch the query.", ToolName: strptr("editor"), Scope: "global"},
-	}
-
-	res := b.MigrateObservations(obs)
-
-	if res.Total != 3 || res.Migrated != 3 || res.Failed != 0 || res.FirstErr != nil {
-		t.Fatalf("result = %+v, want Total=3 Migrated=3 Failed=0 err=nil", res)
-	}
-	if got := atomic.LoadInt32(&msgPosts); got != 3 {
-		t.Fatalf("message posts = %d, want 3 (one per observation)", got)
 	}
 }
 
-// TestMigrateObservations_CountsFailuresAndContinues verifies a per-observation
-// append failure is counted and skipped (not fatal), the run continues, and the
-// first error is retained.
-func TestMigrateObservations_CountsFailuresAndContinues(t *testing.T) {
+// TestMigrateObservations_DirectWriteVerbatim verifies the happy path writes
+// each observation as a verbatim fact via POST, preserving the title.
+func TestMigrateObservations_DirectWriteVerbatim(t *testing.T) {
+	var got []string
+	var postCalls int32
+	srv := httptest.NewServer(factsHandler(t, nil, &got, &postCalls))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	obs := []store.Observation{
+		{Title: "Use Postgres", Content: "Postgres 15 for users.", Project: strptr("acme"), Scope: "project"},
+		{Title: "", Content: "Content only, no title.", Scope: "global"},
+	}
+
+	res := b.MigrateObservations(obs)
+
+	if res.Total != 2 || res.Migrated != 2 || res.Skipped != 0 || res.Failed != 0 {
+		t.Fatalf("result = %+v, want Total=2 Migrated=2 Skipped=0 Failed=0", res)
+	}
+	if len(got) != 2 {
+		t.Fatalf("posted %d facts, want 2: %v", len(got), got)
+	}
+	// Title is preserved (prepended) when distinct from content.
+	if got[0] != "Use Postgres\n\nPostgres 15 for users." {
+		t.Fatalf("fact[0] = %q, want title+content", got[0])
+	}
+	if got[1] != "Content only, no title." {
+		t.Fatalf("fact[1] = %q, want content only", got[1])
+	}
+}
+
+// TestMigrateObservations_SkipsAlreadyPresent verifies the idempotency guard:
+// an observation whose rendered text already exists as a fact is skipped, not
+// re-posted.
+func TestMigrateObservations_SkipsAlreadyPresent(t *testing.T) {
+	var got []string
+	var postCalls int32
+	// "Dup\n\nalready there." already exists server-side.
+	srv := httptest.NewServer(factsHandler(t, []string{"Dup\n\nalready there."}, &got, &postCalls))
+	defer srv.Close()
+
+	b := newTestBackend(t, srv.URL)
+	obs := []store.Observation{
+		{Title: "Dup", Content: "already there.", Scope: "global"},   // already present → skip
+		{Title: "Fresh", Content: "brand new fact.", Scope: "global"}, // new → write
+		{Title: "", Content: "", Scope: "global"},                     // empty → skip
+	}
+
+	res := b.MigrateObservations(obs)
+
+	if res.Migrated != 1 || res.Skipped != 2 {
+		t.Fatalf("result = %+v, want Migrated=1 Skipped=2", res)
+	}
+	if len(got) != 1 || got[0] != "Fresh\n\nbrand new fact." {
+		t.Fatalf("posted = %v, want only the fresh fact", got)
+	}
+}
+
+// TestMigrateObservations_CountsPostFailure verifies a failing POST batch is
+// counted as failed (not fatal) and FirstErr is retained.
+func TestMigrateObservations_CountsPostFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/memories/conversations"):
-			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"conv-1"}}`))
-		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/messages"):
-			// "boom" content fails; everything else succeeds.
-			var body struct {
-				Content []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if len(body.Content) > 0 && strings.Contains(body.Content[0].Text, "boom") {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"success":false,"error_code":"BOOM","message":"nope"}`))
-				return
-			}
-			_, _ = w.Write([]byte(`{"success":true,"data":{"id":"msg-ok"}}`))
+		case r.Method == "GET":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"items":[],"continuation_token":""}}`))
+		case r.Method == "POST":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"success":false,"error_code":"BOOM","message":"nope"}`))
 		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	defer srv.Close()
 
 	b := newTestBackend(t, srv.URL)
-
 	obs := []store.Observation{
-		{SessionID: "s1", Content: "ok one", Scope: "global"},
-		{SessionID: "s1", Content: "boom two", Scope: "global"},
-		{SessionID: "s1", Content: "ok three", Scope: "global"},
+		{Title: "A", Content: "one", Scope: "global"},
+		{Title: "B", Content: "two", Scope: "global"},
 	}
 
 	res := b.MigrateObservations(obs)
 
-	if res.Total != 3 || res.Migrated != 2 || res.Failed != 1 {
-		t.Fatalf("result = %+v, want Total=3 Migrated=2 Failed=1", res)
-	}
-	if res.FirstErr == nil {
-		t.Fatal("FirstErr should be set when a failure occurred")
+	if res.Migrated != 0 || res.Failed != 2 || res.FirstErr == nil {
+		t.Fatalf("result = %+v, want Migrated=0 Failed=2 err!=nil", res)
 	}
 }

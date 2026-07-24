@@ -2589,10 +2589,14 @@ func cmdMemorylakeEnable(cfg store.Config) {
 	case res.Total == 0:
 		fmt.Println("No existing SQLite memories to migrate.")
 	case res.Failed == 0:
-		fmt.Printf("Migrated %d/%d memories into MemoryLake (async fact extraction runs server-side; they become searchable shortly).\n", res.Migrated, res.Total)
+		fmt.Printf("Migrated %d memories into MemoryLake as verbatim facts", res.Migrated)
+		if res.Skipped > 0 {
+			fmt.Printf(" (%d already present, skipped)", res.Skipped)
+		}
+		fmt.Println(".")
 	default:
-		fmt.Printf("Migrated %d/%d memories; %d failed (first error: %v). Re-run with --migrate to retry (idempotent).\n",
-			res.Migrated, res.Total, res.Failed, res.FirstErr)
+		fmt.Printf("Migrated %d memories; %d failed, %d skipped (first error: %v). Re-run with --migrate to retry (idempotent).\n",
+			res.Migrated, res.Failed, res.Skipped, res.FirstErr)
 	}
 }
 

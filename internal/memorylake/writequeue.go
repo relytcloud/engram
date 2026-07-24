@@ -53,6 +53,29 @@ func (c *Client) AppendObservation(ws, projID, convCustomID, actorID string, p s
 	return msg.ID, nil
 }
 
+// AddFacts writes each string in facts verbatim into project projID via
+// MemoryLake's direct fact-add endpoint (POST .../memories/facts, shipped
+// 2026-07-23), bypassing the conversation → mem0-extraction pipeline entirely:
+// every text becomes a new fact stored as-is, synchronously, and the created
+// facts (with their real fact ids) are returned. Unlike AppendObservation this
+// is deliberately NOT deduplicated or decided server-side — posting the same
+// text twice creates two facts — so callers that need idempotency must dedup
+// before calling (see MemoryLakeBackend.MigrateObservations). A nil/empty
+// facts slice is a no-op.
+func (c *Client) AddFacts(ws, projID string, facts []string) ([]Fact, error) {
+	if len(facts) == 0 {
+		return nil, nil
+	}
+	var out struct {
+		Facts []Fact `json:"facts"`
+	}
+	path := "/api/v3/workspaces/" + ws + "/projects/" + projID + "/memories/facts"
+	if err := c.doJSON("POST", path, map[string]any{"facts": facts}, &out); err != nil {
+		return nil, err
+	}
+	return out.Facts, nil
+}
+
 // ensureConversation creates the MemoryLake conversation identified by
 // custom_id within workspace ws, scoped to actorID and granted read-write
 // access to project projID. MemoryLake treats POST .../conversations as

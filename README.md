@@ -180,8 +180,8 @@ engram memorylake config                 # print effective config (api key maske
 
 # 2) Opt a project in / out, and inspect routing.
 engram memorylake enable  --project my-app     # → MemoryLake; on FIRST enable it also
-                                               #   auto-migrates the project's existing
-                                               #   SQLite memories (--no-migrate to skip).
+                                               #   auto-migrates existing SQLite memories
+                                               #   (verbatim, idempotent; --no-migrate to skip).
 engram memorylake disable --project my-app     # back to local SQLite
 engram memorylake status                       # every project + its current backend
 
