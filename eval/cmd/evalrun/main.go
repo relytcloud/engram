@@ -243,33 +243,118 @@ func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out st
 		return
 	}
 
-	perArm := map[string][]float64{}
-	var items []scorecard.ItemResult
+	// Resolve the scorecard path now so the incremental sidecar (<out>.runs.jsonl)
+	// sits next to it and survives to enable resume on the next invocation.
+	if out == "" {
+		out = fmt.Sprintf("eval/results/%s-%s-%s.json", gitSHA(), time.Now().UTC().Format("2006-01-02"), "l3")
+	}
+	sidecar := out + ".runs.jsonl"
+
+	// Build the full work plan in deterministic order.
+	var keys []e2e.TupleKey
+	taskByID := map[string]e2e.Task{}
 	for _, task := range tasks {
+		taskByID[task.ID] = task
 		for _, arm := range armList {
 			for run := 0; run < n; run++ {
-				res := execTask(task, arm, phoenixDir, model)
-				verdict := judge(string(tpl), task, res, model)
-				perArm[arm.Name] = append(perArm[arm.Name], verdict.Score)
-				items = append(items, scorecard.ItemResult{
-					ID: fmt.Sprintf("%s/%s/run%d", task.ID, arm.Name, run),
-					Values: map[string]float64{
-						"score":         verdict.Score,
-						"input_tokens":  float64(res.InputTokens),
-						"output_tokens": float64(res.OutputTokens),
-						"duration_s":    res.DurationS,
-						"timed_out":     boolToF(res.TimedOut),
-					},
-					Note: verdict.Reasoning,
-				})
+				keys = append(keys, e2e.TupleKey{TaskID: task.ID, Arm: arm.Name, Run: run})
 			}
 		}
 	}
 
+	// Replay any existing sidecar to resume.
+	cp := &e2e.Checkpoint{}
+	if data, err := os.ReadFile(sidecar); err == nil {
+		cp, err = e2e.ParseCheckpoint(data)
+		if err != nil {
+			fatal("parse checkpoint %s: %v", sidecar, err)
+		}
+	} else if !os.IsNotExist(err) {
+		fatal("read checkpoint %s: %v", sidecar, err)
+	}
+	complete, reJudge, toRun := cp.Classify(keys)
+	fmt.Printf("resumed: %d complete, %d re-judge, %d to run\n", len(complete), len(reJudge), len(toRun))
+
+	f, err := os.OpenFile(sidecar, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fatal("open checkpoint %s: %v", sidecar, err)
+	}
+	defer f.Close()
+	cw := e2e.NewCheckpointWriter(f)
+
+	perArm := map[string][]float64{}  // successful judge scores only
+	judgeFailed := map[string]int{}   // per-arm judge-failed counts
+	armTotal := map[string]int{}      // per-arm total items
+	var items []scorecard.ItemResult
+	for _, arm := range armList {
+		perArm[arm.Name] = nil // ensure a mean is emitted even if every item failed
+	}
+
+	record := func(k e2e.TupleKey, res e2e.RunResult, v e2e.JudgeVerdict) {
+		armTotal[k.Arm]++
+		values := map[string]float64{
+			"score":         v.Score,
+			"input_tokens":  float64(res.InputTokens),
+			"output_tokens": float64(res.OutputTokens),
+			"duration_s":    res.DurationS,
+			"timed_out":     boolToF(res.TimedOut),
+		}
+		if v.Score < 0 {
+			// Judge-failed: mark the item and EXCLUDE it from the mean (counting
+			// it as 0 would bias the arm downward).
+			values["judge_failed"] = 1
+			judgeFailed[k.Arm]++
+		} else {
+			perArm[k.Arm] = append(perArm[k.Arm], v.Score)
+		}
+		items = append(items, scorecard.ItemResult{
+			ID:     fmt.Sprintf("%s/%s/run%d", k.TaskID, k.Arm, k.Run),
+			Values: values,
+			Note:   v.Reasoning,
+		})
+	}
+
+	for _, k := range keys {
+		task := taskByID[k.TaskID]
+		arm := armByName(armList, k.Arm)
+		switch cp.Status(k) {
+		case e2e.StatusComplete:
+			res, _ := cp.Run(k)
+			v, _ := cp.Verdict(k)
+			record(k, res, v)
+		case e2e.StatusReJudge:
+			res, _ := cp.Run(k)
+			v := judge(string(tpl), task, res, model)
+			if err := cw.WriteVerdict(k, v); err != nil {
+				fatal("checkpoint verdict %s: %v", k.TaskID, err)
+			}
+			record(k, res, v)
+		default: // StatusToRun
+			res := execTask(task, arm, phoenixDir, model)
+			if err := cw.WriteRun(k, res); err != nil {
+				fatal("checkpoint run %s: %v", k.TaskID, err)
+			}
+			v := judge(string(tpl), task, res, model)
+			if err := cw.WriteVerdict(k, v); err != nil {
+				fatal("checkpoint verdict %s: %v", k.TaskID, err)
+			}
+			record(k, res, v)
+		}
+	}
+
 	m := map[string]float64{}
+	totalFailed := 0
 	for name, scores := range perArm {
 		m["mean_score_"+name] = mean(scores)
+		m["judge_failed_"+name] = float64(judgeFailed[name])
+		totalFailed += judgeFailed[name]
+		if t := armTotal[name]; t > 0 && float64(judgeFailed[name])/float64(t) > 0.20 {
+			fmt.Fprintf(os.Stderr,
+				"WARNING: arm %q had %d/%d judge-failed items (>20%%) — mean_score_%s is unreliable\n",
+				name, judgeFailed[name], t, name)
+		}
 	}
+	m["judge_failed_count"] = float64(totalFailed)
 	if a, b := m["mean_score_memory"], m["mean_score_no-memory"]; len(armNames) > 1 {
 		m["uplift"] = a - b
 	}
@@ -279,6 +364,17 @@ func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out st
 		Env: map[string]string{"model": model, "n": strconv.Itoa(n), "arms": strings.Join(armNames, ",")},
 	}
 	writeCard(sc, out)
+}
+
+// armByName returns the Arm with the given name from the materialized list.
+func armByName(arms []e2e.Arm, name string) e2e.Arm {
+	for _, a := range arms {
+		if a.Name == name {
+			return a
+		}
+	}
+	fatal("internal: unknown arm %q", name)
+	return e2e.Arm{}
 }
 
 func execTask(task e2e.Task, arm e2e.Arm, phoenixDir, model string) e2e.RunResult {
@@ -312,24 +408,71 @@ func execTask(task e2e.Task, arm e2e.Arm, phoenixDir, model string) e2e.RunResul
 	return res
 }
 
+// judgeFailedScore is the sentinel verdict Score used when the judge call
+// cannot be completed after all retries. Items with Score < 0 are excluded
+// from arm means (they are neither a 0 nor a real grade) — see runL3.
+const judgeFailedScore = -1
+
+// judge grades one run with the LLM judge. The claude call is transient-fault
+// prone (the whole grid once died on the FIRST judge call with a bare
+// "exit status 1"), so it retries up to 3 attempts with 10s/30s backoff,
+// captures claude's stderr on ExitError, and — instead of fataling — returns a
+// sentinel verdict (Score judgeFailedScore) on final failure so the caller can
+// mark the item and keep the rest of the (expensive) grid.
 func judge(tpl string, task e2e.Task, res e2e.RunResult, model string) e2e.JudgeVerdict {
 	if res.TimedOut || res.ResultText == "" {
 		return e2e.JudgeVerdict{Score: 0, Reasoning: "timed out or empty result"}
 	}
 	prompt := e2e.BuildJudgePrompt(tpl, task, res.ResultText)
+	backoff := []time.Duration{10 * time.Second, 30 * time.Second}
+	const attempts = 3
+	var lastErr string
+	for attempt := 0; attempt < attempts; attempt++ {
+		v, err := judgeOnce(prompt, model)
+		if err == "" {
+			return v
+		}
+		lastErr = err
+		fmt.Fprintf(os.Stderr, "judge task %s (attempt %d/%d): %s\n", task.ID, attempt+1, attempts, err)
+		if attempt < len(backoff) {
+			time.Sleep(backoff[attempt])
+		}
+	}
+	return e2e.JudgeVerdict{
+		Score:     judgeFailedScore,
+		Reasoning: fmt.Sprintf("judge failed after %d attempts: %s", attempts, lastErr),
+	}
+}
+
+// judgeOnce runs a single judge claude call. On success it returns the parsed
+// verdict and an empty error string; on failure it returns a descriptive error
+// string (claude stderr included, truncated) and a zero verdict.
+func judgeOnce(prompt, model string) (e2e.JudgeVerdict, string) {
 	out, err := exec.Command("claude", "-p", prompt, "--output-format", "json", "--model", model, "--max-turns", "1").Output()
 	if err != nil {
-		fatal("judge run: %v", err)
+		msg := err.Error()
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			msg = fmt.Sprintf("%v: %s", err, truncate(string(ee.Stderr), 500))
+		}
+		return e2e.JudgeVerdict{}, "judge run: " + msg
 	}
-	text, _, _, err := e2e.ParseClaudeJSON(out)
-	if err != nil {
-		fatal("judge output: %v", err)
+	text, _, _, perr := e2e.ParseClaudeJSON(out)
+	if perr != nil {
+		return e2e.JudgeVerdict{}, "judge output: " + perr.Error()
 	}
-	v, err := e2e.ParseJudgeJSON(text)
-	if err != nil {
-		fatal("judge verdict: %v", err)
+	v, verr := e2e.ParseJudgeJSON(text)
+	if verr != nil {
+		return e2e.JudgeVerdict{}, "judge verdict: " + verr.Error()
 	}
-	return v
+	return v, ""
+}
+
+// truncate shortens s to at most n bytes, appending an ellipsis marker when cut.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...[truncated]"
 }
 
 // probeArm verifies the isolation invariant for one arm: the memory arm must
