@@ -1,0 +1,18 @@
+{
+  "id": "fix-003",
+  "category": "small-fix",
+  "prompt": "The stats collector process (pgstat) was changed to call InitProcess() and use shared latches for some database operations (e.g. a backup-stats path), but backends waiting on those latch wakeups sometimes hang forever waiting on the collector. Investigate why the collector process wouldn't be waking up latch-waiters, and propose the fix.",
+  "rubric": {
+    "answer_points": [
+      "The bug is in src/backend/postmaster/pgstat.c, in PgstatCollectorMain()",
+      "The collector process explicitly ignores SIGUSR1 (pqsignal(SIGUSR1, SIG_IGN)) based on an old assumption that it only ever uses a local (non-shared) latch, so it never needs to be woken via SIGUSR1",
+      "Once the collector calls InitProcess()/InitPostgres() and starts using shared latches (e.g. for BackupPgStat-style operations), it must handle SIGUSR1 to receive latch wakeups, or waiters relying on it will hang",
+      "Fix: install a real SIGUSR1 handler (e.g. pgstat_sigusr1_handler) that calls latch_sigusr1_handler(), replacing the SIG_IGN registration",
+      "The handler must save/restore errno around the call, consistent with the collector's other signal handlers (e.g. pgstat_sighup_handler)"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 30,
+  "timeout_min": 20
+}

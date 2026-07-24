@@ -1,0 +1,20 @@
+{
+  "id": "gotcha-004",
+  "category": "gotcha",
+  "prompt": "In a ZDB isolation2 test I do `alter system set relyt.autovacuum = off; select pg_reload_conf();` at setup so no background GC interferes, then run my assertions, expecting a clean environment. It's still occasionally flaky as if GC ran anyway. What could explain that, and what should teardown look like so I don't break tests that run after mine in the same schedule?",
+  "rubric": {
+    "answer_points": [
+      "An autovacuum worker spawned by an earlier test may already be running/in-flight even after the GUC is flipped off, since the GUC change doesn't kill an already-running worker",
+      "To reliably prevent background GC, pin the worker with a fault injector (e.g. the auto_vac_before_backup_dropped_table / auto_vac_after_backup_dropped_table / auto_vac_after_gc_dropped_table injection points used in drop_table_left_meta.sql) or drive the work synchronously instead, e.g. via relyt_vacuum_dropped_relation() / relyt_vacuum_aborted_txn()",
+      "ALTER SYSTEM SET + pg_reload_conf() persists into every subsequent test in the schedule (unlike a session-level SET), so it must be undone",
+      "Teardown must include alter system reset relyt.autovacuum (and any other cluster GUCs set) followed by pg_reload_conf(), in addition to resetting any session-level SETs"
+    ],
+    "gotcha_points": [
+      "did NOT assume ALTER SYSTEM SET + pg_reload_conf() alone stops an already-running autovacuum worker",
+      "did NOT forget to alter system reset + pg_reload_conf() in teardown, leaving GUC state leaked into later tests"
+    ],
+    "max_score": 10
+  },
+  "max_turns": 25,
+  "timeout_min": 20
+}

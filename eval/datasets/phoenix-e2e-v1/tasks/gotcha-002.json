@@ -1,0 +1,20 @@
+{
+  "id": "gotcha-002",
+  "category": "gotcha",
+  "prompt": "I'm adding a new ZDB regression test for a negative case where a caller passes the OID of a relation that doesn't exist (e.g. to a metadata/introspection function). What OID value should I hardcode for the 'nonexistent relation', and is there anything I need to be careful about when picking it?",
+  "rubric": {
+    "answer_points": [
+      "Use a large OID value such as 9999999, not a small one",
+      "Small hardcoded OIDs (e.g. 88888) can collide with a real relation's OID that happens to exist in some cluster states, making the test unstable",
+      "This convention comes from a real fix (commit changing async_load_job/simple_load tests from 88888 to 9999999) to make the tests robust across different cluster states",
+      "The test should be phrased to assert the expected 'relation not found' style error/behavior, not to depend on the specific OID being unused today only by coincidence"
+    ],
+    "gotcha_points": [
+      "did NOT suggest a small/low-numbered arbitrary OID like 88888 or similar",
+      "did NOT ignore the cross-cluster-state collision risk"
+    ],
+    "max_score": 10
+  },
+  "max_turns": 20,
+  "timeout_min": 15
+}

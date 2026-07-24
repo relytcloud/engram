@@ -1,0 +1,18 @@
+{
+  "id": "fix-002",
+  "category": "small-fix",
+  "prompt": "In the UDP interconnect code, `handleAcks()` calls `recv()`/checks for a non-blocking condition, and under load we occasionally see it take the wrong branch (treating a real error as EWOULDBLOCK/EINTR or vice versa) right after a call to `ML_CHECK_FOR_INTERRUPTS()`. Find the bug in how errno is being used around that interrupt check and propose the fix.",
+  "rubric": {
+    "answer_points": [
+      "Bug is in src/backend/cdb/motion/ic_udpifc.c, in handleAcks()",
+      "errno is being read/compared after calling ML_CHECK_FOR_INTERRUPTS(), but that macro/call path can itself perform work that clobbers errno before the original errno is tested",
+      "Fix: save errno into a local variable (e.g. save_errno) immediately after the failing syscall (recv/send), and compare against save_errno instead of the global errno from then on",
+      "The same errno-after-side-effecting-call pattern should be checked/fixed in the analogous TCP interconnect path (src/backend/cdb/motion/ic_tcp.c readPacket) since it has the same class of bug",
+      "This is a general C gotcha: errno must be captured immediately after the call that sets it, before any other library/macro call that could reset it"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 30,
+  "timeout_min": 20
+}

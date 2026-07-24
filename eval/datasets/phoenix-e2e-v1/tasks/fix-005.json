@@ -1,0 +1,17 @@
+{
+  "id": "fix-005",
+  "category": "small-fix",
+  "prompt": "Some function calls that should only ever run locally on the coordinator (never get dispatched to the swift/EDPS execution side) are apparently being dispatched anyway when used in a query, and `regexp_matches` is one of the functions affected. Where is the list of functions that must be excluded from dispatch maintained, and what's the minimal fix?",
+  "rubric": {
+    "answer_points": [
+      "The list lives in contrib/relyt/ SQL files (e.g. relyt--3.22.sql and later versioned relyt--*.sql), in the pg_catalog.relyt_non_dispatched_func catalog table",
+      "It's populated via an INSERT ... SELECT ... FROM pg_catalog.pg_proc WHERE proname = '...' OR proname = '...' ... style statement (one big OR-chain of proname literals) with ON CONFLICT DO NOTHING",
+      "The fix is to add `regexp_matches` as another `or proname = 'regexp_matches'` clause in that WHERE list so its pg_proc entry gets inserted into relyt_non_dispatched_func",
+      "This kind of fix must also be carried forward into the newest/current relyt--*.sql version, not just the version where the bug was first noticed, since each versioned SQL file is a full catalog rebuild script"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 25,
+  "timeout_min": 20
+}

@@ -1,0 +1,18 @@
+{
+  "id": "arch-003",
+  "category": "architecture-qa",
+  "prompt": "We're evaluating whether to backport a fix to the standalone PostgreSQL 17 build. Where does that PG17 source live relative to the rest of the repo, and can it be built both with and without Neon like the main Phoenix (v12) tree?",
+  "rubric": {
+    "answer_points": [
+      "PG17 source lives at neon/vendor/postgres-v17/ (a git submodule)",
+      "Neon (neon/) also vendors v14, v15, and v16 under neon/vendor/postgres-v{14,15,16}/",
+      "Phoenix itself is a fork of PostgreSQL 12.12 / Greenplum, separate from the vendored v14-v17 trees",
+      "PG17, like Phoenix, can be built either with Neon (disaggregated storage) or without Neon",
+      "The final shipped product bundles Neon + PostgreSQL v17 (with Neon) + Phoenix (Greenplum v12, with Neon) + extensions (ZDB, pgvector, PostGIS, etc.)"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 20,
+  "timeout_min": 15
+}
