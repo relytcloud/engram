@@ -154,29 +154,42 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 func (b *MemoryLakeBackend) AddObservation(p store.AddObservationParams) (string, error) {
 	b.writeMu.Lock()
 	defer b.writeMu.Unlock()
-	return b.appendObservation(p)
-}
 
-// appendObservation is the shared body behind AddObservation and
-// PassiveCapture's per-learning save — both already hold (or don't need)
-// writeMu at their own call sites, so this helper itself does not lock.
-func (b *MemoryLakeBackend) appendObservation(p store.AddObservationParams) (string, error) {
-	convCustomID := p.SessionID
-	if convCustomID == "" {
-		convCustomID = defaultConversationCustomID
+	text := factText(p.Title, p.Content)
+	if strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("cannot save an observation with empty content")
 	}
-
-	msgID, err := b.client.AppendObservation(b.ws, b.projID, convCustomID, b.actorID, p)
+	created, err := b.client.AddFacts(b.ws, b.projID, []string{text})
 	if err != nil {
 		return "", err
 	}
-	if msgID == "" {
-		// MemoryLake's response carried no id (defensive — the real API
-		// always returns one); fall back to a stable, content-derived
-		// pending reference rather than an empty sync_id.
-		msgID = contentHash(p.Content)
+	if len(created) > 0 && strings.TrimSpace(created[0].ID) != "" {
+		return created[0].ID, nil
 	}
-	return msgID, nil
+	// The endpoint accepted the write but echoed no id back (defensive — the
+	// real API always returns one). Fall back to a stable, content-derived
+	// reference rather than an empty sync_id.
+	return contentHash(text), nil
+}
+
+// factText renders an observation's (title, content) into the single verbatim
+// string stored as a MemoryLake fact via the direct fact-add endpoint. The
+// title is preserved by prepending it to the content when it adds information
+// (i.e. it is non-empty and not already contained in the content); otherwise
+// whichever of content/title is present is used as-is.
+func factText(title, content string) string {
+	title = strings.TrimSpace(title)
+	content = strings.TrimSpace(content)
+	switch {
+	case title == "":
+		return content
+	case content == "":
+		return title
+	case strings.Contains(content, title):
+		return content
+	default:
+		return title + "\n\n" + content
+	}
 }
 
 // metaString reads a string-valued metadata key from a MemoryLake fact's

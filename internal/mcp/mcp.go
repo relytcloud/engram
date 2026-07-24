@@ -1419,13 +1419,14 @@ func handleSave(sel BackendSelector, cfg MCPConfig, activity *SessionActivity) s
 		// savedSyncID is already the observation's sync_id (AddObservation's
 		// return value post sync_id migration — see backend.go).
 		//
-		// A candidateOptOut backend (MemoryLake) returns a *pending* reference
-		// from AddObservation, not yet a materialized fact id (see
-		// MemoryLakeBackend.AddObservation's doc comment), so this re-fetch
-		// would always 404 — a wasted synchronous round-trip on every save.
-		// Skip it entirely for those backends and surface savedSyncID directly
-		// as the handle. SQLite-backed projects (skipCandidates == false) keep
-		// the original re-fetch behavior byte-for-byte.
+		// A candidateOptOut backend (MemoryLake) writes the observation
+		// verbatim via the direct fact-add endpoint and returns the real fact
+		// id from AddObservation, so savedSyncID is already the durable handle.
+		// We still skip the SQLite-style re-fetch for those backends — the
+		// extra envelope fields it would populate (numeric id, state,
+		// review_after) don't apply to a freshly written MemoryLake fact — and
+		// surface savedSyncID directly. SQLite-backed projects (skipCandidates
+		// == false) keep the original re-fetch behavior byte-for-byte.
 		if skipCandidates {
 			extra["sync_id"] = savedSyncID
 		} else if obs, obsErr := s.GetObservation(savedSyncID); obsErr == nil {

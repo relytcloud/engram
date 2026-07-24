@@ -10,28 +10,31 @@ import (
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
-// passiveCaptureServer is a minimal AddObservation mock (ensure conversation
-// → append message) matching the thin-adapter write path: no fact
-// extraction/backfill simulation needed any more since PassiveCapture's
-// per-learning save (via AddObservation) now just appends and returns.
+// passiveCaptureServer is a minimal AddObservation mock for the direct-write
+// path: PassiveCapture's per-learning save (via AddObservation) posts each
+// learning verbatim to the direct fact-add endpoint and returns the fact id.
+// The returned counter tracks how many facts were posted.
 func passiveCaptureServer(t *testing.T) (*httptest.Server, *int32) {
 	t.Helper()
 	var appendCount int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
-		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+		if r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts" {
 			atomic.AddInt32(&appendCount, 1)
 			var body struct {
-				CustomID string `json:"custom_id"`
+				Facts []string `json:"facts"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-" + body.CustomID}})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			text := ""
+			if len(body.Facts) > 0 {
+				text = body.Facts[0]
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"facts": []map[string]any{{"id": "fact-" + contentHash(text), "fact": text}},
+			}})
+			return
 		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 	}))
 	return srv, &appendCount
 }

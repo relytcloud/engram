@@ -189,7 +189,7 @@ engram memorylake status                       # every project + its current bac
 export ENGRAM_BACKEND=sqlite
 ```
 
-On a MemoryLake-backed project, memories are stored as **V3 facts** under the `engram` workspace: `mem_save` appends the content and MemoryLake's pipeline extracts a fact **asynchronously** (a just-saved memory becomes searchable a moment later), search is **semantic** (vector), and dedup / update / conflict / forgetting are handled by MemoryLake itself. Behavior, limitations, and the differential parity harness → **[DOCS.md — MemoryLake Backend](DOCS.md#memorylake-backend)**.
+On a MemoryLake-backed project, memories are stored as **V3 facts** under the `engram` workspace. `mem_save` writes the observation **verbatim and synchronously** via MemoryLake's direct fact-add endpoint — the content is stored as-is (title preserved), a **real fact id** comes back immediately, and it's queryable right away (no asynchronous extraction). Search is **semantic** (vector). Note the trade-off: the direct write does **no** server-side dedup / `topic_key` upsert / conflict decision, so each save is a new fact. Behavior, limitations, and the differential parity harness → **[DOCS.md — MemoryLake Backend](DOCS.md#memorylake-backend)**.
 
 ## Cloud (Opt-In Replication)
 

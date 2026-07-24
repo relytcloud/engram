@@ -16,24 +16,11 @@ type MigrateResult struct {
 	FirstErr error // first add error seen, if any (nil when Failed == 0)
 }
 
-// migrationFactText renders one observation as the verbatim fact text to store.
-// The title is preserved (the conversation-append write path drops it, but the
-// direct fact-add path is verbatim so there is no reason to lose it): when a
-// distinct title exists it is prepended to the content, otherwise the content
-// (or the title alone) is used as-is.
+// migrationFactText renders one observation as the verbatim fact text to store,
+// sharing factText with the live AddObservation write path so a migrated memory
+// and a live-saved one are rendered identically (title preserved).
 func migrationFactText(o store.Observation) string {
-	title := strings.TrimSpace(o.Title)
-	content := strings.TrimSpace(o.Content)
-	switch {
-	case title == "":
-		return content
-	case content == "":
-		return title
-	case strings.Contains(content, title):
-		return content
-	default:
-		return title + "\n\n" + content
-	}
+	return factText(o.Title, o.Content)
 }
 
 // MigrateObservations seeds a freshly enabled project by writing its existing

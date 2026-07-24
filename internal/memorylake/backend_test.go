@@ -79,54 +79,60 @@ func newTestBackend(t *testing.T, srvURL string) *MemoryLakeBackend {
 	}
 }
 
-// TestBackend_AddObservation_AppendsAndReturnsImmediately is the Option A
-// thin-adapter write path (spec §2/§4/task-7 brief): AddObservation only
-// ensures the conversation and appends the message — no snapshot GET, no
-// polling/backfill GET, no PATCH. It must return promptly with the MemoryLake
-// message id as a pending sync_id.
-func TestBackend_AddObservation_AppendsAndReturnsImmediately(t *testing.T) {
-	var convPosts, msgPosts int32
+// TestBackend_AddObservation_WritesVerbatimFactDirectly is the direct-write
+// path: AddObservation posts the observation verbatim to the direct fact-add
+// endpoint (no conversations/messages, no async extraction), preserves the
+// title by prepending it, and returns the real MemoryLake fact id.
+func TestBackend_AddObservation_WritesVerbatimFactDirectly(t *testing.T) {
+	var factPosts int32
+	var gotText string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
-			convPosts++
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
-		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
-			msgPosts++
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			atomic.AddInt32(&factPosts, 1)
+			var body struct {
+				Facts []string `json:"facts"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			if len(body.Facts) > 0 {
+				gotText = body.Facts[0]
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"facts": []map[string]any{{"id": "fact-1", "fact": gotText}},
+			}})
 		default:
-			t.Fatalf("unexpected request %s %s (AddObservation must not GET/PATCH facts any more)", r.Method, r.URL.Path)
+			t.Fatalf("unexpected request %s %s (AddObservation must use the direct fact-add endpoint, not conversations/messages)", r.Method, r.URL.Path)
 		}
 	}))
 	defer srv.Close()
 
 	b := newTestBackend(t, srv.URL)
 	id, err := b.AddObservation(store.AddObservationParams{
-		SessionID: "sess-1", Type: "decision", Title: "t", Content: "some content", Scope: "global",
+		SessionID: "sess-1", Type: "decision", Title: "Use Postgres", Content: "Postgres 15 for users.", Scope: "global",
 	})
 	if err != nil {
 		t.Fatalf("AddObservation: %v", err)
 	}
-	if id != "msg-1" {
-		t.Fatalf("id=%q, want msg-1 (the MemoryLake message id, returned as a pending sync_id)", id)
+	if id != "fact-1" {
+		t.Fatalf("id=%q, want the real fact id fact-1", id)
 	}
-	if convPosts != 1 || msgPosts != 1 {
-		t.Fatalf("convPosts=%d msgPosts=%d, want 1/1", convPosts, msgPosts)
+	if atomic.LoadInt32(&factPosts) != 1 {
+		t.Fatalf("factPosts=%d, want 1", factPosts)
+	}
+	if gotText != "Use Postgres\n\nPostgres 15 for users." {
+		t.Fatalf("stored text=%q, want title prepended to content verbatim", gotText)
 	}
 }
 
-// TestBackend_AddObservation_EmptyMessageIDFallsBackToContentHash covers the
-// defensive fallback when MemoryLake's response carries no message id.
-func TestBackend_AddObservation_EmptyMessageIDFallsBackToContentHash(t *testing.T) {
+// TestBackend_AddObservation_EmptyFactIDFallsBackToContentHash covers the
+// defensive fallback when the direct fact-add response carries no fact id.
+func TestBackend_AddObservation_EmptyFactIDFallsBackToContentHash(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
-		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": ""}})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		if r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts" {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"facts": []map[string]any{}}})
+			return
 		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
@@ -140,55 +146,41 @@ func TestBackend_AddObservation_EmptyMessageIDFallsBackToContentHash(t *testing.
 	}
 }
 
-// TestBackend_AddObservation_EmptySessionUsesDefaultConversation verifies the
-// convCustomID fallback for a save with no session id.
-func TestBackend_AddObservation_EmptySessionUsesDefaultConversation(t *testing.T) {
-	var gotConvCustomID string
+// TestBackend_AddObservation_EmptyContentErrors verifies an observation with no
+// content (nothing to store as a fact) is rejected rather than posting a blank
+// fact the server would reject anyway.
+func TestBackend_AddObservation_EmptyContentErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
-			var body struct {
-				CustomID string `json:"custom_id"`
-			}
-			json.NewDecoder(r.Body).Decode(&body)
-			gotConvCustomID = body.CustomID
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-default"}})
-		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-default/messages":
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
+		t.Fatalf("no request expected for empty content, got %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
 	b := newTestBackend(t, srv.URL)
-	if _, err := b.AddObservation(store.AddObservationParams{Content: "no session here"}); err != nil {
-		t.Fatalf("AddObservation: %v", err)
-	}
-	if gotConvCustomID != defaultConversationCustomID {
-		t.Fatalf("conversation custom_id=%q, want %q", gotConvCustomID, defaultConversationCustomID)
+	if _, err := b.AddObservation(store.AddObservationParams{Title: "   ", Content: ""}); err == nil {
+		t.Fatal("expected an error for empty content, got nil")
 	}
 }
 
 // TestBackend_AddObservation_ConcurrentSavesAllSucceed exercises the
-// concurrent-save path under `-race`: since AddObservation no longer reads or
-// claims any project-wide fact snapshot, concurrent saves for distinct
-// content have no cross-claim window left to regress — this just asserts they
-// all succeed and each gets its own message id.
+// concurrent-save path under `-race`: distinct content must yield distinct fact
+// ids with no cross-save interference.
 func TestBackend_AddObservation_ConcurrentSavesAllSucceed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
-		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+		if r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts" {
 			var body struct {
-				CustomID string `json:"custom_id"`
+				Facts []string `json:"facts"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-" + body.CustomID}})
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			text := ""
+			if len(body.Facts) > 0 {
+				text = body.Facts[0]
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"facts": []map[string]any{{"id": "fact-" + contentHash(text), "fact": text}},
+			}})
+			return
 		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 	}))
 	defer srv.Close()
 
