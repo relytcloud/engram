@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /workspace/phoenix/engram/plugin/claude-code/scripts/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "engram": {
+      "command": "{{ENGRAM_BIN}}",
+      "args": ["mcp"]
+    }
+  }
+}
