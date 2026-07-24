@@ -2427,7 +2427,7 @@ func cmdMemorylake(cfg store.Config) {
 
 func printMemorylakeUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram memorylake config [--url <url>] [--api-key <key>] [--workspace <ws>] [--actor <actor>] [--clear]")
-	fmt.Fprintln(os.Stderr, "       engram memorylake enable --project <name> [--migrate]")
+	fmt.Fprintln(os.Stderr, "       engram memorylake enable --project <name> [--migrate|--no-migrate]")
 	fmt.Fprintln(os.Stderr, "       engram memorylake disable --project <name>")
 	fmt.Fprintln(os.Stderr, "       engram memorylake status")
 }
@@ -2517,7 +2517,8 @@ func maskSecret(s string) string {
 
 func cmdMemorylakeEnable(cfg store.Config) {
 	project := ""
-	migrate := false
+	forceMigrate := false
+	noMigrate := false
 	for i := 3; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "--project":
@@ -2526,7 +2527,9 @@ func cmdMemorylakeEnable(cfg store.Config) {
 				i++
 			}
 		case "--migrate":
-			migrate = true
+			forceMigrate = true
+		case "--no-migrate":
+			noMigrate = true
 		}
 	}
 	if project == "" {
@@ -2542,24 +2545,113 @@ func cmdMemorylakeEnable(cfg store.Config) {
 		fatal(err)
 	}
 
-	// TODO(task5/task10): resolve ProjID via identity.EnsureProject(project)
-	// once internal/identity lands. Until then ProjID is left empty and the
-	// enablement entry only records that the project opted in.
+	// Whether this is the FIRST time the project is being enabled decides the
+	// default migration behavior: on first enable we auto-migrate the project's
+	// existing SQLite memories into MemoryLake; a re-enable does not (unless
+	// --migrate is passed to force an idempotent re-sync).
+	_, alreadyEnabled := enablement.IsEnabled(project)
+
 	entry := memorylake.ProjectEntry{
 		ProjID:    "",
 		EnabledAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if alreadyEnabled {
+		// Preserve the original enablement timestamp / resolved project id.
+		entry, _ = enablement.IsEnabled(project)
 	}
 	enablement.EnabledProjects[project] = entry
 	if err := enablement.Save(path); err != nil {
 		fatal(err)
 	}
-
 	fmt.Printf("Enabled MemoryLake backend for project %q.\n", project)
-	if migrate {
-		// TODO(task9): trigger migration of existing SQLite memories for
-		// this project into MemoryLake once the migration path lands.
-		fmt.Println("Note: --migrate is not yet implemented (arrives in Task 9); no data was migrated.")
+
+	// Auto-migrate existing SQLite memories on first enable; --no-migrate opts
+	// out, --migrate forces a (idempotent) re-sync even on re-enable.
+	shouldMigrate := (!alreadyEnabled && !noMigrate) || forceMigrate
+	if !shouldMigrate {
+		if alreadyEnabled {
+			fmt.Println("(already enabled — pass --migrate to re-sync existing SQLite memories.)")
+		}
+		return
 	}
+
+	mlCfg := loadMemorylakeConfig()
+	fmt.Printf("Migrating existing SQLite memories for %q into MemoryLake…\n", project)
+	res, err := migrateProjectToMemoryLake(cfg, mlCfg, project, enablement, path)
+	if err != nil {
+		// Migration failure must NOT unset the enablement — the project stays
+		// enabled; the user can re-run `engram memorylake enable --project <name> --migrate`
+		// once the issue (e.g. missing API key, network) is resolved.
+		fmt.Fprintf(os.Stderr, "warning: migration skipped/failed (project stays enabled): %v\n", err)
+		return
+	}
+	switch {
+	case res.Total == 0:
+		fmt.Println("No existing SQLite memories to migrate.")
+	case res.Failed == 0:
+		fmt.Printf("Migrated %d/%d memories into MemoryLake (async fact extraction runs server-side; they become searchable shortly).\n", res.Migrated, res.Total)
+	default:
+		fmt.Printf("Migrated %d/%d memories; %d failed (first error: %v). Re-run with --migrate to retry (idempotent).\n",
+			res.Migrated, res.Total, res.Failed, res.FirstErr)
+	}
+}
+
+// migrateProjectToMemoryLake seeds a freshly-enabled project's MemoryLake
+// backend with the memories it already has in local SQLite. It resolves (and,
+// if needed, creates) the MemoryLake workspace/project, backfills the resolved
+// project id into the enablement entry so live routing won't re-resolve, reads
+// the project's non-deleted SQLite observations, and appends each into
+// MemoryLake via the normal write path (idempotent on content — safe to re-run).
+// SQLite stays the source of truth; nothing is deleted locally.
+func migrateProjectToMemoryLake(cfg store.Config, mlCfg memorylake.Config, project string, enab *memorylake.Enablement, enabPath string) (memorylake.MigrateResult, error) {
+	if strings.TrimSpace(mlCfg.APIKey) == "" {
+		return memorylake.MigrateResult{}, fmt.Errorf("MemoryLake API key is not set — run `engram memorylake config --api-key <key>` (or set ENGRAM_MEMORYLAKE_API_KEY), then re-run `engram memorylake enable --project %s --migrate`", project)
+	}
+
+	// Resolve workspace + project id (creating the MemoryLake project if it does
+	// not exist yet) and backfill the id so the live routing path can skip
+	// re-resolution.
+	client := memorylake.NewClient(mlCfg)
+	wsID, err := client.ResolveWorkspaceID(mlCfg.Workspace)
+	if err != nil {
+		return memorylake.MigrateResult{}, fmt.Errorf("resolve workspace %q: %w", mlCfg.Workspace, err)
+	}
+	projID, err := client.EnsureProject(wsID, project)
+	if err != nil {
+		return memorylake.MigrateResult{}, fmt.Errorf("ensure MemoryLake project: %w", err)
+	}
+	if entry, ok := enab.IsEnabled(project); ok && entry.ProjID != projID {
+		entry.ProjID = projID
+		enab.EnabledProjects[project] = entry
+		_ = enab.Save(enabPath) // best-effort; routing re-resolves if this misses
+	}
+
+	// Read the project's existing observations from local SQLite.
+	s, err := storeNew(cfg)
+	if err != nil {
+		return memorylake.MigrateResult{}, err
+	}
+	defer s.Close()
+
+	// Match how observations store their project (normalized), then read all of
+	// them (large limit — AllObservations otherwise caps at MaxContextResults).
+	queryProject := project
+	if norm, _ := store.NormalizeProject(project); norm != "" {
+		queryProject = norm
+	}
+	obs, err := s.AllObservations(queryProject, "", 1_000_000)
+	if err != nil {
+		return memorylake.MigrateResult{}, fmt.Errorf("read SQLite observations: %w", err)
+	}
+	if len(obs) == 0 {
+		return memorylake.MigrateResult{Total: 0}, nil
+	}
+
+	backend, err := memorylake.NewBackend(mlCfg, mlCfg.Workspace, projID)
+	if err != nil {
+		return memorylake.MigrateResult{}, fmt.Errorf("construct MemoryLake backend: %w", err)
+	}
+	return backend.MigrateObservations(obs), nil
 }
 
 func cmdMemorylakeDisable(cfg store.Config) {
@@ -3001,9 +3093,11 @@ Commands:
                      Set/show MemoryLake connection config (saved to ~/.engram/memorylake.json)
                      Precedence: env var > saved config > default url https://app.memorylake.ai/openapi/memorylake
   memorylake status  Show MemoryLake backend enablement per project (sqlite vs memorylake)
-  memorylake enable --project <name> [--migrate]
-                     Enable the MemoryLake backend for a project
-                       --migrate  Migrate existing SQLite memories (arrives in Task 9)
+  memorylake enable --project <name> [--migrate|--no-migrate]
+                     Enable the MemoryLake backend for a project. On first enable it
+                     auto-migrates the project's existing SQLite memories into MemoryLake.
+                       --migrate     Force an (idempotent) re-sync even on re-enable
+                       --no-migrate  Skip the automatic first-enable migration
   memorylake disable --project <name>
                      Disable the MemoryLake backend for a project (reverts to local SQLite)
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,

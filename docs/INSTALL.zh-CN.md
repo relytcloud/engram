@@ -211,6 +211,13 @@ engram memorylake status                          # 列出所有已知 project �
 
 enable 信息记录在 `~/.engram/memorylake.json`;首次对该 project 做 `mem_save` 时会在 `engram` workspace 下按需创建对应 MemoryLake project(多人并发创建有 409 恢复,不会冲突)。
 
+**首次 enable 会自动迁移已存记忆**:第一次对某 project 执行 `enable` 时,engram 会把它在本地 SQLite 里**未删除**的观测自动同步进 MemoryLake(走正常写入路径,迁移进去的和正常保存的一样)。SQLite 仍是真源,**本地不删任何东西**;写入按内容哈希幂等,可重复跑。
+
+- `--no-migrate`:跳过这次自动迁移。
+- `--migrate`:即使是重复 enable 也强制再同步一次(幂等)。
+- 若此时还没配 API key 或网络失败,**项目仍会 enable**,只打印告警,修好后重跑 `engram memorylake enable --project <名> --migrate` 即可。
+- MemoryLake 抽取是异步的,迁移的记忆稍后才可检索。
+
 ### 3) 全局安全阀
 
 临时想让**所有** project 都强制走 SQLite(无视 enable 列表),设一个环境变量即可,便于回退排查:
