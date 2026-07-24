@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -25,6 +26,8 @@ func main() {
 	switch *suite {
 	case "l1":
 		runL1(*dsPath, *project, *out)
+	case "dump-facts":
+		dumpFacts(*project)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown or unimplemented suite %q\n", *suite)
 		os.Exit(2)
@@ -67,6 +70,37 @@ func runL1(dsPath, project, out string) {
 	sc.GitSHA = gitSHA()
 	sc.Env = map[string]string{"backend": "memorylake", "project": project, "dataset": dsPath}
 	writeCard(sc, out)
+}
+
+func dumpFacts(project string) {
+	cfg := memorylake.LoadConfig()
+	if cfg.APIKey == "" {
+		fatal("ENGRAM_MEMORYLAKE_API_KEY required")
+	}
+	en, err := memorylake.LoadEnablement(memorylake.DefaultEnablementPath())
+	if err != nil {
+		fatal("load enablement: %v", err)
+	}
+	entry, ok := en.IsEnabled(project)
+	if !ok {
+		fatal("project %q is not MemoryLake-enabled", project)
+	}
+	client := memorylake.NewClient(cfg)
+	ws, err := client.ResolveWorkspaceID(cfg.Workspace)
+	if err != nil {
+		fatal("workspace: %v", err)
+	}
+	facts, err := client.ListAllFacts(ws, entry.ProjID)
+	if err != nil {
+		fatal("ListAllFacts: %v", err)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	for _, f := range facts {
+		if err := enc.Encode(f); err != nil {
+			fatal("encode: %v", err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "%d facts\n", len(facts))
 }
 
 func writeCard(sc scorecard.Scorecard, out string) {
