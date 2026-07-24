@@ -282,9 +282,9 @@ func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out st
 	defer f.Close()
 	cw := e2e.NewCheckpointWriter(f)
 
-	perArm := map[string][]float64{}  // successful judge scores only
-	judgeFailed := map[string]int{}   // per-arm judge-failed counts
-	armTotal := map[string]int{}      // per-arm total items
+	perArm := map[string][]float64{} // successful judge scores only
+	judgeFailed := map[string]int{}  // per-arm judge-failed counts
+	armTotal := map[string]int{}     // per-arm total items
 	var items []scorecard.ItemResult
 	for _, arm := range armList {
 		perArm[arm.Name] = nil // ensure a mean is emitted even if every item failed
