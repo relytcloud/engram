@@ -2398,7 +2398,9 @@ func cmdProjectsPrune(cfg store.Config) {
 	fmt.Printf("\nPruned %d project(s): %d sessions, %d prompts removed.\n", len(selected), totalSessions, totalPrompts)
 }
 
-// cmdMemorylake routes: engram memorylake enable --project <name> [--migrate]
+// cmdMemorylake routes: engram memorylake config [--url ...] [--api-key ...]
+//
+//	engram memorylake enable --project <name> [--migrate]
 //
 //	engram memorylake disable --project <name>
 //	engram memorylake status
@@ -2408,6 +2410,8 @@ func cmdMemorylake(cfg store.Config) {
 		subCmd = os.Args[2]
 	}
 	switch subCmd {
+	case "config":
+		cmdMemorylakeConfig(cfg)
 	case "enable":
 		cmdMemorylakeEnable(cfg)
 	case "disable":
@@ -2422,9 +2426,93 @@ func cmdMemorylake(cfg store.Config) {
 }
 
 func printMemorylakeUsage() {
-	fmt.Fprintln(os.Stderr, "usage: engram memorylake enable --project <name> [--migrate]")
+	fmt.Fprintln(os.Stderr, "usage: engram memorylake config [--url <url>] [--api-key <key>] [--workspace <ws>] [--actor <actor>] [--clear]")
+	fmt.Fprintln(os.Stderr, "       engram memorylake enable --project <name> [--migrate]")
 	fmt.Fprintln(os.Stderr, "       engram memorylake disable --project <name>")
 	fmt.Fprintln(os.Stderr, "       engram memorylake status")
+}
+
+// cmdMemorylakeConfig persists MemoryLake connection settings (url, api key,
+// workspace, actor) to ~/.engram/memorylake.json and prints the resulting
+// effective config. With no setter flags it just prints the current effective
+// config. Resolution precedence at runtime is env var > this saved file >
+// built-in default (see memorylake.LoadConfig); when --url is never set the
+// default https://app.memorylake.ai/openapi/memorylake applies.
+func cmdMemorylakeConfig(cfg store.Config) {
+	path := memorylake.DefaultEnablementPath()
+	conn, err := memorylake.LoadConnection(path)
+	if err != nil {
+		fatal(err)
+	}
+
+	changed := false
+	for i := 3; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--url":
+			if i+1 < len(os.Args) {
+				conn.BaseURL = strings.TrimSpace(os.Args[i+1])
+				i++
+				changed = true
+			}
+		case "--api-key":
+			if i+1 < len(os.Args) {
+				conn.APIKey = strings.TrimSpace(os.Args[i+1])
+				i++
+				changed = true
+			}
+		case "--workspace":
+			if i+1 < len(os.Args) {
+				conn.Workspace = strings.TrimSpace(os.Args[i+1])
+				i++
+				changed = true
+			}
+		case "--actor":
+			if i+1 < len(os.Args) {
+				conn.Actor = strings.TrimSpace(os.Args[i+1])
+				i++
+				changed = true
+			}
+		case "--clear":
+			conn = memorylake.Connection{}
+			changed = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", os.Args[i])
+			printMemorylakeUsage()
+			exitFunc(1)
+			return
+		}
+	}
+
+	if changed {
+		if err := memorylake.SaveConnection(path, conn); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("Saved MemoryLake config to %s\n\n", path)
+	}
+
+	eff := loadMemorylakeConfig()
+	fmt.Println("Effective MemoryLake config (env var > saved config > default):")
+	fmt.Printf("  base_url:  %s\n", eff.BaseURL)
+	fmt.Printf("  workspace: %s\n", eff.Workspace)
+	actor := eff.Actor
+	if actor == "" {
+		actor = "(unset — defaults to this machine's hostname)"
+	}
+	fmt.Printf("  actor:     %s\n", actor)
+	fmt.Printf("  api_key:   %s\n", maskSecret(eff.APIKey))
+}
+
+// maskSecret renders a credential for display without leaking it: empty ->
+// "(not set)", short values fully masked, longer values shown as first-3…last-4.
+func maskSecret(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "(not set)"
+	}
+	if len(s) <= 8 {
+		return "****"
+	}
+	return s[:3] + "…" + s[len(s)-4:]
 }
 
 func cmdMemorylakeEnable(cfg store.Config) {
@@ -2909,6 +2997,9 @@ Commands:
                      Merge similar project names into one canonical name
                        --all      Scan ALL projects for similar name groups
                        --dry-run  Preview what would be merged (no changes)
+  memorylake config [--url <url>] [--api-key <key>] [--workspace <ws>] [--actor <actor>] [--clear]
+                     Set/show MemoryLake connection config (saved to ~/.engram/memorylake.json)
+                     Precedence: env var > saved config > default url https://app.memorylake.ai/openapi/memorylake
   memorylake status  Show MemoryLake backend enablement per project (sqlite vs memorylake)
   memorylake enable --project <name> [--migrate]
                      Enable the MemoryLake backend for a project

@@ -10,11 +10,33 @@ import (
 	"strconv"
 )
 
-// Config holds MemoryLake connection settings, sourced from environment
-// variables with sane defaults.
+// Config holds MemoryLake connection settings, resolved from three layers in
+// precedence order (highest first): environment variables, the persisted
+// `engram memorylake config` file, then built-in defaults. See LoadConfig.
 type Config struct {
 	BaseURL, APIKey, Workspace, Actor          string
 	TimeoutMS, ExtractPollMS, ExtractMaxWaitMS int
+}
+
+// DefaultBaseURL is the MemoryLake V3 API base URL used when neither the
+// ENGRAM_MEMORYLAKE_BASE_URL env var nor a persisted `engram memorylake config`
+// value supplies one.
+const DefaultBaseURL = "https://app.memorylake.ai/openapi/memorylake"
+
+// DefaultWorkspace is the MemoryLake workspace memories live under when nothing
+// overrides it.
+const DefaultWorkspace = "engram"
+
+// Connection holds the persisted MemoryLake connection settings written by
+// `engram memorylake config`. Every field is optional: an unset field falls
+// back first to its env var (which wins over the persisted value) and finally
+// to a built-in default. It shares DefaultEnablementPath()'s file with the
+// enablement list, so config edits and enable/disable preserve each other.
+type Connection struct {
+	BaseURL   string `json:"base_url,omitempty"`
+	APIKey    string `json:"api_key,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
+	Actor     string `json:"actor,omitempty"`
 }
 
 func envInt(k string, def int) int {
@@ -26,22 +48,61 @@ func envInt(k string, def int) int {
 	return def
 }
 
-// LoadConfig reads MemoryLake configuration from the environment, filling in
-// defaults for anything unset.
+// pickStr resolves a single string setting: env var (highest precedence), then
+// the persisted value, then the built-in default.
+func pickStr(env, stored, def string) string {
+	if v := os.Getenv(env); v != "" {
+		return v
+	}
+	if stored != "" {
+		return stored
+	}
+	return def
+}
+
+// LoadConfig resolves MemoryLake configuration by merging, in precedence order:
+// environment variables > the persisted `engram memorylake config` file >
+// built-in defaults. Reading the persisted file is best-effort — a missing or
+// unreadable file simply means "nothing persisted", leaving env vars and
+// defaults in effect.
 func LoadConfig() Config {
-	ws := os.Getenv("ENGRAM_MEMORYLAKE_WORKSPACE")
-	if ws == "" {
-		ws = "engram"
+	var conn Connection
+	if e, err := LoadEnablement(DefaultEnablementPath()); err == nil && e.Connection != nil {
+		conn = *e.Connection
 	}
 	return Config{
-		BaseURL:          os.Getenv("ENGRAM_MEMORYLAKE_BASE_URL"),
-		APIKey:           os.Getenv("ENGRAM_MEMORYLAKE_API_KEY"),
-		Workspace:        ws,
-		Actor:            os.Getenv("ENGRAM_MEMORYLAKE_ACTOR"),
+		BaseURL:          pickStr("ENGRAM_MEMORYLAKE_BASE_URL", conn.BaseURL, DefaultBaseURL),
+		APIKey:           pickStr("ENGRAM_MEMORYLAKE_API_KEY", conn.APIKey, ""),
+		Workspace:        pickStr("ENGRAM_MEMORYLAKE_WORKSPACE", conn.Workspace, DefaultWorkspace),
+		Actor:            pickStr("ENGRAM_MEMORYLAKE_ACTOR", conn.Actor, ""),
 		TimeoutMS:        envInt("ENGRAM_MEMORYLAKE_TIMEOUT_MS", 30000),
 		ExtractPollMS:    envInt("ENGRAM_MEMORYLAKE_EXTRACT_POLL_MS", 2000),
 		ExtractMaxWaitMS: envInt("ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS", 30000),
 	}
+}
+
+// LoadConnection returns the persisted MemoryLake connection settings from
+// path, or a zero Connection when the file is missing or stores none.
+func LoadConnection(path string) (Connection, error) {
+	e, err := LoadEnablement(path)
+	if err != nil {
+		return Connection{}, err
+	}
+	if e.Connection == nil {
+		return Connection{}, nil
+	}
+	return *e.Connection, nil
+}
+
+// SaveConnection persists conn into path, preserving the enablement list that
+// already lives in the same file.
+func SaveConnection(path string, conn Connection) error {
+	e, err := LoadEnablement(path)
+	if err != nil {
+		return err
+	}
+	e.Connection = &conn
+	return e.Save(path)
 }
 
 // ProjectEntry records when (and under which MemoryLake project id) a local
@@ -51,10 +112,16 @@ type ProjectEntry struct {
 	EnabledAt string `json:"enabled_at"`
 }
 
-// Enablement is the per-project MemoryLake enablement list persisted at
-// DefaultEnablementPath. Projects not present here use the local SQLite
-// backend (the default and the source of truth).
+// Enablement is the persisted MemoryLake state at DefaultEnablementPath: the
+// per-project enablement list plus the optional connection config. Projects not
+// present in EnabledProjects use the local SQLite backend (the default and the
+// source of truth).
 type Enablement struct {
+	// Connection is the persisted connection config set via
+	// `engram memorylake config`. nil when never configured (env vars +
+	// defaults then apply). Stored in the same file so config edits and
+	// enable/disable preserve each other.
+	Connection      *Connection             `json:"connection,omitempty"`
 	EnabledProjects map[string]ProjectEntry `json:"enabled_projects"`
 }
 
@@ -95,7 +162,9 @@ func (e *Enablement) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// 0o600: this file may hold the MemoryLake API key (persisted via
+	// `engram memorylake config`), so keep it readable only by the owner.
+	return os.WriteFile(path, b, 0o600)
 }
 
 // IsEnabled reports whether project is enabled for the MemoryLake backend,
