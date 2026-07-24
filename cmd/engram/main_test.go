@@ -25,13 +25,6 @@ func testConfig(t *testing.T) store.Config {
 	// Force sqlite routing so a developer's live MemoryLake enablement
 	// (~/.engram/memorylake.json) can never receive test writes.
 	t.Setenv("ENGRAM_BACKEND", "sqlite")
-	// Defense in depth: isolate HOME so any command path that resolves
-	// memorylake.DefaultEnablementPath() (== $HOME/.engram/memorylake.json) or
-	// store.DefaultConfig()'s DataDir can never read or clobber the developer's
-	// real ~/.engram files. On Linux os.UserHomeDir() honors $HOME. cfg.DataDir
-	// is overridden to a temp dir below, so this only redirects the enablement
-	// path and cannot change any DataDir-dependent behavior.
-	t.Setenv("HOME", t.TempDir())
 	cfg, err := store.DefaultConfig()
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)
