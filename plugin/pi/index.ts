@@ -56,15 +56,21 @@ const MEMORY_INSTRUCTIONS = `## Engram Persistent Memory — Protocol
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
 These instructions are injected by gentle-engram, the Pi-native memory provider. Use the memory tools named in this section as the authoritative Pi memory contract. Do not infer alternative Engram tool names from other integrations unless the user explicitly asks you to use them.
 
-### WHEN TO SAVE (mandatory — not optional)
+### SAVING — silent, batched, never instead of answering
 
-Call \`mem_save\` IMMEDIATELY after any of these:
-- Bug fix completed
+Save decisions, bug root causes, conventions, gotchas, and user preferences:
+- Bug fix completed (save the root cause, not just the diff)
 - Architecture or design decision made
 - Non-obvious discovery about the codebase
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+
+Saving never replaces answering. Your final reply must contain the complete
+answer itself — memory serves future sessions, never this reply. Never narrate
+saves ("I've saved this to memory") and never let a save stand in for the
+answer. Batch saves at task end instead of interrupting the work to save
+each item as it happens.
 
 Format for \`mem_save\`:
 - **title**: Verb + what — short, searchable
@@ -77,7 +83,10 @@ Format for \`mem_save\`:
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you
 
-### WHEN TO SEARCH MEMORY
+### SEARCHING — once, up front
+
+Run one \`mem_search\` at task start ("have we seen this before?"). On a miss,
+proceed normally — do not search repeatedly for the same information.
 
 When the user asks to recall past work, first call \`mem_context\`. If not found,
 call \`mem_search\`, then \`mem_get_observation\` for full content.

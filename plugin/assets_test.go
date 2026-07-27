@@ -195,51 +195,83 @@ func TestMemorySkillsCarryConflictLoop(t *testing.T) {
 	}
 }
 
-// TestAnswerFirstRulesPresent pins the answer-first behavior rules (R2) to
-// BOTH protocol modes and both SKILL files. The slim protocol carries them
-// already; asserting them on the whole file means a rollback of the slim
-// protocol (R1) cannot silently drop R2 with it.
-//
-// The banned phrase is the save-eager trigger-list lead-in ("call mem_save
+// answerFirstRules are the R2 behavior rules, lowercased for matching.
+var answerFirstRules = []string{
+	"final reply must contain the complete answer",
+	"never narrate saves",
+	"batch saves at task end",
+}
+
+// saveEagerLeadIn is the banned save-eager trigger-list lead-in ("call mem_save
 // IMMEDIATELY after ANY of these"), which is what made agents interrupt their
 // answer to narrate a save.
+const saveEagerLeadIn = "immediately after any of these"
+
+// assertAnswerFirst checks one chunk of protocol text for all three R2 rules
+// and for the absence of the save-eager lead-in.
+func assertAnswerFirst(t *testing.T, label, text string) {
+	t.Helper()
+
+	s := strings.ToLower(text)
+	for _, must := range answerFirstRules {
+		if !strings.Contains(s, must) {
+			t.Errorf("%s missing answer-first rule %q", label, must)
+		}
+	}
+	if strings.Contains(s, saveEagerLeadIn) {
+		t.Errorf("%s still contains save-eager phrasing", label)
+	}
+}
+
+// TestAnswerFirstRulesPresent pins the answer-first behavior rules (R2) to
+// BOTH protocol modes and both SKILL files.
+//
+// The session-start hooks are asserted per-heredoc rather than on whole-file
+// content: a whole-file assertion is satisfied by the slim heredoc alone, which
+// would leave the FULL branch free to drift back to save-eager phrasing
+// unnoticed. Each branch is injected on its own, so each must carry R2 on its
+// own. The SKILL files have no branches, so whole-file assertions are correct
+// there.
 func TestAnswerFirstRulesPresent(t *testing.T) {
 	root := repoRoot(t)
 
-	files := []string{
-		filepath.Join(root, "plugin", "claude-code", "scripts", "session-start.sh"),
+	// Hook scripts: assert the slim and full heredocs separately.
+	for _, plugin := range []string{"claude-code", "codex"} {
+		sessionStart := filepath.Join(root, "plugin", plugin, "scripts", "session-start.sh")
+		rel, _ := filepath.Rel(root, sessionStart)
+
+		assertAnswerFirst(t, rel+" (SLIM_PROTOCOL heredoc)",
+			slimProtocolHeredoc(t, sessionStart, rel))
+		assertAnswerFirst(t, rel+" (PROTOCOL heredoc)",
+			fullProtocolHeredoc(t, sessionStart, rel))
+	}
+
+	// Post-compaction hooks and SKILL files: whole-file assertions. The
+	// post-compaction slim branch is pinned byte-identical to session-start's
+	// by TestSlimProtocolSurvivesCompaction, so its full branch is the only
+	// thing a whole-file check could miss — and it re-injects the same
+	// constant text as session-start's full branch.
+	wholeFiles := []string{
 		filepath.Join(root, "plugin", "claude-code", "scripts", "post-compaction.sh"),
-		filepath.Join(root, "plugin", "codex", "scripts", "session-start.sh"),
 		filepath.Join(root, "plugin", "codex", "scripts", "post-compaction.sh"),
 		filepath.Join(root, "plugin", "claude-code", "skills", "memory", "SKILL.md"),
 		filepath.Join(root, "plugin", "codex", "skills", "memory", "SKILL.md"),
 	}
-
-	for _, path := range files {
+	for _, path := range wholeFiles {
 		rel, _ := filepath.Rel(root, path)
 		b, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
 		}
-		s := strings.ToLower(string(b))
-		for _, must := range []string{
-			"final reply must contain the complete answer",
-			"never narrate saves",
-			"batch saves at task end",
-		} {
-			if !strings.Contains(s, must) {
-				t.Errorf("%s missing answer-first rule %q", rel, must)
-			}
-		}
-		if strings.Contains(s, "immediately after any of these") {
-			t.Errorf("%s still contains save-eager phrasing", rel)
-		}
+		assertAnswerFirst(t, rel, string(b))
 	}
 }
 
-// slimProtocolHeredoc returns the SLIM_PROTOCOL heredoc of a hook script,
-// from the opening marker through (but excluding) the closing marker.
-func slimProtocolHeredoc(t *testing.T, path, rel string) string {
+// heredocBody returns the body of the `cat <<'MARKER' ... MARKER` heredoc in a
+// hook script, excluding both marker lines. It anchors on the literal opener
+// `<<'MARKER'` so that a bare mention of the marker word elsewhere in the file
+// (or the SLIM_ prefixed variant) cannot be mistaken for the heredoc.
+func heredocBody(t *testing.T, path, rel, marker string) string {
 	t.Helper()
 
 	b, err := os.ReadFile(path)
@@ -248,15 +280,32 @@ func slimProtocolHeredoc(t *testing.T, path, rel string) string {
 	}
 	s := string(b)
 
-	start := strings.Index(s, "SLIM_PROTOCOL")
+	opener := "<<'" + marker + "'\n"
+	start := strings.Index(s, opener)
 	if start < 0 {
-		t.Fatalf("%s: slim branch heredoc marker SLIM_PROTOCOL not found", rel)
+		t.Fatalf("%s: heredoc opener %q not found", rel, strings.TrimSuffix(opener, "\n"))
 	}
-	end := strings.Index(s[start+1:], "SLIM_PROTOCOL")
+	body := s[start+len(opener):]
+
+	closer := "\n" + marker + "\n"
+	end := strings.Index(body, closer)
 	if end < 0 {
-		t.Fatalf("%s: unterminated SLIM_PROTOCOL heredoc", rel)
+		t.Fatalf("%s: unterminated %s heredoc", rel, marker)
 	}
-	return s[start : start+1+end]
+	return body[:end]
+}
+
+// slimProtocolHeredoc returns the body of the SLIM_PROTOCOL heredoc.
+func slimProtocolHeredoc(t *testing.T, path, rel string) string {
+	t.Helper()
+	return heredocBody(t, path, rel, "SLIM_PROTOCOL")
+}
+
+// fullProtocolHeredoc returns the body of the full PROTOCOL heredoc — the
+// non-slim branch of the same hook script.
+func fullProtocolHeredoc(t *testing.T, path, rel string) string {
+	t.Helper()
+	return heredocBody(t, path, rel, "PROTOCOL")
 }
 
 // TestSlimProtocolSurvivesCompaction asserts that the post-compaction hooks

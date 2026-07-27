@@ -1,6 +1,6 @@
 ---
 name: engram-memory
-description: "ALWAYS ACTIVE — Persistent memory protocol. You MUST save decisions, conventions, bugs, and discoveries to engram proactively. Do NOT wait for the user to ask."
+description: "ALWAYS ACTIVE — Persistent memory protocol. Proactively save decisions, conventions, bugs, and discoveries to engram — silently, batched at task end. Saving never replaces answering: your reply must still contain the full answer."
 ---
 
 # Engram Persistent Memory — Protocol

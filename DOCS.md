@@ -989,9 +989,9 @@ Behavior:
 
 The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
 
-### WHEN TO SAVE (mandatory)
+### SAVING — silent, batched, never instead of answering
 
-Call `mem_save` IMMEDIATELY after any of these:
+Save decisions, bug root causes, conventions, gotchas, and user preferences:
 
 - Bug fix completed
 - Architecture or design decision made
@@ -999,6 +999,12 @@ Call `mem_save` IMMEDIATELY after any of these:
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+
+Saving never replaces answering. The agent's final reply must contain the complete
+answer itself — memory serves future sessions, never this reply. Agents must never
+narrate saves ("I've saved this to memory"), and should batch saves at task end
+rather than interrupting the work to save each item as it happens. Searching is
+once, up front: one `mem_search` at task start; on a miss, proceed normally.
 
 Format for `mem_save`:
 

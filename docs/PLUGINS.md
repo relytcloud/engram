@@ -57,8 +57,8 @@ The plugin:
 
 The plugin injects a strict protocol into every agent message:
 
-- **WHEN TO SAVE**: Mandatory after bugfixes, decisions, discoveries, config changes, patterns, preferences
-- **WHEN TO SEARCH**: Reactive (user says "remember"/"recordar") + proactive (starting work that might overlap past sessions)
+- **SAVING**: Save bugfixes, decisions, discoveries, config changes, patterns, preferences — silently, batched at task end; saving never replaces answering
+- **SEARCHING**: Once, up front (one `mem_search` at task start), plus reactive recall (user says "remember"/"recordar")
 - **SESSION CLOSE**: Mandatory `mem_session_summary` before ending — "This is NOT optional. If you skip this, the next session starts blind."
 - **AFTER COMPACTION**: Immediately call `mem_context` to recover state
 
