@@ -407,15 +407,18 @@ func (b *MemoryLakeBackend) Timeline(syncID string, before, after int) (*store.T
 // field). The layered layout renders at most contextRecentObs of them.
 const maxFormatContextRecent = 20
 
-// formatContextContentTruncateLen mirrors internal/store's FormatContext,
-// which truncates a *pinned* observation's content to 300 runes (via its
-// unexported truncate helper, as contextPinnedTruncLen) before rendering the
-// pinned lines — see internal/store/store.go's FormatContext. internal/store
-// does not export that helper, so truncate below replicates it so
-// MemoryLake-backed projects produce the same shape of context block as
-// SQLite-backed ones (task-12 hardening brief I3). Recent-observation lines use
-// firstSentence on both backends instead.
-const formatContextContentTruncateLen = 300
+// contextPinnedTruncLen mirrors internal/store's FormatContext, which
+// truncates a *pinned* observation's content to 300 runes (via its unexported
+// truncate helper, spelled with this same name) before rendering the pinned
+// lines — see internal/store/store.go's FormatContext. internal/store does not
+// export that helper, so truncate below replicates it so MemoryLake-backed
+// projects produce the same shape of context block as SQLite-backed ones
+// (task-12 hardening brief I3). Recent-observation lines use firstSentence on
+// both backends instead.
+//
+// The name is deliberately identical to internal/store's constant so a grep for
+// contextPinnedTruncLen surfaces both copies of the rule at once.
+const contextPinnedTruncLen = 300
 
 // truncate mirrors internal/store's unexported truncate(s, max): a rune-safe
 // cut to at most max runes, with a literal "..." appended when s was longer.
@@ -598,7 +601,7 @@ func (b *MemoryLakeBackend) FormatContext(project, scope string) (string, error)
 	for _, f := range pinned {
 		o := ObservationFromFact(f)
 		pinnedLines = append(pinnedLines, fmt.Sprintf("- [%s] **%s**: %s\n",
-			o.Type, o.Title, truncate(o.Content, formatContextContentTruncateLen)))
+			o.Type, o.Title, truncate(o.Content, contextPinnedTruncLen)))
 	}
 
 	if len(recent) > contextRecentObs {

@@ -1736,6 +1736,10 @@ func handleContext(sel BackendSelector, cfg MCPConfig, activity *SessionActivity
 			projects = "none"
 		}
 
+		// contextByteCap (internal/store) bounds contextResult — the rendered
+		// block — only; this stats/nudge tail is uncapped and is NOT part of the
+		// L2 context measurement (eval/tokenmeter.ContextTokens measures the
+		// block, not this envelope).
 		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
 			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
 

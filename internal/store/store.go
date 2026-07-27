@@ -3462,10 +3462,16 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 			obs.Type, obs.Title, truncate(obs.Content, contextPinnedTruncLen)))
 	}
 
+	// A blank project filter means RecentSessions returned rows from every
+	// project (the cross-project render used by scope=personal), so each
+	// session line has to say which project it came from. Per-project renders
+	// stay byte-identical to before — the prefix would be pure noise there.
+	crossProject := strings.TrimSpace(project) == ""
+
 	sessionLines := make([]string, 0, len(sessions))
 	for _, sess := range sessions {
 		sessionLines = append(sessionLines, fmt.Sprintf("- %s %s\n",
-			timeutil.FormatLocal(sess.StartedAt), sessionSummaryLine(sess)))
+			timeutil.FormatLocal(sess.StartedAt), sessionSummaryLine(sess, crossProject)))
 	}
 
 	if len(observations) > contextRecentObs {
@@ -3483,14 +3489,26 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 // sessionSummaryLine renders the one-line session tail: the summary's first
 // sentence when there is one, "(active)" for a still-open session, and
 // "(no summary)" for a session that ended without one.
-func sessionSummaryLine(sess SessionSummary) string {
-	if sess.Summary != nil && strings.TrimSpace(*sess.Summary) != "" {
-		return firstSentence(*sess.Summary)
+//
+// crossProject prefixes the tail with "[<project>] " so a cross-project render
+// (blank project filter, e.g. scope=personal) attributes each session to its
+// own project. Per-project renders pass false and emit no prefix.
+//
+// internal/memorylake has no session lines at all (MemoryLake has no session
+// tracking — see its FormatContext), so there is no twin of this helper to keep
+// in byte parity: its block simply omits "### Recent Sessions".
+func sessionSummaryLine(sess SessionSummary, crossProject bool) string {
+	tail := "(no summary)"
+	switch {
+	case sess.Summary != nil && strings.TrimSpace(*sess.Summary) != "":
+		tail = firstSentence(*sess.Summary)
+	case sess.EndedAt == nil:
+		tail = "(active)"
 	}
-	if sess.EndedAt == nil {
-		return "(active)"
+	if crossProject && strings.TrimSpace(sess.Project) != "" {
+		return "[" + sess.Project + "] " + tail
 	}
-	return "(no summary)"
+	return tail
 }
 
 // ─── Export / Import ─────────────────────────────────────────────────────────

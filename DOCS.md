@@ -898,6 +898,8 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 Save user prompts — records what the user asked so future sessions have context about user goals.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
+Prompts are **write-only over MCP**: `mem_save_prompt` is the only prompt tool the MCP server registers, so stdio agents (Claude Code, Codex, Gemini, Cursor, Windsurf) can save prompts but cannot read them back. Reading is via `engram serve` HTTP (`GET /prompts/recent`, `GET /prompts/search`) — the OpenCode plugin and Pi extension already run it — or the cloud dashboard's prompt views. This is the intended Wave-1 posture, not a gap.
+
 ### mem_context
 
 Get recent memory context from previous sessions, with optional scope filtering for observations.
@@ -919,7 +921,9 @@ The block is layered and budgeted (~400 tokens / 1600 bytes hard cap) so it is c
 Full bodies: mem_search / mem_get_observation.
 ```
 
-Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped. Sections with no rows are omitted entirely, and an empty project returns an empty string. Recent user prompts are **not** part of this block (they cost more than they buy inside the budget) — read them with `GET /prompts/recent` / `GET /prompts/search` instead. The MemoryLake backend renders the identical layout minus `### Recent Sessions` (it has no session tracking).
+Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped. Sections with no rows are omitted entirely, and an empty project returns an empty string. In a cross-project render (blank project filter — e.g. `scope: personal` with no `project` override) each session line is prefixed with its project: `- <started_at> [<project>] <summary>`. The MemoryLake backend renders the identical layout minus `### Recent Sessions` (it has no session tracking).
+
+Recent user prompts are **not** part of this block (they cost more than they buy inside the budget). The intended Wave-1 posture is that **prompts are write-only for stdio agents**: Claude Code, Codex, Gemini, Cursor, and Windsurf reach Engram over stdio MCP, which exposes `mem_save_prompt` but no prompt-read tool. Saved prompts are readable only through the `engram serve` HTTP API (`GET /prompts/recent`, `GET /prompts/search`) — used by the OpenCode plugin and the Pi extension, which already run `engram serve` — and through the cloud dashboard. Prompts still feed `mem_save --capture_prompt` within the same MCP process, so stdio agents get their value indirectly rather than by reading them back.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
