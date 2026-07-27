@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type Rubric struct {
@@ -60,4 +61,37 @@ func LoadTasks(dir string) ([]Task, error) {
 		tasks = append(tasks, t)
 	}
 	return tasks, nil
+}
+
+// FilterTasks returns the subset of tasks whose IDs appear in csv (comma
+// separated), preserving tasks' original order. Empty csv returns all.
+func FilterTasks(tasks []Task, csv string) ([]Task, error) {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return tasks, nil
+	}
+	want := map[string]bool{}
+	for _, id := range strings.Split(csv, ",") {
+		want[strings.TrimSpace(id)] = true
+	}
+	var out []Task
+	for _, t := range tasks {
+		if want[t.ID] {
+			out = append(out, t)
+			delete(want, t.ID)
+		}
+	}
+	if len(want) > 0 {
+		var valid []string
+		for _, t := range tasks {
+			valid = append(valid, t.ID)
+		}
+		var missing []string
+		for id := range want {
+			missing = append(missing, id)
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("unknown task ids %v (valid: %v)", missing, valid)
+	}
+	return out, nil
 }

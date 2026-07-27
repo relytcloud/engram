@@ -50,6 +50,13 @@ func TestRunL1(t *testing.T) {
 	if len(sc.PerItem) != 2 || sc.PerItem[0].Values["first_hit_rank"] != 2 {
 		t.Errorf("per-item results wrong: %+v", sc.PerItem)
 	}
+	// q1 hits at rank 2 of 2 results → (2-1)/2 = 0.5; q2 misses with 1 result → 1.
+	if got := sc.PerItem[0].Values["distractor_ratio"]; got != 0.5 {
+		t.Errorf("per-item distractor_ratio = %v, want 0.5", got)
+	}
+	if got := sc.Metrics["avg_distractor_ratio"]; got != 0.75 {
+		t.Errorf("avg_distractor_ratio = %v, want 0.75", got)
+	}
 	if sc.Suite != "l1" {
 		t.Errorf("suite = %q, want l1", sc.Suite)
 	}

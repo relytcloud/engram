@@ -321,7 +321,7 @@ func registerTools(srv *server.MCPServer, sel BackendSelector, cfg MCPConfig, al
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
 			),
-			handleSearch(sel, cfg, activity),
+			withAudit("mem_search", handleSearch(sel, cfg, activity)),
 		)
 	}
 
@@ -395,7 +395,7 @@ Examples:
 					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for SDD artifacts or automated saves."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSave(sel, cfg, activity)),
+			withAudit("mem_save", queuedWriteHandler(writeQueue, handleSave(sel, cfg, activity))),
 		)
 	}
 
@@ -430,7 +430,7 @@ Examples:
 					mcp.Description("New topic key (normalized internally)"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleUpdate(sel, cfg)),
+			withAudit("mem_update", queuedWriteHandler(writeQueue, handleUpdate(sel, cfg))),
 		)
 	}
 
@@ -451,7 +451,7 @@ Examples:
 				mcp.WithString("observation_id", mcp.Description("Observation sync_id for action=mark_reviewed (from mem_search/mem_save/mem_get_observation results).")),
 				mcp.WithString("id", mcp.Description("Backward-compatible alias for observation_id.")),
 			),
-			queuedWriteHandler(writeQueue, handleReview(sel, cfg)),
+			withAudit("mem_review", queuedWriteHandler(writeQueue, handleReview(sel, cfg))),
 		)
 	}
 
@@ -476,7 +476,7 @@ Examples:
 					mcp.Description("Observation content used as fallback if title is empty"),
 				),
 			),
-			handleSuggestTopicKey(),
+			withAudit("mem_suggest_topic_key", handleSuggestTopicKey()),
 		)
 	}
 
@@ -499,7 +499,7 @@ Examples:
 					mcp.Description("If true, permanently deletes the observation"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleDelete(sel, cfg)),
+			withAudit("mem_delete", queuedWriteHandler(writeQueue, handleDelete(sel, cfg))),
 		)
 	}
 
@@ -530,7 +530,7 @@ Examples:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSavePrompt(sel, cfg, activity)),
+			withAudit("mem_save_prompt", queuedWriteHandler(writeQueue, handleSavePrompt(sel, cfg, activity))),
 		)
 	}
 
@@ -547,7 +547,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithString("id", mcp.Required(), mcp.Description("Observation sync_id to pin (from mem_search/mem_save/mem_get_observation results)")),
 			),
-			handlePin(sel, cfg, true),
+			withAudit("mem_pin", handlePin(sel, cfg, true)),
 		)
 	}
 	if shouldRegister("mem_unpin", allowlist) {
@@ -562,7 +562,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithString("id", mcp.Required(), mcp.Description("Observation sync_id to unpin (from mem_search/mem_save/mem_get_observation results)")),
 			),
-			handlePin(sel, cfg, false),
+			withAudit("mem_unpin", handlePin(sel, cfg, false)),
 		)
 	}
 
@@ -584,7 +584,7 @@ Examples:
 				),
 				// JW7: limit param removed — schema advertised it but handleContext never read it.
 			),
-			handleContext(sel, cfg, activity),
+			withAudit("mem_context", handleContext(sel, cfg, activity)),
 		)
 	}
 
@@ -603,7 +603,7 @@ Examples:
 					mcp.Description("Project to echo in envelope context (omit for auto-detect; stats themselves are global aggregates)"),
 				),
 			),
-			handleStats(sel, cfg),
+			withAudit("mem_stats", handleStats(sel, cfg)),
 		)
 	}
 
@@ -632,7 +632,7 @@ Examples:
 					mcp.Description("Filter by project name (omit for auto-detect)"),
 				),
 			),
-			handleTimeline(sel, cfg),
+			withAudit("mem_timeline", handleTimeline(sel, cfg)),
 		)
 	}
 
@@ -651,7 +651,7 @@ Examples:
 					mcp.Description("The observation sync_id to retrieve (from mem_search/mem_save results)"),
 				),
 			),
-			handleGetObservation(sel, cfg),
+			withAudit("mem_get_observation", handleGetObservation(sel, cfg)),
 		)
 	}
 
@@ -714,7 +714,7 @@ GUIDELINES:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionSummary(sel, cfg, activity)),
+			withAudit("mem_session_summary", queuedWriteHandler(writeQueue, handleSessionSummary(sel, cfg, activity))),
 		)
 	}
 
@@ -737,7 +737,7 @@ GUIDELINES:
 					mcp.Description("Working directory"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionStart(sel, cfg, activity)),
+			withAudit("mem_session_start", queuedWriteHandler(writeQueue, handleSessionStart(sel, cfg, activity))),
 		)
 	}
 
@@ -760,7 +760,7 @@ GUIDELINES:
 					mcp.Description("Summary of what was accomplished"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionEnd(sel, cfg, activity)),
+			withAudit("mem_session_end", queuedWriteHandler(writeQueue, handleSessionEnd(sel, cfg, activity))),
 		)
 	}
 
@@ -790,7 +790,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleCapturePassive(sel, cfg, activity)),
+			withAudit("mem_capture_passive", queuedWriteHandler(writeQueue, handleCapturePassive(sel, cfg, activity))),
 		)
 	}
 
@@ -814,7 +814,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The canonical project name to merge INTO (e.g. 'engram')"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleMergeProjects(sel)),
+			withAudit("mem_merge_projects", queuedWriteHandler(writeQueue, handleMergeProjects(sel))),
 		)
 	}
 
@@ -829,7 +829,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
 			),
-			handleCurrentProject(sel, cfg),
+			withAudit("mem_current_project", handleCurrentProject(sel, cfg)),
 		)
 	}
 
@@ -847,7 +847,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithString("project", mcp.Description("Project to diagnose (omit for auto-detect)")),
 				mcp.WithString("check", mcp.Description("Optional diagnostic check code to run")),
 			),
-			handleDoctor(sel, cfg),
+			withAudit("mem_doctor", handleDoctor(sel, cfg)),
 		)
 	}
 
@@ -901,7 +901,7 @@ Re-judging an already-judged ID overwrites the verdict (deliberate revision).`),
 					mcp.Description("Session ID for provenance (default: auto)"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleJudge(sel, activity)),
+			withAudit("mem_judge", queuedWriteHandler(writeQueue, handleJudge(sel, activity))),
 		)
 	}
 
@@ -958,7 +958,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 					mcp.Description("Your model identifier for provenance (e.g. \"claude-haiku-4-5\")"),
 				),
 			),
-			handleCompare(sel, cfg, activity),
+			withAudit("mem_compare", handleCompare(sel, cfg, activity)),
 		)
 	}
 }

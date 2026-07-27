@@ -52,3 +52,21 @@ func TestHitsKeywordGroups(t *testing.T) {
 		t.Error("expected miss on empty groups (vacuous hit would poison recall)")
 	}
 }
+
+func TestDistractorRatio(t *testing.T) {
+	cases := []struct {
+		rank, count int
+		want        float64
+	}{
+		{1, 10, 0},   // hit on top: no distractors
+		{3, 10, 0.2}, // 2 distractors above hit / 10 results
+		{0, 10, 1},   // miss with results: all distractors
+		{0, 0, 0},    // no results at all
+		{2, 2, 0.5},
+	}
+	for _, c := range cases {
+		if got := DistractorRatio(c.rank, c.count); got != c.want {
+			t.Errorf("DistractorRatio(%d,%d) = %v, want %v", c.rank, c.count, got, c.want)
+		}
+	}
+}

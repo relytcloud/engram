@@ -56,3 +56,17 @@ func TestRealTaskSetParses(t *testing.T) {
 		t.Errorf("task count %d outside 12-16", len(tasks))
 	}
 }
+
+func TestFilterTasks(t *testing.T) {
+	tasks := []Task{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	got, err := FilterTasks(tasks, "c,a")
+	if err != nil || len(got) != 2 || got[0].ID != "a" || got[1].ID != "c" {
+		t.Fatalf("FilterTasks = %+v, %v", got, err)
+	}
+	if all, err := FilterTasks(tasks, ""); err != nil || len(all) != 3 {
+		t.Fatalf("empty csv should return all, got %d, %v", len(all), err)
+	}
+	if _, err := FilterTasks(tasks, "a,zzz"); err == nil {
+		t.Fatal("unknown id must error")
+	}
+}

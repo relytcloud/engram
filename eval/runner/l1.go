@@ -34,6 +34,7 @@ func RunL1(b SearchBackend, cases []dataset.RetrievalCase, cfg L1Config) (scorec
 	ranks := make([]int, 0, len(cases))
 	items := make([]scorecard.ItemResult, 0, len(cases))
 	var totalTokens float64
+	var totalDR float64
 	latencies := make([]float64, 0, len(cases))
 
 	for _, c := range cases {
@@ -51,18 +52,21 @@ func RunL1(b SearchBackend, cases []dataset.RetrievalCase, cfg L1Config) (scorec
 				break
 			}
 		}
+		dr := metrics.DistractorRatio(rank, len(results))
 		payload, _ := json.Marshal(results)
 		tokens := float64(metrics.ApproxTokens(string(payload)))
 
 		ranks = append(ranks, rank)
 		totalTokens += tokens
+		totalDR += dr
 		latencies = append(latencies, latMS)
 		items = append(items, scorecard.ItemResult{
 			ID: c.ID,
 			Values: map[string]float64{
-				"first_hit_rank": float64(rank),
-				"tokens":         tokens,
-				"latency_ms":     latMS,
+				"first_hit_rank":   float64(rank),
+				"tokens":           tokens,
+				"latency_ms":       latMS,
+				"distractor_ratio": dr,
 			},
 		})
 	}
@@ -75,6 +79,7 @@ func RunL1(b SearchBackend, cases []dataset.RetrievalCase, cfg L1Config) (scorec
 	}
 	if len(cases) > 0 {
 		m["avg_tokens_per_query"] = totalTokens / float64(len(cases))
+		m["avg_distractor_ratio"] = totalDR / float64(len(cases))
 		m["latency_p50_ms"] = percentile(latencies, 0.50)
 		m["latency_p95_ms"] = percentile(latencies, 0.95)
 	}

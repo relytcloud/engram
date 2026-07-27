@@ -62,3 +62,16 @@ func HitsKeywordGroups(text string, groups [][]string) bool {
 	}
 	return true
 }
+
+// DistractorRatio: share of returned results ranked above the first hit.
+// rank is 1-based (0 = miss). A miss with results counts as all-distractor
+// (1.0); no results at all counts 0 (nothing was injected).
+func DistractorRatio(firstHitRank, resultCount int) float64 {
+	if resultCount == 0 {
+		return 0
+	}
+	if firstHitRank == 0 {
+		return 1
+	}
+	return float64(firstHitRank-1) / float64(resultCount)
+}
