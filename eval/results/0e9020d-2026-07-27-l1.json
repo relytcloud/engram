@@ -1,0 +1,508 @@
+{
+  "git_sha": "0e9020d",
+  "date": "2026-07-27",
+  "suite": "l1",
+  "metrics": {
+    "avg_distractor_ratio": 0.13888888888888887,
+    "avg_tokens_per_query": 890.7777777777778,
+    "latency_p50_ms": 589,
+    "latency_p95_ms": 1120,
+    "mrr": 0.7376543209876544,
+    "recall@1": 0.6851851851851852,
+    "recall@10": 0.7962962962962963,
+    "recall@5": 0.7962962962962963
+  },
+  "per_item": [
+    {
+      "id": "r-001",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 636,
+        "tokens": 390
+      }
+    },
+    {
+      "id": "r-002",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1060,
+        "tokens": 1567
+      }
+    },
+    {
+      "id": "r-003",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1148,
+        "tokens": 1272
+      }
+    },
+    {
+      "id": "r-004",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 560,
+        "tokens": 472
+      }
+    },
+    {
+      "id": "r-005",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 557,
+        "tokens": 665
+      }
+    },
+    {
+      "id": "r-006",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1015,
+        "tokens": 656
+      }
+    },
+    {
+      "id": "r-007",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 620,
+        "tokens": 1060
+      }
+    },
+    {
+      "id": "r-008",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 542,
+        "tokens": 1
+      }
+    },
+    {
+      "id": "r-009",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 595,
+        "tokens": 140
+      }
+    },
+    {
+      "id": "r-010",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 547,
+        "tokens": 1
+      }
+    },
+    {
+      "id": "r-011",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 555,
+        "tokens": 1361
+      }
+    },
+    {
+      "id": "r-012",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 745,
+        "tokens": 338
+      }
+    },
+    {
+      "id": "r-013",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1255,
+        "tokens": 1552
+      }
+    },
+    {
+      "id": "r-014",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 552,
+        "tokens": 142
+      }
+    },
+    {
+      "id": "r-015",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 599,
+        "tokens": 369
+      }
+    },
+    {
+      "id": "r-016",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 546,
+        "tokens": 1431
+      }
+    },
+    {
+      "id": "r-017",
+      "values": {
+        "distractor_ratio": 0.3333333333333333,
+        "first_hit_rank": 2,
+        "latency_ms": 554,
+        "tokens": 1437
+      }
+    },
+    {
+      "id": "r-018",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 546,
+        "tokens": 1109
+      }
+    },
+    {
+      "id": "r-019",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 539,
+        "tokens": 1552
+      }
+    },
+    {
+      "id": "r-020",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1066,
+        "tokens": 1346
+      }
+    },
+    {
+      "id": "r-021",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 549,
+        "tokens": 3845
+      }
+    },
+    {
+      "id": "r-022",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1000,
+        "tokens": 1110
+      }
+    },
+    {
+      "id": "r-023",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 588,
+        "tokens": 1437
+      }
+    },
+    {
+      "id": "r-024",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1021,
+        "tokens": 3191
+      }
+    },
+    {
+      "id": "r-025",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 602,
+        "tokens": 532
+      }
+    },
+    {
+      "id": "r-026",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 536,
+        "tokens": 840
+      }
+    },
+    {
+      "id": "r-027",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 792,
+        "tokens": 817
+      }
+    },
+    {
+      "id": "r-028",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 543,
+        "tokens": 535
+      }
+    },
+    {
+      "id": "r-029",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 618,
+        "tokens": 1067
+      }
+    },
+    {
+      "id": "r-030",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1120,
+        "tokens": 3383
+      }
+    },
+    {
+      "id": "r-031",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1226,
+        "tokens": 532
+      }
+    },
+    {
+      "id": "r-032",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 1086,
+        "tokens": 1
+      }
+    },
+    {
+      "id": "r-033",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 580,
+        "tokens": 901
+      }
+    },
+    {
+      "id": "r-034",
+      "values": {
+        "distractor_ratio": 0.3333333333333333,
+        "first_hit_rank": 2,
+        "latency_ms": 589,
+        "tokens": 1437
+      }
+    },
+    {
+      "id": "r-035",
+      "values": {
+        "distractor_ratio": 0.5,
+        "first_hit_rank": 2,
+        "latency_ms": 1075,
+        "tokens": 902
+      }
+    },
+    {
+      "id": "r-036",
+      "values": {
+        "distractor_ratio": 0.5,
+        "first_hit_rank": 2,
+        "latency_ms": 619,
+        "tokens": 1067
+      }
+    },
+    {
+      "id": "r-037",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 588,
+        "tokens": 1067
+      }
+    },
+    {
+      "id": "r-038",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 574,
+        "tokens": 1069
+      }
+    },
+    {
+      "id": "r-039",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 560,
+        "tokens": 1
+      }
+    },
+    {
+      "id": "r-040",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 568,
+        "tokens": 1
+      }
+    },
+    {
+      "id": "r-041",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 582,
+        "tokens": 537
+      }
+    },
+    {
+      "id": "r-042",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 589,
+        "tokens": 1
+      }
+    },
+    {
+      "id": "r-043",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 602,
+        "tokens": 532
+      }
+    },
+    {
+      "id": "r-044",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 579,
+        "tokens": 532
+      }
+    },
+    {
+      "id": "r-045",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 650,
+        "tokens": 532
+      }
+    },
+    {
+      "id": "r-046",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1017,
+        "tokens": 532
+      }
+    },
+    {
+      "id": "r-047",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 545,
+        "tokens": 579
+      }
+    },
+    {
+      "id": "r-048",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 589,
+        "tokens": 208
+      }
+    },
+    {
+      "id": "r-049",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 616,
+        "tokens": 1050
+      }
+    },
+    {
+      "id": "r-050",
+      "values": {
+        "distractor_ratio": 0.3333333333333333,
+        "first_hit_rank": 2,
+        "latency_ms": 1045,
+        "tokens": 956
+      }
+    },
+    {
+      "id": "r-051",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 556,
+        "tokens": 208
+      }
+    },
+    {
+      "id": "r-052",
+      "values": {
+        "distractor_ratio": 0.5,
+        "first_hit_rank": 3,
+        "latency_ms": 543,
+        "tokens": 1421
+      }
+    },
+    {
+      "id": "r-053",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 794,
+        "tokens": 208
+      }
+    },
+    {
+      "id": "r-054",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1063,
+        "tokens": 210
+      }
+    }
+  ],
+  "env": {
+    "backend": "memorylake",
+    "dataset": "eval/datasets/phoenix-retrieval-v1.jsonl",
+    "project": "phoenix"
+  }
+}
