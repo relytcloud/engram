@@ -33,8 +33,9 @@ func MRR(firstHitRanks []int) float64 {
 	return sum / float64(len(firstHitRanks))
 }
 
-// ApproxTokens estimates token count as ceil(bytes/4). Fast path only —
-// L2 uses the Anthropic count-tokens API when ANTHROPIC_API_KEY is set.
+// ApproxTokens estimates token count as ceil(bytes/4). This is the only
+// tokenizer implemented today; an accurate count-tokens API path is
+// deferred to Phase 2 (scorecards record tokenizer=approx-bytes/4).
 func ApproxTokens(s string) int {
 	return (len(s) + 3) / 4
 }

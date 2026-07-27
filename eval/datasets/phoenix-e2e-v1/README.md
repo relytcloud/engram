@@ -8,8 +8,10 @@ set.
 
 - **Constructed:** 2026-07-24.
 - **Target repo:** `/workspace/phoenix` (read at task-authoring time; the
-  Task 9 runner is responsible for giving each headless agent run an isolated
-  checkout so no task modifies the shared `/workspace/phoenix` tree).
+  runner executes headless agents directly against this shared tree — the
+  mitigation is task design: every prompt asks the agent to investigate and
+  *propose* a change, never to apply one. Worktree isolation is deferred to
+  Phase 2's first L3 change).
 - **Task count:** 15, ids `arch-001`…`arch-005`, `gotcha-001`…`gotcha-005`,
   `fix-001`…`fix-005`.
 - **Categories:** `architecture-qa` (5), `gotcha` (5), `small-fix` (5).

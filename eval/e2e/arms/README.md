@@ -31,3 +31,9 @@ are both this template materialized with a *different* `engramBin` — the
 binary is the only thing that differs between them. This keeps the config,
 hook, and MCP wiring identical so any measured uplift is attributable to the
 engram binary's behavior, not to config drift.
+
+Note this is a **two-invocation protocol**: run `evalrun -suite l3` once with
+the baseline binary and once with the optimized binary (separate `-out`
+scorecards), then compare the scorecards. A single invocation cannot take two
+memory arms — arm names key the runtime work dir and score map, so
+`-arms memory,memory` would collide.
