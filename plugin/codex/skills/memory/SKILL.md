@@ -49,6 +49,15 @@ Format for `mem_save`:
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
 
+### Pinning — the exception, not the habit
+
+Pin (mem_pin) only facts whose loss causes irreversible damage or repeated pitfalls; pinned facts are always in context.
+The pinned block is the one part of `mem_context` the byte budget never drops, and it
+carries its own 1024-byte ceiling: entries render oldest-pin-first, and once the
+ceiling is reached the OLDEST pins stop being rendered behind a
+`(pin cap reached: N pinned facts not shown — mem_unpin to prune)` marker. Over-pinning
+therefore evicts your own earlier pins from context — use `mem_unpin` to prune.
+
 ### Topic update rules (mandatory)
 
 - Different topics MUST NOT overwrite each other (example: architecture decision vs bugfix)

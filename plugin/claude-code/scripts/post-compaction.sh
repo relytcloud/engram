@@ -103,7 +103,8 @@ RULES
 5. Durable facts need topic_key (lowercase-kebab, max 2 levels, e.g.
    architecture/auth-model) — same key updates in place.
 6. End of session: mem_session_summary before saying done.
-7. MemoryLake-backed projects (check: engram memorylake status): dedup and
+7. Pin (mem_pin) only facts whose loss causes irreversible damage or repeated pitfalls; pinned facts are always in context.
+8. MemoryLake-backed projects (check: engram memorylake status): dedup and
    conflict-merge are automatic — mem_save/mem_search/mem_context suffice.
    SQLite projects: on judgment_required, follow the conflict loop in the
    memory SKILL.

@@ -909,8 +909,9 @@ The block is layered and budgeted (~400 tokens / 1600 bytes hard cap) so it is c
 ```
 ## Memory Context
 
-### Pinned
-- [decision] **title**: <content, cut to 300 runes>
+### Pinned (core memory)
+- [decision] **title**: <content, cut to 300 runes>          (oldest pin first, section ≤ 1024 bytes)
+(pin cap reached: N pinned facts not shown — mem_unpin to prune)   (only when the 1024 bytes run out)
 
 ### Recent Sessions
 - <started_at> <summary first sentence | (active) | (no summary)>   (max 5)
@@ -921,7 +922,13 @@ The block is layered and budgeted (~400 tokens / 1600 bytes hard cap) so it is c
 Full bodies: mem_search / mem_get_observation.
 ```
 
-Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped. Sections with no rows are omitted entirely, and an empty project returns an empty string. In a cross-project render (blank project filter — e.g. `scope: personal` with no `project` override) each session line is prefixed with its project: `- <started_at> [<project>] <summary>`. The MemoryLake backend renders the identical layout minus `### Recent Sessions` (it has no session tracking).
+Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped by that outer cap.
+
+**`### Pinned (core memory)` is capped separately at 1024 bytes** — heading, entry lines, overflow marker and blank separator included. Entries render in **pin-time ascending order** (oldest pin first), so the section is a stable prefix that grows at the end as new pins arrive. When the 1024 bytes are exhausted, the **oldest** pins stop being *rendered* (they stay pinned and searchable) and a trailing `(pin cap reached: N pinned facts not shown — mem_unpin to prune)` line names how many were withheld. Over-pinning therefore evicts your own earlier pins from the block; `mem_unpin` is the prune.
+
+Pin time is a documented **proxy**, not a stored timestamp: neither backend records when a pin happened (`mem_pin` only flips `observations.pinned` / the MemoryLake `pinned` metadata key and deliberately leaves `updated_at` untouched on SQLite), so the section orders by `updated_at`, falling back to `created_at`. Consequence: re-pinning an old memory does not move it to the end of the section, while editing a pinned memory's content does. Ordering is deterministic either way (id breaks ties).
+
+Sections with no rows are omitted entirely, and an empty project returns an empty string. In a cross-project render (blank project filter — e.g. `scope: personal` with no `project` override) each session line is prefixed with its project: `- <started_at> [<project>] <summary>`. The MemoryLake backend renders the identical layout minus `### Recent Sessions` (it has no session tracking).
 
 Recent user prompts are **not** part of this block (they cost more than they buy inside the budget). The intended Wave-1 posture is that **prompts are write-only for stdio agents**: Claude Code, Codex, Gemini, Cursor, and Windsurf reach Engram over stdio MCP, which exposes `mem_save_prompt` but no prompt-read tool. Saved prompts are readable only through the `engram serve` HTTP API (`GET /prompts/recent`, `GET /prompts/search`) — used by the OpenCode plugin and the Pi extension, which already run `engram serve` — and through the cloud dashboard. Prompts still feed `mem_save --capture_prompt` within the same MCP process, so stdio agents get their value indirectly rather than by reading them back.
 

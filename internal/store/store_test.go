@@ -333,13 +333,20 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("format context: %v", err)
 	}
-	pinnedIdx := strings.Index(ctx, "### Pinned")
+	pinnedIdx := strings.Index(ctx, pinnedSectionHeading)
 	recentIdx := strings.Index(ctx, "### Recent Observations")
 	if pinnedIdx < 0 || recentIdx < 0 || pinnedIdx > recentIdx {
 		t.Fatalf("expected pinned section before recent observations, got:\n%s", ctx)
 	}
 	if !strings.Contains(ctx, "pinned architecture") {
 		t.Fatalf("expected pinned observation in context, got:\n%s", ctx)
+	}
+	// A pinned section that fits under pinnedSectionByteCap is rendered whole:
+	// no entry withheld, no overflow marker. Guards the other side of
+	// capPinnedLines from TestFormatContextPinnedSectionCapAndOrder — an
+	// off-by-one in its drop loop would withhold pins that comfortably fit.
+	if strings.Contains(ctx, "pin cap reached") {
+		t.Fatalf("a single pinned observation must not trip the pinned cap marker, got:\n%s", ctx)
 	}
 	if !strings.Contains(ctx, "recent three") || !strings.Contains(ctx, "recent two") {
 		t.Fatalf("expected max recent unpinned observations in context, got:\n%s", ctx)
@@ -9033,13 +9040,163 @@ func TestFormatContextByteCapDropsObservationsThenSessionsNeverPinned(t *testing
 	assertContextSectionOrder(t, out)
 }
 
+// pinnedSectionBody returns the rendered pinned section of a context block:
+// the heading, every entry line, the overflow marker when there is one, and the
+// blank separator line writeContextSection appends. Sections are separated by
+// exactly one blank line and no entry line is empty, so the first "\n\n" after
+// the heading is the section end.
+//
+// This is what pinnedSectionByteCap is measured against, so the helper
+// deliberately re-derives the boundary from the output text rather than calling
+// the renderer's own accounting.
+func pinnedSectionBody(t *testing.T, out string) string {
+	t.Helper()
+	start := strings.Index(out, pinnedSectionHeading)
+	if start < 0 {
+		t.Fatalf("pinned heading %q not found in context block:\n%s", pinnedSectionHeading, out)
+	}
+	rest := out[start:]
+	end := strings.Index(rest[len(pinnedSectionHeading):], "\n\n")
+	if end < 0 {
+		t.Fatalf("pinned section is not terminated by a blank line:\n%s", out)
+	}
+	return rest[:len(pinnedSectionHeading)+end+2]
+}
+
+// TestFormatContextPinnedSectionCapAndOrder pins the R4 core-memory contract on
+// the local store: the pinned section is capped at pinnedSectionByteCap on its
+// own (inside, not instead of, the outer contextByteCap), entries render in
+// pin-time ASCENDING order, and overflow drops the OLDEST pins behind a marker
+// that names exactly how many were withheld.
+//
+// The fixture pins 15 observations whose rendered lines are exactly 120 bytes
+// each (1800 bytes of entries — well past the 1024-byte cap) and stamps them so
+// updated_at (the pin-time proxy, see PinnedObservations) ASCENDS with the pin
+// index while created_at DESCENDS. That inversion is deliberate: an
+// implementation that ordered by created_at, or that reversed the section to
+// newest-first, would keep the wrong pins and fail here.
+//
+// Regression net for four mutations, each of which must fail this test:
+// (a) deleting the cap loop, (b) rendering newest-first / reversing the order,
+// (c) ordering by created_at instead of the pin-time proxy, (d) dropping more
+// pins than the cap requires.
+func TestFormatContextPinnedSectionCapAndOrder(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-pin-cap", "proj-pin-cap", "/tmp/proj-pin-cap"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const (
+		totalPins = 15
+		// "- [decision] **pin-NN**: " (25) + body (94) + "\n" = 120 bytes.
+		lineBytes = 120
+	)
+	body := func(i int) string {
+		return fmt.Sprintf("core fact %02d ", i) + strings.Repeat("y", 81)
+	}
+	for i := 0; i < totalPins; i++ {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-pin-cap",
+			Type:      "decision",
+			Title:     fmt.Sprintf("pin-%02d", i),
+			Content:   body(i),
+			Project:   "proj-pin-cap",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation %d: %v", i, err)
+		}
+		if err := s.PinObservation(id); err != nil {
+			t.Fatalf("pin observation %d: %v", i, err)
+		}
+		// updated_at ascends with i (pin-time proxy), created_at descends.
+		if _, err := s.db.Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`,
+			fmt.Sprintf("2026-02-%02d 00:00:00", 20-i),
+			fmt.Sprintf("2026-03-01 %02d:00:00", i), id); err != nil {
+			t.Fatalf("stamp observation %d: %v", i, err)
+		}
+	}
+
+	// Sanity: the fixture must render past the pinned cap before any dropping,
+	// otherwise every assertion below is vacuous.
+	if precap := len(pinnedSectionHeading) + totalPins*lineBytes + 1; precap <= pinnedSectionByteCap {
+		t.Fatalf("fixture renders %d pinned bytes, already under the %d-byte cap: enlarge it",
+			precap, pinnedSectionByteCap)
+	}
+
+	out, err := s.FormatContext("proj-pin-cap", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+
+	section := pinnedSectionBody(t, out)
+	if len(section) > pinnedSectionByteCap {
+		t.Fatalf("pinned section is %d bytes, cap %d:\n%s", len(section), pinnedSectionByteCap, section)
+	}
+
+	shown := strings.Count(section, "**pin-")
+	if shown == 0 {
+		t.Fatalf("pinned section dropped every entry; core memory must keep the newest:\n%s", section)
+	}
+	if shown == totalPins {
+		t.Fatalf("all %d pinned entries rendered: the cap was not enforced:\n%s", totalPins, section)
+	}
+
+	// The marker names exactly the number withheld.
+	marker := fmt.Sprintf(pinnedCapMarkerFmt, totalPins-shown)
+	if !strings.Contains(section, marker) {
+		t.Fatalf("expected overflow marker %q in:\n%s", marker, section)
+	}
+
+	// Survivors are the NEWEST contiguous suffix: the oldest pins are dropped.
+	for i := 0; i < totalPins-shown; i++ {
+		if strings.Contains(section, fmt.Sprintf("**pin-%02d**", i)) {
+			t.Fatalf("oldest pin pin-%02d must be dropped from rendering:\n%s", i, section)
+		}
+	}
+	for i := totalPins - shown; i < totalPins; i++ {
+		if !strings.Contains(section, fmt.Sprintf("**pin-%02d**", i)) {
+			t.Fatalf("newest pin pin-%02d must survive the pinned cap:\n%s", i, section)
+		}
+	}
+
+	// Ascending pin-time order among the survivors (stable prefix rule).
+	prev := -1
+	for i := totalPins - shown; i < totalPins; i++ {
+		at := strings.Index(section, fmt.Sprintf("**pin-%02d**", i))
+		if at <= prev {
+			t.Fatalf("pinned entries must render in pin-time ascending order; pin-%02d at %d follows %d:\n%s",
+				i, at, prev, section)
+		}
+		prev = at
+	}
+
+	// The cap drops the MINIMUM: one more (older) entry would not have fit.
+	// Dropping one fewer keeps the marker the same width here (8 → 7), so the
+	// only delta is the extra 120-byte line.
+	if len(section)+lineBytes <= pinnedSectionByteCap {
+		t.Fatalf("pinned section is %d bytes with %d entries: one more would still fit under %d, "+
+			"the cap drops more than necessary:\n%s", len(section), shown, pinnedSectionByteCap, section)
+	}
+
+	// The pinned cap operates INSIDE the outer budget, which still never drops
+	// pinned lines and still keeps the footer.
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.Contains(out, "Full bodies: mem_search / mem_get_observation.") {
+		t.Fatalf("footer must survive:\n%s", out)
+	}
+}
+
 // assertContextSectionOrder pins the layered section order of a context block:
 // Pinned, then Recent Sessions, then Recent Observations — most durable first,
 // most volatile last (Phase 2 spec R3b). Headings that are absent (a section
 // with no rows is omitted) are skipped.
 func assertContextSectionOrder(t *testing.T, out string) {
 	t.Helper()
-	pinned := strings.Index(out, "### Pinned")
+	pinned := strings.Index(out, pinnedSectionHeading)
 	sessions := strings.Index(out, "### Recent Sessions")
 	observations := strings.Index(out, "### Recent Observations")
 	if pinned < 0 || sessions < 0 || observations < 0 {

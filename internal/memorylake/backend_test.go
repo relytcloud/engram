@@ -956,8 +956,13 @@ func TestBackend_FormatContext_ByteCapDropsOldestObservationNeverPinned(t *testi
 	if len(out) > contextByteCap {
 		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
 	}
-	// Pinned lines are never dropped: all three survive, each truncated to
-	// contextPinnedTruncLen runes.
+	// Pinned lines are never dropped by the OUTER cap: all three survive, each
+	// truncated to contextPinnedTruncLen runes. Note the fixture also sits just
+	// under the separate pinned-section cap — heading (25) + 3 × 331-byte lines
+	// + blank separator = 1019 of pinnedSectionByteCap's 1024 bytes — so a
+	// fourth pinned fact (or a longer title here) would legitimately trip the
+	// pin cap and make this assertion fail; TestBackend_FormatContext_
+	// PinnedSectionCapAndOrder is where that behavior belongs.
 	if got := strings.Count(out, "PINNED-MARKER"); got != 3 {
 		t.Fatalf("all 3 pinned lines must survive the byte cap, found %d:\n%s", got, out)
 	}
@@ -986,13 +991,150 @@ func TestBackend_FormatContext_ByteCapDropsOldestObservationNeverPinned(t *testi
 	assertBackendContextSectionOrder(t, out)
 }
 
+// backendPinnedSectionBody returns the rendered pinned section of a context
+// block — heading, entry lines, overflow marker when present, and the blank
+// separator writeContextSection appends. Twin of internal/store's
+// pinnedSectionBody: sections are separated by exactly one blank line and no
+// entry line is empty, so the first "\n\n" after the heading ends the section.
+func backendPinnedSectionBody(t *testing.T, out string) string {
+	t.Helper()
+	start := strings.Index(out, pinnedSectionHeading)
+	if start < 0 {
+		t.Fatalf("pinned heading %q not found in context block:\n%s", pinnedSectionHeading, out)
+	}
+	rest := out[start:]
+	end := strings.Index(rest[len(pinnedSectionHeading):], "\n\n")
+	if end < 0 {
+		t.Fatalf("pinned section is not terminated by a blank line:\n%s", out)
+	}
+	return rest[:len(pinnedSectionHeading)+end+2]
+}
+
+// TestBackend_FormatContext_PinnedSectionCapAndOrder is the MemoryLake twin of
+// internal/store's TestFormatContextPinnedSectionCapAndOrder: the pinned section
+// is capped at pinnedSectionByteCap on its own, entries render in pin-time
+// ASCENDING order, and overflow drops the OLDEST pins behind a marker naming how
+// many were withheld.
+//
+// The fixture pins 15 facts whose rendered lines are exactly 120 bytes each
+// (1800 bytes, well past the cap) with updated_at ASCENDING by pin index and
+// created_at DESCENDING — MemoryLake records no pin timestamp (setPinned only
+// PATCHes metadata["pinned"]), so UpdatedAt is the documented pin-time proxy and
+// the inversion makes an implementation that ordered by created_at fail here.
+//
+// Regression net for the same four mutations as the store twin: (a) deleting the
+// cap loop, (b) reversing to newest-first, (c) ordering by created_at, (d)
+// dropping more pins than the cap requires.
+func TestBackend_FormatContext_PinnedSectionCapAndOrder(t *testing.T) {
+	const (
+		totalPins = 15
+		// "- [decision] **pin-NN**: " (25) + body (94) + "\n" = 120 bytes.
+		lineBytes = 120
+	)
+	body := func(i int) string {
+		return fmt.Sprintf("core fact %02d ", i) + strings.Repeat("y", 81)
+	}
+	var items []map[string]any
+	for i := 0; i < totalPins; i++ {
+		items = append(items, map[string]any{
+			"id":   fmt.Sprintf("fact-pin-%02d", i),
+			"fact": body(i),
+			// created_at descends with i, updated_at (the pin-time proxy) ascends.
+			"created_at": fmt.Sprintf("2026-02-%02dT00:00:00Z", 20-i),
+			"updated_at": fmt.Sprintf("2026-03-01T%02d:00:00Z", i),
+			"metadata": map[string]any{
+				metaTitle: fmt.Sprintf("pin-%02d", i), metaType: "decision",
+				metaScope: "global", "pinned": true,
+			},
+		})
+	}
+	// One unpinned fact so the block still has a Recent Observations section.
+	items = append(items, map[string]any{
+		"id": "fact-recent", "fact": "recent unpinned body.",
+		"created_at": "2026-03-02T00:00:00Z",
+		"metadata":   map[string]any{metaTitle: "recent", metaType: "note", metaScope: "global"},
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts") {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	// Sanity: the fixture must render past the pinned cap before any dropping.
+	if precap := len(pinnedSectionHeading) + totalPins*lineBytes + 1; precap <= pinnedSectionByteCap {
+		t.Fatalf("fixture renders %d pinned bytes, already under the %d-byte cap: enlarge it",
+			precap, pinnedSectionByteCap)
+	}
+
+	out, err := b.FormatContext("proj", "global")
+	if err != nil {
+		t.Fatalf("FormatContext: %v", err)
+	}
+
+	section := backendPinnedSectionBody(t, out)
+	if len(section) > pinnedSectionByteCap {
+		t.Fatalf("pinned section is %d bytes, cap %d:\n%s", len(section), pinnedSectionByteCap, section)
+	}
+
+	shown := strings.Count(section, "**pin-")
+	if shown == 0 {
+		t.Fatalf("pinned section dropped every entry; core memory must keep the newest:\n%s", section)
+	}
+	if shown == totalPins {
+		t.Fatalf("all %d pinned entries rendered: the cap was not enforced:\n%s", totalPins, section)
+	}
+
+	marker := fmt.Sprintf(pinnedCapMarkerFmt, totalPins-shown)
+	if !strings.Contains(section, marker) {
+		t.Fatalf("expected overflow marker %q in:\n%s", marker, section)
+	}
+
+	for i := 0; i < totalPins-shown; i++ {
+		if strings.Contains(section, fmt.Sprintf("**pin-%02d**", i)) {
+			t.Fatalf("oldest pin pin-%02d must be dropped from rendering:\n%s", i, section)
+		}
+	}
+	for i := totalPins - shown; i < totalPins; i++ {
+		if !strings.Contains(section, fmt.Sprintf("**pin-%02d**", i)) {
+			t.Fatalf("newest pin pin-%02d must survive the pinned cap:\n%s", i, section)
+		}
+	}
+
+	prev := -1
+	for i := totalPins - shown; i < totalPins; i++ {
+		at := strings.Index(section, fmt.Sprintf("**pin-%02d**", i))
+		if at <= prev {
+			t.Fatalf("pinned entries must render in pin-time ascending order; pin-%02d at %d follows %d:\n%s",
+				i, at, prev, section)
+		}
+		prev = at
+	}
+
+	if len(section)+lineBytes <= pinnedSectionByteCap {
+		t.Fatalf("pinned section is %d bytes with %d entries: one more would still fit under %d, "+
+			"the cap drops more than necessary:\n%s", len(section), shown, pinnedSectionByteCap, section)
+	}
+
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.Contains(out, "Full bodies: mem_search / mem_get_observation.") {
+		t.Fatalf("footer must survive:\n%s", out)
+	}
+}
+
 // assertBackendContextSectionOrder pins the layered section order of a
 // MemoryLake context block: Pinned before Recent Observations, and no
 // "### Recent Sessions" section at all (this backend has no session tracking).
 // Mirrors internal/store's assertContextSectionOrder, minus sessions.
 func assertBackendContextSectionOrder(t *testing.T, out string) {
 	t.Helper()
-	pinned := strings.Index(out, "### Pinned")
+	pinned := strings.Index(out, pinnedSectionHeading)
 	observations := strings.Index(out, "### Recent Observations")
 	if pinned < 0 || observations < 0 {
 		t.Fatalf("expected both section headings (pinned=%d observations=%d):\n%s", pinned, observations, out)

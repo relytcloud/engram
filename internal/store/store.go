@@ -2422,6 +2422,21 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	return s.queryObservations(query, args...)
 }
 
+// PinnedObservations returns a project's pinned observations in PIN-TIME
+// ASCENDING order (oldest pin first), which is the order FormatContext renders
+// the "### Pinned (core memory)" section in — a stable prefix that only grows at
+// the end as new pins arrive.
+//
+// PIN-TIME PROXY (documented limitation): there is no pin timestamp in the
+// schema. setObservationPinned flips observations.pinned and deliberately leaves
+// updated_at alone (TestPinnedObservationsAndFormatContextPriority pins that
+// behavior — pinning is not a content edit and must not disturb sync/export), so the
+// closest available ordering key is updated_at — the last time the row's content
+// changed, falling back to created_at for rows written before updated_at existed.
+// Consequence: re-pinning an old observation does NOT move it to the end of the
+// section, and editing a pinned observation's content DOES. Ordering is stable
+// and deterministic either way (id breaks ties); a true pinned_at column is the
+// fix if the distinction ever matters.
 func (s *Store) PinnedObservations(project, scope string) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 
@@ -2441,7 +2456,7 @@ func (s *Store) PinnedObservations(project, scope string) ([]Observation, error)
 		args = append(args, normalizeScope(scope))
 	}
 
-	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC"
+	query += " ORDER BY datetime(COALESCE(NULLIF(o.updated_at, ''), o.created_at)) ASC, o.id ASC"
 	return s.queryObservations(query, args...)
 }
 
@@ -3319,6 +3334,28 @@ const (
 // the pinned block only (recent observations now use firstSentence).
 const contextPinnedTruncLen = 300
 
+// Pinned core-memory contract (Phase 2 spec R4). The pinned block is the one
+// section the outer contextByteCap never drops, so it needs its own ceiling:
+// without one, a project that pins 50 facts starves sessions/observations out of
+// the block entirely and blows the 400-token budget from the inside.
+//
+//   - pinnedSectionByteCap bounds the WHOLE rendered section (heading + entry
+//     lines + overflow marker + the blank separator writeContextSection adds),
+//     so it is the number a caller can verify by measuring the output.
+//   - Entries render in pin-time ASCENDING order (oldest pin first), which keeps
+//     the section a stable prefix as new pins arrive at the end.
+//   - Overflow drops the OLDEST pins from *rendering* (never from storage) until
+//     the newest ones fit, and appends pinnedCapMarkerFmt naming how many were
+//     withheld plus the way to prune them for good.
+//
+// internal/memorylake carries byte-identical copies of all three (its
+// FormatContext must render the same block) — keep them in sync.
+const (
+	pinnedSectionByteCap = 1024
+	pinnedSectionHeading = "### Pinned (core memory)\n"
+	pinnedCapMarkerFmt   = "(pin cap reached: %d pinned facts not shown — mem_unpin to prune)\n"
+)
+
 // contextFooter closes every context block with the expand-on-demand pointer:
 // the block carries first sentences only, full bodies are one call away.
 const contextFooter = "Full bodies: mem_search / mem_get_observation.\n"
@@ -3384,12 +3421,68 @@ func nextNonSpace(runes []rune) rune {
 	return 0
 }
 
-// renderLayeredContext assembles the layered block and enforces
-// contextByteCap by dropping the oldest observation line, then the oldest
-// session line, until the rendered block fits. Every slice is newest-first, so
-// "oldest" is the last element. Pinned lines are never dropped: if a block is
-// still over cap once observations and sessions are gone, it is returned as-is.
+// capPinnedLines enforces pinnedSectionByteCap over the rendered pinned
+// section. lines arrive in pin-time ASCENDING order (oldest pin first, see
+// PinnedObservations), so overflow is resolved by dropping from the FRONT —
+// oldest pins stop being rendered until the newest ones fit — and a marker line
+// naming the number withheld is appended.
+//
+// Nothing is deleted: dropped pins stay pinned in storage and remain reachable
+// via mem_search / mem_get_observation; the marker points at mem_unpin as the
+// way to prune them for good.
+//
+// Canonical twin: internal/memorylake.capPinnedLines. Keep byte-identical.
+func capPinnedLines(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+	for dropped := 0; dropped < len(lines); dropped++ {
+		marker := ""
+		if dropped > 0 {
+			marker = fmt.Sprintf(pinnedCapMarkerFmt, dropped)
+		}
+		shown := lines[dropped:]
+		if pinnedSectionBytes(shown, marker) > pinnedSectionByteCap {
+			continue
+		}
+		if marker == "" {
+			return shown
+		}
+		out := make([]string, 0, len(shown)+1)
+		out = append(out, shown...)
+		return append(out, marker)
+	}
+	// Unreachable in practice: the loop's last iteration already tries "newest
+	// entry alone". It is only taken when even that single entry exceeds the
+	// cap, and the answer is the same — core memory is never emptied, so the
+	// newest pin is rendered over cap rather than dropped.
+	return []string{lines[len(lines)-1], fmt.Sprintf(pinnedCapMarkerFmt, len(lines)-1)}
+}
+
+// pinnedSectionBytes is the rendered size of the pinned section: heading +
+// entry lines + the overflow marker (empty when there is none) + the blank
+// separator writeContextSection appends. This is exactly what a caller measures
+// in the output, which is what pinnedSectionByteCap is defined against.
+func pinnedSectionBytes(lines []string, marker string) int {
+	n := len(pinnedSectionHeading) + len(marker) + 1
+	for _, line := range lines {
+		n += len(line)
+	}
+	return n
+}
+
+// renderLayeredContext assembles the layered block. The pinned section is
+// capped first and on its own (capPinnedLines), then contextByteCap is enforced
+// over the whole block by dropping the oldest observation line, then the oldest
+// session line, until it fits. Sessions and observations are newest-first, so
+// "oldest" is the last element. Pinned lines are never dropped by the outer cap:
+// if a block is still over cap once observations and sessions are gone, it is
+// returned as-is.
 func renderLayeredContext(pinnedLines, sessionLines, obsLines []string) string {
+	// Once, before the loop: capPinnedLines appends a marker line, so running
+	// it again on its own output would count that marker as an entry and
+	// report the wrong number withheld.
+	pinnedLines = capPinnedLines(pinnedLines)
 	for {
 		out := joinLayeredContext(pinnedLines, sessionLines, obsLines)
 		if len(out) <= contextByteCap {
@@ -3410,7 +3503,7 @@ func renderLayeredContext(pinnedLines, sessionLines, obsLines []string) string {
 func joinLayeredContext(pinnedLines, sessionLines, obsLines []string) string {
 	var b strings.Builder
 	b.WriteString("## Memory Context\n\n")
-	writeContextSection(&b, "### Pinned\n", pinnedLines)
+	writeContextSection(&b, pinnedSectionHeading, pinnedLines)
 	writeContextSection(&b, "### Recent Sessions\n", sessionLines)
 	writeContextSection(&b, "### Recent Observations\n", obsLines)
 	b.WriteString(contextFooter)
@@ -3429,9 +3522,10 @@ func writeContextSection(b *strings.Builder, heading string, lines []string) {
 }
 
 // FormatContext renders the layered context block for a project: pinned
-// observations, then up to contextRecentSessions one-line session entries, then
-// up to contextRecentObs observation summaries, then the expand-on-demand
-// footer — all within contextByteCap bytes.
+// observations (pin-time ascending, self-capped at pinnedSectionByteCap), then
+// up to contextRecentSessions one-line session entries, then up to
+// contextRecentObs observation summaries, then the expand-on-demand footer — all
+// within contextByteCap bytes.
 //
 // Recent user prompts are deliberately NOT part of the layered block: they cost
 // more bytes than they buy inside a 400-token budget. They remain available via

@@ -131,6 +131,44 @@ func TestSlimProtocolBudgetAndCoreRules(t *testing.T) {
 	}
 }
 
+// pinCriterionLine is the R4 pin criterion. It must reach the agent in every
+// session (so: the slim protocol both hooks inject, not only the on-demand
+// SKILL), because the pinned block is the one part of mem_context the byte cap
+// never drops — an agent that pins liberally starves its own context.
+const pinCriterionLine = "Pin (mem_pin) only facts whose loss causes irreversible damage " +
+	"or repeated pitfalls; pinned facts are always in context."
+
+// TestPinCriterionInProtocolAndSkills asserts the pin criterion is present, as
+// one unbroken line, in both session-start hooks, both post-compaction hooks
+// (compaction is exactly when an agent re-reads the protocol and might start
+// pinning), and both memory SKILL files.
+//
+// The sentence is asserted verbatim rather than by keyword so it stays greppable
+// and cannot be silently softened into "pin important facts".
+func TestPinCriterionInProtocolAndSkills(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, plugin := range []string{"claude-code", "codex"} {
+		for _, script := range []string{"session-start.sh", "post-compaction.sh"} {
+			path := filepath.Join(root, "plugin", plugin, "scripts", script)
+			rel, _ := filepath.Rel(root, path)
+			if slim := slimProtocolHeredoc(t, path, rel); !strings.Contains(slim, pinCriterionLine) {
+				t.Errorf("%s: slim protocol is missing the pin criterion %q:\n%s", rel, pinCriterionLine, slim)
+			}
+		}
+
+		skill := filepath.Join(root, "plugin", plugin, "skills", "memory", "SKILL.md")
+		rel, _ := filepath.Rel(root, skill)
+		b, err := os.ReadFile(skill)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if !strings.Contains(string(b), pinCriterionLine) {
+			t.Errorf("%s is missing the pin criterion %q", rel, pinCriterionLine)
+		}
+	}
+}
+
 // TestMemorySkillsCarryConflictLoop pins the conflict-resolution walkthrough to
 // the on-demand `memory` SKILL files. This detail used to live in the MCP
 // server instructions, which every client injects into every session; it was
