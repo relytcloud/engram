@@ -910,21 +910,23 @@ The block is layered and budgeted (~400 tokens / 1600 bytes hard cap) so it is c
 ## Memory Context
 
 ### Pinned (core memory)
-- [decision] **title**: <content, cut to 300 runes>          (oldest pin first, section ≤ 1024 bytes)
+- [decision] **title**: <content, cut to 300 runes>          (title cut to 120 runes; oldest pin first, section ≤ 1024 bytes)
 (pin cap reached: N pinned facts not shown — mem_unpin to prune)   (only when the 1024 bytes run out)
 
 ### Recent Sessions
 - <started_at> <summary first sentence | (active) | (no summary)>   (max 5)
 
 ### Recent Observations
-- [type] **title**: <content first sentence, cut to 160 runes>      (max 3)
+- [type] **title**: <content first sentence, cut to 160 runes>      (title cut to 120 runes; max 3)
 
 Full bodies: mem_search / mem_get_observation.
 ```
 
 Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped by that outer cap.
 
-**`### Pinned (core memory)` is capped separately at 1024 bytes** — heading, entry lines, overflow marker and blank separator included. Entries render in **pin-time ascending order** (oldest pin first), so the section is a stable prefix that grows at the end as new pins arrive. When the 1024 bytes are exhausted, the **oldest** pins stop being *rendered* (they stay pinned and searchable) and a trailing `(pin cap reached: N pinned facts not shown — mem_unpin to prune)` line names how many were withheld. Over-pinning therefore evicts your own earlier pins from the block; `mem_unpin` is the prune.
+**`### Pinned (core memory)` is capped separately at 1024 bytes** — heading, entry lines, overflow marker and blank separator included. Entries render in **pin-time ascending order** (oldest pin first), so the section is a stable prefix that grows at the end as new pins arrive. When the 1024 bytes are exhausted, the **oldest** pins stop being *rendered* (they stay pinned and searchable) and a trailing `(pin cap reached: N pinned facts not shown — mem_unpin to prune)` line names how many were withheld. Over-pinning therefore evicts your own earlier pins from the block; `mem_unpin` is the prune. In practice, with the 300-rune content cut on each line, only about 2-3 pinned facts render before the 1024 bytes run out.
+
+Two edge cases of that cap are fixed by contract. **A single pinned entry is never dropped and never carries a marker**: if the newest pin alone exceeds 1024 bytes it renders over cap (core memory is never emptied), and since nothing was withheld no `(pin cap reached: …)` line is emitted — the marker's count is always ≥ 1. And **titles are cut to 120 runes** (with `…`) in both the pinned and recent-observation lines: content was already bounded, so an unbounded title was the one remaining way for a pinned line — the one line neither cap may drop — to carry the whole block past the 1600-byte budget.
 
 Pin time is a documented **proxy**, not a stored timestamp: neither backend records when a pin happened (`mem_pin` only flips `observations.pinned` / the MemoryLake `pinned` metadata key and deliberately leaves `updated_at` untouched on SQLite), so the section orders by `updated_at`, falling back to `created_at`. Consequence: re-pinning an old memory does not move it to the end of the section, while editing a pinned memory's content does. Ordering is deterministic either way (id breaks ties).
 

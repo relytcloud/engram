@@ -3334,6 +3334,31 @@ const (
 // the pinned block only (recent observations now use firstSentence).
 const contextPinnedTruncLen = 300
 
+// contextTitleTruncLen caps a rendered title in a pinned/observation context
+// line. Titles are user/agent supplied and were the last unbounded field in a
+// context line: content is cut at contextPinnedTruncLen / contextSummaryTruncLen
+// runes, but a multi-kilobyte title used to render whole. That matters for the
+// pinned block specifically, because a single pinned line is the one thing
+// neither cap can drop (see capPinnedLines), so an unbounded title could push
+// the whole block past contextByteCap with nothing left to trim.
+//
+// internal/memorylake carries a byte-identical copy — keep the two in sync.
+const contextTitleTruncLen = 120
+
+// truncTitle cuts title to at most contextTitleTruncLen runes, appending "…"
+// when it was longer. Distinct from truncate (which appends a literal "...")
+// so a cut title reads as one glyph of elision inside the bolded run, matching
+// firstSentence's ellipsis.
+//
+// Canonical twin: internal/memorylake.truncTitle. Keep byte-identical.
+func truncTitle(title string) string {
+	runes := []rune(title)
+	if len(runes) <= contextTitleTruncLen {
+		return title
+	}
+	return string(runes[:contextTitleTruncLen]) + "…"
+}
+
 // Pinned core-memory contract (Phase 2 spec R4). The pinned block is the one
 // section the outer contextByteCap never drops, so it needs its own ceiling:
 // without one, a project that pins 50 facts starves sessions/observations out of
@@ -3436,6 +3461,13 @@ func capPinnedLines(lines []string) []string {
 	if len(lines) == 0 {
 		return lines
 	}
+	// A lone entry is always rendered — core memory is never emptied — so
+	// nothing can be withheld and there is no marker to emit. Without this
+	// early return, a single line over the cap fell through the loop to the
+	// tail below and produced "0 pinned facts not shown", which is false.
+	if len(lines) == 1 {
+		return lines
+	}
 	for dropped := 0; dropped < len(lines); dropped++ {
 		marker := ""
 		if dropped > 0 {
@@ -3452,10 +3484,10 @@ func capPinnedLines(lines []string) []string {
 		out = append(out, shown...)
 		return append(out, marker)
 	}
-	// Unreachable in practice: the loop's last iteration already tries "newest
-	// entry alone". It is only taken when even that single entry exceeds the
-	// cap, and the answer is the same — core memory is never emptied, so the
-	// newest pin is rendered over cap rather than dropped.
+	// Reached only when even the newest entry alone exceeds the cap (with at
+	// least one older entry behind it, per the len == 1 guard above): core
+	// memory is never emptied, so the newest pin renders over cap rather than
+	// being dropped, and the marker counts the len-1 ≥ 1 pins withheld.
 	return []string{lines[len(lines)-1], fmt.Sprintf(pinnedCapMarkerFmt, len(lines)-1)}
 }
 
@@ -3553,7 +3585,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	pinnedLines := make([]string, 0, len(pinned))
 	for _, obs := range pinned {
 		pinnedLines = append(pinnedLines, fmt.Sprintf("- [%s] **%s**: %s\n",
-			obs.Type, obs.Title, truncate(obs.Content, contextPinnedTruncLen)))
+			obs.Type, truncTitle(obs.Title), truncate(obs.Content, contextPinnedTruncLen)))
 	}
 
 	// A blank project filter means RecentSessions returned rows from every
@@ -3574,7 +3606,7 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 	obsLines := make([]string, 0, len(observations))
 	for _, obs := range observations {
 		obsLines = append(obsLines, fmt.Sprintf("- [%s] **%s**: %s\n",
-			obs.Type, obs.Title, firstSentence(obs.Content)))
+			obs.Type, truncTitle(obs.Title), firstSentence(obs.Content)))
 	}
 
 	return renderLayeredContext(pinnedLines, sessionLines, obsLines), nil

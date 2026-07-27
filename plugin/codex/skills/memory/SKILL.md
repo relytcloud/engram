@@ -57,6 +57,8 @@ carries its own 1024-byte ceiling: entries render oldest-pin-first, and once the
 ceiling is reached the OLDEST pins stop being rendered behind a
 `(pin cap reached: N pinned facts not shown — mem_unpin to prune)` marker. Over-pinning
 therefore evicts your own earlier pins from context — use `mem_unpin` to prune.
+Concretely: with the 300-rune content cap on each pinned line, only ~2-3 pinned facts
+render before the 1KB cap is reached — over-pinning evicts your own earlier pins.
 
 ### Topic update rules (mandatory)
 

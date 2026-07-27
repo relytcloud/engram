@@ -420,6 +420,24 @@ const maxFormatContextRecent = 20
 // contextPinnedTruncLen surfaces both copies of the rule at once.
 const contextPinnedTruncLen = 300
 
+// contextTitleTruncLen is a byte-identical copy of internal/store's constant of
+// the same name: rendered titles in pinned/observation context lines are cut to
+// 120 runes. Titles were the last unbounded field in a context line, and a
+// single pinned line is the one thing neither cap can drop (see capPinnedLines)
+// — see internal/store/store.go for the full rationale. Keep in sync.
+const contextTitleTruncLen = 120
+
+// truncTitle mirrors internal/store.truncTitle: a rune-safe cut to at most
+// contextTitleTruncLen runes with "…" appended when title was longer (note the
+// single ellipsis glyph, unlike truncate's literal "..."). Keep in sync.
+func truncTitle(title string) string {
+	runes := []rune(title)
+	if len(runes) <= contextTitleTruncLen {
+		return title
+	}
+	return string(runes[:contextTitleTruncLen]) + "…"
+}
+
 // Pinned core-memory contract (Phase 2 spec R4) — byte-identical copies of
 // internal/store's constants of the same names, duplicated for the same reason
 // as contextByteCap above (they are unexported presentation details there). See
@@ -533,6 +551,13 @@ func capPinnedLines(lines []string) []string {
 	if len(lines) == 0 {
 		return lines
 	}
+	// A lone entry is always rendered — core memory is never emptied — so
+	// nothing can be withheld and there is no marker to emit. Without this
+	// early return, a single line over the cap fell through the loop to the
+	// tail below and produced "0 pinned facts not shown", which is false.
+	if len(lines) == 1 {
+		return lines
+	}
 	for dropped := 0; dropped < len(lines); dropped++ {
 		marker := ""
 		if dropped > 0 {
@@ -549,8 +574,10 @@ func capPinnedLines(lines []string) []string {
 		out = append(out, shown...)
 		return append(out, marker)
 	}
-	// Only reached when even the newest entry alone exceeds the cap: core
-	// memory is never emptied, so it is rendered over cap rather than dropped.
+	// Only reached when even the newest entry alone exceeds the cap, with at
+	// least one older entry behind it (per the len == 1 guard above): core
+	// memory is never emptied, so it renders over cap rather than dropped, and
+	// the marker counts the len-1 ≥ 1 pins withheld.
 	return []string{lines[len(lines)-1], fmt.Sprintf(pinnedCapMarkerFmt, len(lines)-1)}
 }
 
@@ -664,7 +691,7 @@ func (b *MemoryLakeBackend) FormatContext(project, scope string) (string, error)
 	for _, f := range pinned {
 		o := ObservationFromFact(f)
 		pinnedLines = append(pinnedLines, fmt.Sprintf("- [%s] **%s**: %s\n",
-			o.Type, o.Title, truncate(o.Content, contextPinnedTruncLen)))
+			o.Type, truncTitle(o.Title), truncate(o.Content, contextPinnedTruncLen)))
 	}
 
 	if len(recent) > contextRecentObs {
@@ -674,7 +701,7 @@ func (b *MemoryLakeBackend) FormatContext(project, scope string) (string, error)
 	for _, f := range recent {
 		o := ObservationFromFact(f)
 		obsLines = append(obsLines, fmt.Sprintf("- [%s] **%s**: %s\n",
-			o.Type, o.Title, firstSentence(o.Content)))
+			o.Type, truncTitle(o.Title), firstSentence(o.Content)))
 	}
 
 	return renderLayeredContext(pinnedLines, obsLines), nil

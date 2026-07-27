@@ -9049,6 +9049,12 @@ func TestFormatContextByteCapDropsObservationsThenSessionsNeverPinned(t *testing
 // This is what pinnedSectionByteCap is measured against, so the helper
 // deliberately re-derives the boundary from the output text rather than calling
 // the renderer's own accounting.
+//
+// Limitation of that re-derivation: an entry whose rendered content contains a
+// BLANK line would end the section early here, so the helper would under-measure
+// it. Production accounting never has that problem — pinnedSectionBytes sums the
+// entry strings themselves — so this is a test-helper caveat only. Keep fixture
+// bodies free of blank lines.
 func pinnedSectionBody(t *testing.T, out string) string {
 	t.Helper()
 	start := strings.Index(out, pinnedSectionHeading)
@@ -9187,6 +9193,137 @@ func TestFormatContextPinnedSectionCapAndOrder(t *testing.T) {
 	}
 	if !strings.Contains(out, "Full bodies: mem_search / mem_get_observation.") {
 		t.Fatalf("footer must survive:\n%s", out)
+	}
+}
+
+// TestFormatContextPinnedLoneOverCapEntryRendersWithoutMarker pins the
+// degenerate pinned-cap path: when the section is a SINGLE entry that alone
+// exceeds pinnedSectionByteCap, the entry still renders (core memory is never
+// emptied) and NO overflow marker is emitted. Nothing was withheld, so a
+// "(pin cap reached: 0 pinned facts not shown — mem_unpin to prune)" line would
+// be agent-facing text that is simply false.
+//
+// Twin: internal/memorylake's TestBackend_FormatContext_
+// PinnedLoneOverCapEntryRendersWithoutMarker.
+func TestFormatContextPinnedLoneOverCapEntryRendersWithoutMarker(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-pin-solo", "proj-pin-solo", "/tmp/proj-pin-solo"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// contextPinnedTruncLen emoji runes: exactly at the rune cut (so the body
+	// renders whole, no "...") but 4 bytes each, so the rendered line is ~1220
+	// bytes — past the 998 bytes an entry may occupy once the heading (25) and
+	// the blank separator (1) are charged against the 1024-byte cap.
+	body := strings.Repeat("🔥", contextPinnedTruncLen)
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-pin-solo",
+		Type:      "decision",
+		Title:     "solo-pin",
+		Content:   body,
+		Project:   "proj-pin-solo",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.PinObservation(id); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+
+	out, err := s.FormatContext("proj-pin-solo", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+
+	// Sanity: the lone entry must genuinely be over the cap, otherwise this
+	// test passes on the ordinary "everything fits" path and proves nothing.
+	section := pinnedSectionBody(t, out)
+	if len(section) <= pinnedSectionByteCap {
+		t.Fatalf("fixture pinned section is %d bytes, within the %d-byte cap: the lone-entry "+
+			"over-cap path is not exercised, enlarge the fixture:\n%s",
+			len(section), pinnedSectionByteCap, section)
+	}
+
+	if !strings.Contains(out, "**solo-pin**") {
+		t.Fatalf("the lone pinned entry must render even over cap:\n%s", out)
+	}
+	if !strings.Contains(out, body) {
+		t.Fatalf("the lone pinned entry's body must render whole:\n%s", out)
+	}
+	// No marker in any form: neither the zero-count rendering nor the shared
+	// prefix (which would catch a marker with any other count).
+	if got := fmt.Sprintf(pinnedCapMarkerFmt, 0); strings.Contains(out, got) {
+		t.Fatalf("emitted a zero-count pin-cap marker %q — nothing was withheld:\n%s", got, out)
+	}
+	if strings.Contains(out, "pin cap reached") {
+		t.Fatalf("no pin-cap marker may appear when nothing is withheld:\n%s", out)
+	}
+	if strings.Contains(out, "not shown") {
+		t.Fatalf("no pin-cap marker may appear when nothing is withheld:\n%s", out)
+	}
+}
+
+// TestFormatContextTruncatesTitleKeepingPinnedBlockUnderOuterCap pins the title
+// cut (contextTitleTruncLen) as a cap-enforcement mechanism, not cosmetics: a
+// pinned line is the one thing NEITHER cap can drop, so an unbounded title used
+// to be the remaining way to push the whole block past contextByteCap with
+// nothing left to trim. The pre-cap guard below reconstructs the untruncated
+// line and asserts exactly that.
+//
+// Twin: internal/memorylake's TestBackend_FormatContext_
+// TruncatesTitleKeepingPinnedBlockUnderOuterCap.
+func TestFormatContextTruncatesTitleKeepingPinnedBlockUnderOuterCap(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-pin-title", "proj-pin-title", "/tmp/proj-pin-title"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	longTitle := strings.Repeat("T", 300) // 300 bytes of title
+	body := strings.Repeat("🔥", contextPinnedTruncLen)
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-pin-title",
+		Type:      "decision",
+		Title:     longTitle,
+		Content:   body,
+		Project:   "proj-pin-title",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.PinObservation(id); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+
+	out, err := s.FormatContext("proj-pin-title", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+
+	// Pre-cap guard: with the title rendered whole, the pinned line ALONE (which
+	// the outer cap never drops) already carries the block over contextByteCap,
+	// so the truncation below is what keeps the cap enforceable.
+	untruncated := fmt.Sprintf("- [decision] **%s**: %s\n", longTitle, body)
+	if precap := len(joinLayeredContext([]string{untruncated}, nil, nil)); precap <= contextByteCap {
+		t.Fatalf("fixture renders %d bytes with the title untruncated, already under the %d-byte "+
+			"cap: the bypass is not exercised, enlarge the title or body", precap, contextByteCap)
+	}
+
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	wantTitle := strings.Repeat("T", contextTitleTruncLen) + "…"
+	if !strings.Contains(out, "**"+wantTitle+"**") {
+		t.Fatalf("title must render cut to %d runes with an ellipsis:\n%s", contextTitleTruncLen, out)
+	}
+	if strings.Contains(out, longTitle) {
+		t.Fatalf("untruncated title must not render:\n%s", out)
+	}
+	if !strings.Contains(out, body) {
+		t.Fatalf("the pinned body must still render whole (only the title is cut):\n%s", out)
 	}
 }
 
