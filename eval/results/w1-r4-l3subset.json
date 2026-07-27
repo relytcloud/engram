@@ -1,0 +1,109 @@
+{
+  "git_sha": "2289c68",
+  "date": "2026-07-27",
+  "suite": "l3",
+  "metrics": {
+    "judge_failed_count": 0,
+    "judge_failed_memory": 0,
+    "judge_failed_no-memory": 0,
+    "mean_score_memory": 8.75,
+    "mean_score_no-memory": 7.75,
+    "uplift": 1
+  },
+  "per_item": [
+    {
+      "id": "gotcha-001/no-memory/run0",
+      "values": {
+        "duration_s": 71.822120992,
+        "input_tokens": 14,
+        "output_tokens": 4476,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer covers all rubric points accurately and matches the documented fix precisely, explicitly warning not to just rerun the full build or rely on submodule update alone, and correctly includes sourcing gcc-toolset-11."
+    },
+    {
+      "id": "gotcha-001/memory/run0",
+      "values": {
+        "duration_s": 35.411048592,
+        "input_tokens": 6,
+        "output_tokens": 1851,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer covers every rubric point: stale FFI header cause, incremental-build short-circuit explanation, exact rm/source/rebuild commands, and explicitly frames it as a recurring pre-build step rather than a one-off fix; no gotchas violated."
+    },
+    {
+      "id": "gotcha-002/no-memory/run0",
+      "values": {
+        "duration_s": 79.275226311,
+        "input_tokens": 8,
+        "output_tokens": 5215,
+        "score": 5,
+        "timed_out": 0
+      },
+      "note": "代理正确识别了应使用较大的OID以避免与真实relation冲突,并深入讨论了跨测试collision风险,这部分覆盖了要点;但没有给出仓库中实际采用的9999999这一具体值或提及其来源于一次真实的commit修复(从88888改为9999999),错失了关键的具体建议和背景依据。"
+    },
+    {
+      "id": "gotcha-002/memory/run0",
+      "values": {
+        "duration_s": 51.926457303,
+        "input_tokens": 6,
+        "output_tokens": 3417,
+        "score": 5,
+        "timed_out": 0
+      },
+      "note": "The agent correctly identified the core collision risk and avoided suggesting a small OID like 88888, hitting the main gotcha-avoidance points, but it missed the specific real convention (9999999) that the rubric wants, and incorrectly asserted no such convention exists in the repo when one does per the rubric's stated commit history."
+    },
+    {
+      "id": "gotcha-004/no-memory/run0",
+      "values": {
+        "duration_s": 77.462447162,
+        "input_tokens": 14,
+        "output_tokens": 4948,
+        "score": 6,
+        "timed_out": 0
+      },
+      "note": "The answer hits the teardown/GUC-reset point solidly and mentions the fault-injector/synchronous-UDF alternative, but its primary diagnosis is a confidently-stated, unverified claim about pg_reload_conf() only affecting the coordinator that isn't part of the expected reasoning and isn't verified in code as CLAUDE.md's investigation guidelines demand, burying the actual expected explanation (in-flight worker not killed by GUC change) as a secondary point."
+    },
+    {
+      "id": "gotcha-004/memory/run0",
+      "values": {
+        "duration_s": 66.018837767,
+        "input_tokens": 12,
+        "output_tokens": 4693,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer correctly identifies in-flight workers surviving GUC reload, explains ALTER SYSTEM persistence across the schedule, provides a concrete teardown with alter system reset + pg_reload_conf(), and recommends fault-injector pinning with the exact injection points and synchronous UDFs from the rubric; neither gotcha is violated."
+    },
+    {
+      "id": "gotcha-005/no-memory/run0",
+      "values": {
+        "duration_s": 14.611817804,
+        "input_tokens": 2,
+        "output_tokens": 831,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "答案准确指出了两种执行器（psycopg2 vs psql）的差异，正确说明了应参考 results/ 目录下的实际输出而非用 pg_regress 验证，并给出了具体修复步骤，完全命中所有得分点且未触犯任何扣分项。"
+    },
+    {
+      "id": "gotcha-005/memory/run0",
+      "values": {
+        "duration_s": 14.894055723,
+        "input_tokens": 2,
+        "output_tokens": 845,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "The answer correctly identifies the psycopg2 vs psql executor distinction, explicitly avoids recommending pg_regress for validation, correctly notes the format differences, and recommends using results/ output as the source of truth for hand-writing or copying the expected file."
+    }
+  ],
+  "env": {
+    "arms": "no-memory,memory",
+    "model": "sonnet",
+    "n": "1",
+    "tasks": "gotcha-001,gotcha-002,gotcha-004,gotcha-005"
+  }
+}
