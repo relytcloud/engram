@@ -69,4 +69,16 @@ func TestFilterTasks(t *testing.T) {
 	if _, err := FilterTasks(tasks, "a,zzz"); err == nil {
 		t.Fatal("unknown id must error")
 	}
+	// Trailing (and interior) empty entries are tolerated, not reported as an
+	// unknown empty id.
+	trailing, err := FilterTasks(tasks, "a,")
+	if err != nil || len(trailing) != 1 || trailing[0].ID != "a" {
+		t.Fatalf("trailing comma: got %+v, %v", trailing, err)
+	}
+	if got, err := FilterTasks(tasks, "a,,b"); err != nil || len(got) != 2 {
+		t.Fatalf("interior empty entry: got %+v, %v", got, err)
+	}
+	if got, err := FilterTasks(tasks, " , "); err != nil || len(got) != 3 {
+		t.Fatalf("all-empty csv should return all, got %+v, %v", got, err)
+	}
 }

@@ -227,7 +227,24 @@ func runCompare(basePath, curPath string) {
 	fmt.Print(scorecard.CompareMarkdown(base, cur))
 }
 
+// validateL3Flags rejects flag combinations that would produce a misleading
+// scorecard. A -tasks filter yields a PARTIAL grid, so it must never be written
+// to the default full-grid path (eval/results/<sha>-<date>-l3.json) where it
+// would silently masquerade as — or overwrite — a complete run.
+func validateL3Flags(out, tasksCSV string) error {
+	if strings.TrimSpace(tasksCSV) != "" && out == "" {
+		return fmt.Errorf("-tasks requires an explicit -out " +
+			"(partial runs must not overwrite the default full-grid scorecard path)")
+	}
+	return nil
+}
+
 func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out string, n int, probeOnly bool, tasksCSV string) {
+	// Validate flags first: this must fatal before any arm materialization or
+	// claude invocation so a bad invocation costs nothing.
+	if err := validateL3Flags(out, tasksCSV); err != nil {
+		fatal("%v", err)
+	}
 	tasks, err := e2e.LoadTasks(filepath.Join(dsDir, "tasks"))
 	if err != nil {
 		fatal("tasks: %v", err)
@@ -382,10 +399,16 @@ func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out st
 	if a, b := m["mean_score_memory"], m["mean_score_no-memory"]; len(armNames) > 1 {
 		m["uplift"] = a - b
 	}
+	env := map[string]string{"model": model, "n": strconv.Itoa(n), "arms": strings.Join(armNames, ",")}
+	if f := strings.TrimSpace(tasksCSV); f != "" {
+		// Mark the scorecard as a partial grid so downstream comparison never
+		// treats a filtered run as a full-suite result.
+		env["tasks"] = f
+	}
 	sc := scorecard.Scorecard{
 		Suite: "l3", Date: time.Now().UTC().Format("2006-01-02"), GitSHA: gitSHA(),
 		Metrics: m, PerItem: items,
-		Env: map[string]string{"model": model, "n": strconv.Itoa(n), "arms": strings.Join(armNames, ",")},
+		Env: env,
 	}
 	writeCard(sc, out)
 }

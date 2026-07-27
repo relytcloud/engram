@@ -72,7 +72,14 @@ func FilterTasks(tasks []Task, csv string) ([]Task, error) {
 	}
 	want := map[string]bool{}
 	for _, id := range strings.Split(csv, ",") {
-		want[strings.TrimSpace(id)] = true
+		id = strings.TrimSpace(id)
+		if id == "" { // tolerate trailing/duplicate commas: "fix-001," or "a,,b"
+			continue
+		}
+		want[id] = true
+	}
+	if len(want) == 0 { // csv held only separators/whitespace — same as no filter
+		return tasks, nil
 	}
 	var out []Task
 	for _, t := range tasks {
