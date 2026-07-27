@@ -7484,3 +7484,78 @@ func TestServerInstructionsBudget(t *testing.T) {
 		}
 	}
 }
+
+// TestMemSaveDescriptionIsAnswerFirst pins the answer-first contract on the
+// mem_save tool description.
+//
+// This description is not documentation — it is prompt text that ships in every
+// session, including slim protocol mode where it is one of the few things the
+// agent still sees. Save-eager phrasing here ("call this PROACTIVELY", "don't
+// wait to be asked", a bare "WHEN to save" trigger list) is exactly what made
+// agents interrupt an answer to announce a save, so it must fail here rather
+// than be caught in review.
+func TestMemSaveDescriptionIsAnswerFirst(t *testing.T) {
+	lower := strings.ToLower(memSaveDescription)
+
+	required := []string{
+		"final reply must contain the complete answer",
+		"never narrate saves",
+		"batched at task end",
+		"topic_key",
+	}
+	for _, phrase := range required {
+		if !strings.Contains(lower, strings.ToLower(phrase)) {
+			t.Errorf("memSaveDescription is missing required phrase %q", phrase)
+		}
+	}
+
+	banned := []string{
+		"proactively",
+		"don't wait to be asked",
+		"when to save (call",
+		"immediately after any of these",
+	}
+	for _, phrase := range banned {
+		if strings.Contains(lower, phrase) {
+			t.Errorf("memSaveDescription still contains save-eager phrasing %q", phrase)
+		}
+	}
+}
+
+// TestMemSaveToolUsesPinnedDescription guards the wiring: the constant above is
+// only worth pinning if the registered tool actually serves it.
+func TestMemSaveToolUsesPinnedDescription(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+
+	resp := srv.HandleMessage(context.Background(), []byte(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal tools/list response: %v", err)
+	}
+
+	var parsed struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal tools/list response: %v", err)
+	}
+
+	for _, tool := range parsed.Result.Tools {
+		if tool.Name != "mem_save" {
+			continue
+		}
+		if tool.Description != memSaveDescription {
+			t.Errorf("registered mem_save description drifted from memSaveDescription\n--- got ---\n%s",
+				tool.Description)
+		}
+		return
+	}
+	t.Fatal("mem_save tool not found in tools/list")
+}

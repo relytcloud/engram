@@ -224,36 +224,35 @@ func assertAnswerFirst(t *testing.T, label, text string) {
 }
 
 // TestAnswerFirstRulesPresent pins the answer-first behavior rules (R2) to
-// BOTH protocol modes and both SKILL files.
+// BOTH protocol modes of BOTH hook scripts, and to both SKILL files.
 //
-// The session-start hooks are asserted per-heredoc rather than on whole-file
-// content: a whole-file assertion is satisfied by the slim heredoc alone, which
-// would leave the FULL branch free to drift back to save-eager phrasing
-// unnoticed. Each branch is injected on its own, so each must carry R2 on its
-// own. The SKILL files have no branches, so whole-file assertions are correct
-// there.
+// The hook scripts are asserted per-heredoc rather than on whole-file content:
+// a whole-file assertion is satisfied by the slim heredoc alone, which would
+// leave the FULL branch free to drift back to save-eager phrasing unnoticed.
+// Only one branch is injected per run, so each must carry R2 on its own. That
+// applies to post-compaction.sh exactly as much as to session-start.sh —
+// byte-identity of the slim branches (TestSlimProtocolSurvivesCompaction) says
+// nothing about the full branch, which is a separate copy of the prose.
+//
+// The SKILL files have no branches, so whole-file assertions are correct there.
 func TestAnswerFirstRulesPresent(t *testing.T) {
 	root := repoRoot(t)
 
 	// Hook scripts: assert the slim and full heredocs separately.
 	for _, plugin := range []string{"claude-code", "codex"} {
-		sessionStart := filepath.Join(root, "plugin", plugin, "scripts", "session-start.sh")
-		rel, _ := filepath.Rel(root, sessionStart)
+		for _, script := range []string{"session-start.sh", "post-compaction.sh"} {
+			path := filepath.Join(root, "plugin", plugin, "scripts", script)
+			rel, _ := filepath.Rel(root, path)
 
-		assertAnswerFirst(t, rel+" (SLIM_PROTOCOL heredoc)",
-			slimProtocolHeredoc(t, sessionStart, rel))
-		assertAnswerFirst(t, rel+" (PROTOCOL heredoc)",
-			fullProtocolHeredoc(t, sessionStart, rel))
+			assertAnswerFirst(t, rel+" (SLIM_PROTOCOL heredoc)",
+				slimProtocolHeredoc(t, path, rel))
+			assertAnswerFirst(t, rel+" (PROTOCOL heredoc)",
+				fullProtocolHeredoc(t, path, rel))
+		}
 	}
 
-	// Post-compaction hooks and SKILL files: whole-file assertions. The
-	// post-compaction slim branch is pinned byte-identical to session-start's
-	// by TestSlimProtocolSurvivesCompaction, so its full branch is the only
-	// thing a whole-file check could miss — and it re-injects the same
-	// constant text as session-start's full branch.
+	// SKILL files: whole-file assertions, front-matter description included.
 	wholeFiles := []string{
-		filepath.Join(root, "plugin", "claude-code", "scripts", "post-compaction.sh"),
-		filepath.Join(root, "plugin", "codex", "scripts", "post-compaction.sh"),
 		filepath.Join(root, "plugin", "claude-code", "skills", "memory", "SKILL.md"),
 		filepath.Join(root, "plugin", "codex", "skills", "memory", "SKILL.md"),
 	}
@@ -267,10 +266,18 @@ func TestAnswerFirstRulesPresent(t *testing.T) {
 	}
 }
 
-// heredocBody returns the body of the `cat <<'MARKER' ... MARKER` heredoc in a
-// hook script, excluding both marker lines. It anchors on the literal opener
-// `<<'MARKER'` so that a bare mention of the marker word elsewhere in the file
-// (or the SLIM_ prefixed variant) cannot be mistaken for the heredoc.
+// heredocBody returns the body of the FIRST `cat <<'MARKER' ... MARKER` heredoc
+// in a hook script, excluding both marker lines. It anchors on the literal
+// opener `<<'MARKER'` so that a bare mention of the marker word elsewhere in
+// the file (or the SLIM_ prefixed variant) cannot be mistaken for the heredoc.
+//
+// First-match is deliberate and load-bearing, not incidental: a marker may
+// legitimately appear more than once in one file. post-compaction.sh opens two
+// PROTOCOL heredocs — the protocol prose first, then the numbered
+// compaction-recovery steps — and callers here always want the first one.
+// TestHeredocBodyPicksFirstOccurrence pins both the occurrence count and which
+// block comes back, so reordering or adding a PROTOCOL heredoc fails loudly
+// instead of silently pointing the answer-first assertions at the wrong text.
 func heredocBody(t *testing.T, path, rel, marker string) string {
 	t.Helper()
 
@@ -306,6 +313,39 @@ func slimProtocolHeredoc(t *testing.T, path, rel string) string {
 func fullProtocolHeredoc(t *testing.T, path, rel string) string {
 	t.Helper()
 	return heredocBody(t, path, rel, "PROTOCOL")
+}
+
+// TestHeredocBodyPicksFirstOccurrence pins heredocBody's first-match behavior
+// on the one file where the marker is genuinely ambiguous: post-compaction.sh
+// opens PROTOCOL twice (protocol prose, then the numbered recovery steps).
+// Without this test, swapping those two blocks would quietly redirect
+// TestAnswerFirstRulesPresent at the recovery steps — which contain none of the
+// R2 rules and would fail confusingly, or worse, be "fixed" by weakening the
+// assertion.
+func TestHeredocBodyPicksFirstOccurrence(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, plugin := range []string{"claude-code", "codex"} {
+		path := filepath.Join(root, "plugin", plugin, "scripts", "post-compaction.sh")
+		rel, _ := filepath.Rel(root, path)
+
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if got := strings.Count(string(b), "<<'PROTOCOL'\n"); got != 2 {
+			t.Fatalf("%s: expected 2 PROTOCOL heredocs (protocol prose + recovery steps), found %d — "+
+				"re-check that fullProtocolHeredoc's first-match still selects the protocol block", rel, got)
+		}
+
+		body := fullProtocolHeredoc(t, path, rel)
+		if !strings.Contains(body, "Engram Persistent Memory — ACTIVE PROTOCOL") {
+			t.Errorf("%s: fullProtocolHeredoc did not return the protocol prose block; got:\n%s", rel, body)
+		}
+		if strings.Contains(body, "All 4 steps are MANDATORY") {
+			t.Errorf("%s: fullProtocolHeredoc returned the compaction-recovery steps instead of the protocol prose", rel)
+		}
+	}
 }
 
 // TestSlimProtocolSurvivesCompaction asserts that the post-compaction hooks

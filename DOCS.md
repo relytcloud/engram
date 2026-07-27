@@ -1027,7 +1027,7 @@ Format for `mem_save`:
 - If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
 - Use `mem_update` when you have an exact observation ID to correct
 
-### WHEN TO SEARCH MEMORY
+### SEARCHING — once, up front
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do", "how did we solve", "recordar", "acordate", or references to past work:
 
@@ -1035,7 +1035,7 @@ When the user asks to recall something — any variation of "remember", "recall"
 2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use `mem_get_observation` for full untruncated content
 
-Also search memory PROACTIVELY when:
+Search once at task start — on a miss, proceed normally rather than re-running the same query. Also search at task start when:
 
 - Starting work on something that might have been done before
 - The user mentions a topic you have no context on — check if past sessions covered it
