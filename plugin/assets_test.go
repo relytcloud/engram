@@ -251,7 +251,18 @@ func TestAnswerFirstRulesPresent(t *testing.T) {
 		}
 	}
 
-	// SKILL files: whole-file assertions, front-matter description included.
+	// SKILL files: assert the body AND the YAML front-matter separately —
+	// a whole-file match would let the front-matter description drift back
+	// to save-eager phrasing while the body keeps the assertions green
+	// (the same masking class the per-heredoc extraction above fixes for
+	// hooks). The front-matter is the one string agents see BEFORE the
+	// skill body loads, so it gets its own phrase list (its wording is
+	// "batched at task end", not the body's "batch saves at task end").
+	frontMatterRules := []string{
+		"final reply must contain the complete answer",
+		"never narrate saves",
+		"batched at task end",
+	}
 	wholeFiles := []string{
 		filepath.Join(root, "plugin", "claude-code", "skills", "memory", "SKILL.md"),
 		filepath.Join(root, "plugin", "codex", "skills", "memory", "SKILL.md"),
@@ -263,7 +274,34 @@ func TestAnswerFirstRulesPresent(t *testing.T) {
 			t.Fatalf("read %s: %v", rel, err)
 		}
 		assertAnswerFirst(t, rel, string(b))
+
+		fm := yamlFrontMatter(t, rel, string(b))
+		lower := strings.ToLower(fm)
+		for _, must := range frontMatterRules {
+			if !strings.Contains(lower, must) {
+				t.Errorf("%s front-matter missing answer-first phrase %q", rel, must)
+			}
+		}
+		if strings.Contains(lower, strings.ToLower(saveEagerLeadIn)) || strings.Contains(lower, "do not wait for the user to ask") {
+			t.Errorf("%s front-matter carries save-eager phrasing", rel)
+		}
 	}
+}
+
+// yamlFrontMatter extracts the YAML front-matter block (between the leading
+// `---` line and the next `---` line) so assertions can target exactly the
+// text agents see before the skill body loads.
+func yamlFrontMatter(t *testing.T, rel, content string) string {
+	t.Helper()
+	if !strings.HasPrefix(content, "---\n") {
+		t.Fatalf("%s: no YAML front-matter opener", rel)
+	}
+	rest := content[len("---\n"):]
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		t.Fatalf("%s: unterminated YAML front-matter", rel)
+	}
+	return rest[:end]
 }
 
 // heredocBody returns the body of the FIRST `cat <<'MARKER' ... MARKER` heredoc
