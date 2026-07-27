@@ -25,37 +25,19 @@ plugin-scoped (`mcp__plugin_engram_engram__...`) server ids.
 Admin tools (deferred — use ToolSearch only if needed):
 - `mem_stats`, `mem_delete`, `mem_timeline`, `mem_capture_passive`
 
-## PROACTIVE SAVE TRIGGERS (mandatory — do NOT wait for user to ask)
+## SAVING — silent, batched, never instead of answering
 
-Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
+Save decisions, bug root causes, conventions, gotchas, and user preferences.
+But: your final reply must contain the complete answer itself — memory serves
+future sessions, never this reply. Never narrate saves ("I've saved this to
+memory") and never let a save replace the answer. Batch saves at task end.
 
-### After decisions or conventions
-- Architecture or design decision made
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
+What is worth saving (batched at the end of the task, not mid-answer):
 
-### After completing work
-- Bug fix completed (include root cause)
-- Feature implemented with non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Configuration change or environment setup done
-
-### After discoveries
-- Non-obvious discovery about the codebase
-- Gotcha, edge case, or unexpected behavior found
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-
-### After user confirmation or rejection
-- User confirms a recommendation you made ("go with that", "let's do that", "sounds good", "agreed", "perfect", or the equivalent in the user's language)
-- User rejects an option or approach ("no, better X", "not that one", or the equivalent in the user's language)
-- User expresses a preference ("I prefer X over Y", "always do it this way", or the equivalent in the user's language)
-- User makes a decision after you presented tradeoffs or options
-- A discussion concludes with a clear direction chosen — even if the agent proposed it
-
-### Self-check — ask yourself after EVERY task:
-> "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something non-obvious, or establish a convention? If yes, call mem_save NOW."
+- Architecture, design, workflow, or tool/library decisions — including the ones the user confirms, rejects, or states as a preference
+- Bug fixes (with root cause) and features implemented with a non-obvious approach
+- Conventions and patterns established (naming, structure, approach)
+- Non-obvious discoveries, gotchas, edge cases, and constraints learned
 
 Format for `mem_save`:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
@@ -119,6 +101,11 @@ IF judgment_required IS TRUE:
 
   mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end,
   mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
+
+## SEARCHING — once, up front
+
+One mem_search at task start ("have we seen this before?"). On miss, proceed
+normally; do not search repeatedly for the same information.
 
 ## WHEN TO SEARCH MEMORY
 

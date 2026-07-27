@@ -159,21 +159,15 @@ mem_save, mem_search, mem_context, mem_session_summary, mem_get_observation, mem
 
 Use ToolSearch for other tools: mem_update, mem_suggest_topic_key, mem_session_start, mem_session_end, mem_stats, mem_delete, mem_timeline, mem_capture_passive
 
-### PROACTIVE SAVE — do NOT wait for user to ask
-Call `mem_save` IMMEDIATELY after ANY of these:
-- Decision made (architecture, convention, workflow, tool choice)
-- Bug fixed (include root cause)
-- Convention or workflow documented/updated
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Non-obvious discovery, gotcha, or edge case found
-- Pattern established (naming, structure, approach)
-- User preference or constraint learned
-- Feature implemented with non-obvious approach
-- User confirms your recommendation ("go with that", "sounds good", or the equivalent in the user's language)
-- User rejects an approach or expresses a preference ("no, better X", "I prefer X", or the equivalent in the user's language)
-- Discussion concludes with a clear direction chosen
+### SAVING — silent, batched, never instead of answering
+Save decisions, bug root causes, conventions, gotchas, and user preferences.
+But: your final reply must contain the complete answer itself — memory serves
+future sessions, never this reply. Never narrate saves ("I've saved this to
+memory") and never let a save replace the answer. Batch saves at task end.
 
-**Self-check after EVERY task**: "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something, or establish a convention? If yes → mem_save NOW."
+### SEARCHING — once, up front
+One mem_search at task start ("have we seen this before?"). On miss, proceed
+normally; do not search repeatedly for the same information.
 
 ### MemoryLake-backed projects
 If the current project uses the MemoryLake backend (check with `engram memorylake status`), dedup, updating existing memories, and merging contradictions are handled automatically by the backend — you only need mem_save / mem_search / mem_context; you do not need to call mem_update, mem_judge, or mem_compare yourself. Default SQLite projects are unaffected — keep following the protocol above.

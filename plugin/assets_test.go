@@ -195,6 +195,96 @@ func TestMemorySkillsCarryConflictLoop(t *testing.T) {
 	}
 }
 
+// TestAnswerFirstRulesPresent pins the answer-first behavior rules (R2) to
+// BOTH protocol modes and both SKILL files. The slim protocol carries them
+// already; asserting them on the whole file means a rollback of the slim
+// protocol (R1) cannot silently drop R2 with it.
+//
+// The banned phrase is the save-eager trigger-list lead-in ("call mem_save
+// IMMEDIATELY after ANY of these"), which is what made agents interrupt their
+// answer to narrate a save.
+func TestAnswerFirstRulesPresent(t *testing.T) {
+	root := repoRoot(t)
+
+	files := []string{
+		filepath.Join(root, "plugin", "claude-code", "scripts", "session-start.sh"),
+		filepath.Join(root, "plugin", "claude-code", "scripts", "post-compaction.sh"),
+		filepath.Join(root, "plugin", "codex", "scripts", "session-start.sh"),
+		filepath.Join(root, "plugin", "codex", "scripts", "post-compaction.sh"),
+		filepath.Join(root, "plugin", "claude-code", "skills", "memory", "SKILL.md"),
+		filepath.Join(root, "plugin", "codex", "skills", "memory", "SKILL.md"),
+	}
+
+	for _, path := range files {
+		rel, _ := filepath.Rel(root, path)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		s := strings.ToLower(string(b))
+		for _, must := range []string{
+			"final reply must contain the complete answer",
+			"never narrate saves",
+			"batch saves at task end",
+		} {
+			if !strings.Contains(s, must) {
+				t.Errorf("%s missing answer-first rule %q", rel, must)
+			}
+		}
+		if strings.Contains(s, "immediately after any of these") {
+			t.Errorf("%s still contains save-eager phrasing", rel)
+		}
+	}
+}
+
+// slimProtocolHeredoc returns the SLIM_PROTOCOL heredoc of a hook script,
+// from the opening marker through (but excluding) the closing marker.
+func slimProtocolHeredoc(t *testing.T, path, rel string) string {
+	t.Helper()
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	s := string(b)
+
+	start := strings.Index(s, "SLIM_PROTOCOL")
+	if start < 0 {
+		t.Fatalf("%s: slim branch heredoc marker SLIM_PROTOCOL not found", rel)
+	}
+	end := strings.Index(s[start+1:], "SLIM_PROTOCOL")
+	if end < 0 {
+		t.Fatalf("%s: unterminated SLIM_PROTOCOL heredoc", rel)
+	}
+	return s[start : start+1+end]
+}
+
+// TestSlimProtocolSurvivesCompaction asserts that the post-compaction hooks
+// carry a slim branch whose protocol text is byte-identical to the
+// session-start hook's. Compaction is exactly when the protocol has to be
+// re-injected, so a post-compaction hook that only knows the full protocol
+// would silently undo slim mode mid-session (and blow the token budget slim
+// mode exists to protect). Byte identity is the cheapest defense against the
+// two copies drifting apart.
+func TestSlimProtocolSurvivesCompaction(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, plugin := range []string{"claude-code", "codex"} {
+		sessionStart := filepath.Join(root, "plugin", plugin, "scripts", "session-start.sh")
+		postCompaction := filepath.Join(root, "plugin", plugin, "scripts", "post-compaction.sh")
+		relStart, _ := filepath.Rel(root, sessionStart)
+		relCompact, _ := filepath.Rel(root, postCompaction)
+
+		want := slimProtocolHeredoc(t, sessionStart, relStart)
+		got := slimProtocolHeredoc(t, postCompaction, relCompact)
+
+		if got != want {
+			t.Errorf("%s slim protocol drifted from %s\n--- session-start ---\n%s\n--- post-compaction ---\n%s",
+				relCompact, relStart, want, got)
+		}
+	}
+}
+
 // marketplaceJSON is the minimal structure of .claude-plugin/marketplace.json
 // needed to extract the version declared for the engram plugin entry.
 type marketplaceJSON struct {
