@@ -189,64 +189,28 @@ func NewServerWithSelector(sel BackendSelector, cfg MCPConfig, allowlist map[str
 }
 
 // serverInstructions tells MCP clients when to use Engram's tools.
-// 7 core tools are eager (always in context). The rest are deferred
-// and require ToolSearch to load.
-const serverInstructions = `Engram provides persistent memory that survives across sessions and compactions.
+//
+// This text is injected into EVERY session by every MCP client, so it is pure
+// per-session overhead and is held to a hard byte budget (see
+// TestServerInstructionsBudget). Keep it to the rules an agent must know
+// unconditionally: the core tools, the save rule (post-compaction recovery in
+// slim mode depends on this line), topic_key, and a pointer to the on-demand
+// `memory` SKILL. Occasional detail — the conflict-resolution loop, the
+// when-to-ask-the-user heuristic, the deferred tool list — lives in
+// plugin/{claude-code,codex}/skills/memory/SKILL.md, which is loaded on demand
+// and therefore costs nothing per session.
+const serverInstructions = `Engram: persistent memory across sessions and compactions.
 
-CORE TOOLS (always available — use without ToolSearch):
-  mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)
-  mem_search — find past work, decisions, or context from previous sessions
-  mem_context — get recent session history (call at session start or after compaction)
-  mem_session_summary — save end-of-session summary (MANDATORY before saying "done")
-  mem_get_observation — get full untruncated content of a search result by ID
-  mem_save_prompt — save user prompt for context
-  mem_current_project — detect current project from cwd (recommended first call)
+Core tools: mem_save (save decisions/bugs/conventions/gotchas — silently,
+batched at task end, never replacing your answer), mem_search (once at task
+start), mem_context (session start / post-compaction), mem_session_summary
+(before finishing), mem_get_observation (expand a search hit), mem_save_prompt.
+Durable facts use topic_key (lowercase-kebab, max 2 levels) to update in place.
 
-DEFERRED TOOLS (use ToolSearch when needed):
-  mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end,
-  mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
-
-PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.
-
-## MemoryLake-backed projects
-
-If the current project uses the MemoryLake backend (check with "engram memorylake status"),
-dedup, updating existing memories, and merging contradictions are handled AUTOMATICALLY by the
-backend — you only need mem_save / mem_search / mem_context; you do NOT need to call mem_update,
-mem_judge, or mem_compare yourself (mem_save never returns judgment_required there, so the conflict
-loop below simply won't trigger). Projects on the default SQLite backend are unaffected — keep
-following the topic-key/upsert and conflict-surfacing rules below.
-
-## CONFLICT SURFACING — when mem_save returns candidates
-
-After every mem_save call, check the response envelope for judgment_required.
-
-IF judgment_required IS TRUE:
-  Iterate candidates[] and call mem_judge once per candidate using the
-  judgment_id from that candidate entry. Do NOT use the top-level judgment_id
-  for multiple candidates — each candidate has its own.
-
-  HEURISTIC — when to ask the user vs. resolve autonomously:
-
-  ASK the user (conversationally, as part of your next reply) when:
-    - confidence is below 0.7, OR
-    - the relation you would choose is supersedes or conflicts_with AND the
-      observation type is architecture, policy, or decision
-
-  RESOLVE silently (call mem_judge without asking) when:
-    - confidence >= 0.7 AND the relation is not supersedes/conflicts_with, OR
-    - the relation is related, compatible, scoped, or not_conflict
-
-  HOW TO ASK (conversationally — never via blocking CLI or dashboard prompt):
-    Raise it naturally in your next reply to the user. Example phrasing:
-    "I noticed memory #abc123 might conflict with what we just saved.
-     Want me to mark the new one as superseding it, or are they about
-     different scopes? I can also mark them as compatible if both still apply."
-
-  AFTER RESOLUTION (both paths):
-    Call mem_judge with the chosen relation, a reason, and if the user gave
-    explicit direction, include their words as the evidence field. This persists
-    the verdict and closes the pending conflict row.`
+MemoryLake-backed projects (engram memorylake status): dedup/conflict-merge
+are automatic; the three core tools suffice. SQLite projects: if mem_save
+returns judgment_required, follow the conflict loop documented in the memory
+SKILL. Details and examples: load the memory SKILL on demand.`
 
 // NewServerWithTools creates an MCP server registering only the tools in
 // the allowlist. If allowlist is nil, all tools are registered.

@@ -131,6 +131,70 @@ func TestSlimProtocolBudgetAndCoreRules(t *testing.T) {
 	}
 }
 
+// TestMemorySkillsCarryConflictLoop pins the conflict-resolution walkthrough to
+// the on-demand `memory` SKILL files. This detail used to live in the MCP
+// server instructions, which every client injects into every session; it was
+// moved here because an agent needs it only when mem_save actually returns
+// judgment_required, and SKILL.md is loaded on demand (its size is not in the
+// per-session budget — see TestServerInstructionsBudget in internal/mcp).
+//
+// If these phrases disappear, the trimmed server instructions point at a SKILL
+// that no longer documents the loop, and the guidance is lost entirely.
+func TestMemorySkillsCarryConflictLoop(t *testing.T) {
+	root := repoRoot(t)
+
+	skills := []string{
+		filepath.Join(root, "plugin", "claude-code", "skills", "memory", "SKILL.md"),
+		filepath.Join(root, "plugin", "codex", "skills", "memory", "SKILL.md"),
+	}
+
+	required := []string{
+		// Section header — agents must be able to grep for it
+		"## Conflict loop (SQLite projects)",
+
+		// Core trigger condition
+		"judgment_required",
+
+		// The action: iterate candidates and call mem_judge
+		"candidates[]",
+		"mem_judge",
+
+		// The per-candidate judgment_id rule (not the top-level one)
+		"Do NOT use the top-level judgment_id",
+
+		// Heuristic: low confidence threshold
+		"0.7",
+
+		// Heuristic: ask for high-stakes relation+type combos
+		"supersedes",
+		"conflicts_with",
+		"architecture",
+
+		// Conversational (not blocking) resolution pattern
+		"conversationally",
+
+		// Post-resolution: persist via mem_judge with evidence
+		"evidence",
+
+		// The deferred tool list also moved out of the server instructions
+		"mem_merge_projects",
+	}
+
+	for _, path := range skills {
+		rel, _ := filepath.Rel(root, path)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		text := string(b)
+		for _, phrase := range required {
+			if !strings.Contains(text, phrase) {
+				t.Errorf("%s is missing required phrase %q from the conflict loop section", rel, phrase)
+			}
+		}
+	}
+}
+
 // marketplaceJSON is the minimal structure of .claude-plugin/marketplace.json
 // needed to extract the version declared for the engram plugin entry.
 type marketplaceJSON struct {
