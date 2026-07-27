@@ -39,6 +39,11 @@ L2 composite `7824 → 6083.78` (`2289c68-2026-07-27-l2.json`), retrieval
 remaining gap that the client structurally **cannot** close, because the cost
 is paid before our code sees the bytes.
 
+**Wire-envelope convention for every sketch below:** response bodies are shown
+as the `data` payload of the standard `{"success": true, "data": …}` envelope
+that the Engram client requires on all V3 endpoints (`internal/memorylake/client.go`
+rejects any body without `success` and unmarshals only `data`).
+
 ---
 
 ## 1. Temporal validity on facts (`valid_from` / `valid_until`)
@@ -95,7 +100,8 @@ facts organically during Wave 1 (recorded in `.superpowers/sdd/progress.md`,
 W1-T5), which by itself moved retrieval from 517.06 to 890.78 and then
 991.46 tokens/query (`0e9020d-2026-07-27-l1.json`,
 `9332c39-2026-07-27-l1.json`) before client-side index-mode rendering pulled it
-back to 205.59. Superseded facts accumulate; without validity they accumulate
+back to 205.59. That growth was legitimate live content — but superseded facts
+accumulate by the same mechanism, and without validity they accumulate
 *in the ranking*.
 
 ### 1b. Proposed API change
@@ -182,10 +188,13 @@ omission is what actually buys the token win.
   0.133, with 5 cases shipping a 100%-distractor payload. At 205.59
   tokens/query and `search-calls=3.0` (≈617 tokens of the 6083.78 composite),
   eliminating the fully-wasted payloads is a small absolute win *today* on a
-  15-fact corpus. Its real value is derivative-of-time: it removes the term
-  that made the composite drift from 7824 to 9699.39 as the corpus grew
-  (`9332c39-2026-07-27-l2.json`). Without validity, every optimization we ship
-  is re-eaten by accumulation.
+  15-fact corpus. Its real value is derivative-of-time: it removes the
+  *superseded share* of the growth term that drove the composite from 7824 to
+  9699.39 as the corpus grew (`9332c39-2026-07-27-l2.json`; that particular
+  growth was verified-legitimate live facts — validity filtering targets the
+  stale fraction that inevitably appears as revisions accumulate). Without
+  validity, every optimization we ship is progressively re-eaten by stale
+  accumulation.
 - **Uplift (≥ 4.53).** This is the more important axis. Baseline per-category
   uplift is gotcha **+8.50**, architecture-qa **−0.90**, small-fix **−0.80**
   (`baseline-report.md`): memory only wins where the retrieved fact is *right*,
