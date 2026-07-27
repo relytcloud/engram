@@ -3274,8 +3274,13 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("format context: %v", err)
 	}
-	if !strings.Contains(ctx, "Recent User Prompts") {
-		t.Fatalf("expected prompts section in context output")
+	// Prompts are no longer part of the layered context block (Phase 2 R3b) —
+	// they are retrieved via RecentPrompts/SearchPrompts instead.
+	if strings.Contains(ctx, "Recent User Prompts") {
+		t.Fatalf("prompts section must not appear in the layered context output:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "## Memory Context") {
+		t.Fatalf("expected layered context heading:\n%s", ctx)
 	}
 }
 
@@ -4049,7 +4054,9 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			}
 		})
 
-		t.Run("recent prompts error", func(t *testing.T) {
+		// The layered layout (Phase 2 R3b) no longer reads user prompts, so a
+		// broken user_prompts table must NOT fail FormatContext any more.
+		t.Run("prompt table is not a context dependency", func(t *testing.T) {
 			s := newTestStore(t)
 			if err := s.CreateSession("s-ctx2", "engram", "/tmp/engram"); err != nil {
 				t.Fatalf("create session: %v", err)
@@ -4057,8 +4064,8 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			if _, err := s.db.Exec("DROP TABLE user_prompts"); err != nil {
 				t.Fatalf("drop prompts: %v", err)
 			}
-			if _, err := s.FormatContext("", ""); err == nil {
-				t.Fatalf("expected format context to fail from recent prompts")
+			if _, err := s.FormatContext("", ""); err != nil {
+				t.Fatalf("format context must not depend on user_prompts: %v", err)
 			}
 		})
 	})
@@ -8828,5 +8835,136 @@ func TestSanitizeFTS(t *testing.T) {
 				t.Errorf("sanitizeFTS(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// ─── Layered mem_context budget (Phase 2 R3b) ────────────────────────────────
+
+// TestFormatContextLayeredBudget pins the layered context contract: a single
+// "## Memory Context" heading, one-line sessions whose summary is cut to its
+// first sentence, at most contextRecentObs observation summaries, an
+// expand-on-demand footer, and a hard contextByteCap on the whole block.
+func TestFormatContextLayeredBudget(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-layered", "proj-x", "/tmp/proj-x"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("s-layered", "long summary. second sentence that must not appear."); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-layered",
+			Type:      "decision",
+			Title:     fmt.Sprintf("title-%d", i),
+			Content:   strings.Repeat("body sentence ", 40),
+			Project:   "proj-x",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation %d: %v", i, err)
+		}
+	}
+
+	out, err := s.FormatContext("proj-x", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.HasPrefix(out, "## Memory Context\n") {
+		t.Fatalf("missing layered heading:\n%s", out)
+	}
+	if strings.Contains(out, "second sentence that must not appear") {
+		t.Fatalf("session summary not truncated to first sentence:\n%s", out)
+	}
+	if !strings.Contains(out, "long summary.") {
+		t.Fatalf("session summary first sentence missing:\n%s", out)
+	}
+	if !strings.Contains(out, "mem_get_observation") {
+		t.Fatalf("missing expand-on-demand footer:\n%s", out)
+	}
+	if got := strings.Count(out, "title-"); got != contextRecentObs {
+		t.Fatalf("rendered %d observations, want %d:\n%s", got, contextRecentObs, out)
+	}
+	// Newest-first: the last three observations survive, the oldest do not.
+	for _, want := range []string{"title-9", "title-8", "title-7"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected newest observation %s in context:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "title-0") {
+		t.Fatalf("oldest observation must be dropped:\n%s", out)
+	}
+	if strings.Contains(out, "Recent User Prompts") {
+		t.Fatalf("prompts section is not part of the layered layout:\n%s", out)
+	}
+}
+
+// TestFormatContextByteCapDropsObservationsThenSessionsNeverPinned proves the
+// drop order when the block exceeds contextByteCap: oldest observations go
+// first, then oldest sessions, and the pinned block always survives.
+func TestFormatContextByteCapDropsObservationsThenSessionsNeverPinned(t *testing.T) {
+	s := newTestStore(t)
+
+	pinnedBody := "PINNED-MARKER decision body that must never be dropped."
+	for i := 0; i < 6; i++ {
+		id := fmt.Sprintf("s-cap-%d", i)
+		if err := s.CreateSession(id, "proj-cap", "/tmp/proj-cap"); err != nil {
+			t.Fatalf("create session %s: %v", id, err)
+		}
+		if err := s.EndSession(id, fmt.Sprintf("session %d summary %s.", i, strings.Repeat("x", 150))); err != nil {
+			t.Fatalf("end session %s: %v", id, err)
+		}
+	}
+
+	pinnedID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-cap-0",
+		Type:      "decision",
+		Title:     "pinned-title",
+		Content:   pinnedBody,
+		Project:   "proj-cap",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add pinned observation: %v", err)
+	}
+	if err := s.PinObservation(pinnedID); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-cap-0",
+			Type:      "note",
+			Title:     fmt.Sprintf("obs-%d", i),
+			Content:   strings.Repeat("filler sentence words ", 20) + ".",
+			Project:   "proj-cap",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation %d: %v", i, err)
+		}
+	}
+
+	out, err := s.FormatContext("proj-cap", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.Contains(out, "PINNED-MARKER") {
+		t.Fatalf("pinned content must never be dropped by the byte cap:\n%s", out)
+	}
+	if strings.Count(out, "obs-") > contextRecentObs {
+		t.Fatalf("more than %d observations rendered:\n%s", contextRecentObs, out)
+	}
+	if n := strings.Count(out, "session "); n > contextRecentSessions {
+		t.Fatalf("rendered %d sessions, cap %d:\n%s", n, contextRecentSessions, out)
+	}
+	if !strings.Contains(out, "Full bodies: mem_search / mem_get_observation.") {
+		t.Fatalf("footer must survive the byte cap:\n%s", out)
 	}
 }

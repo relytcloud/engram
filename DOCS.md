@@ -900,7 +900,26 @@ When called in the same MCP process, this also feeds process-local current promp
 
 ### mem_context
 
-Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
+Get recent memory context from previous sessions, with optional scope filtering for observations.
+
+The block is layered and budgeted (~400 tokens / 1600 bytes hard cap) so it is cheap to call at every session start and after every compaction:
+
+```
+## Memory Context
+
+### Pinned
+- [decision] **title**: <content, cut to 300 runes>
+
+### Recent Sessions
+- <started_at> <summary first sentence | (active) | (no summary)>   (max 5)
+
+### Recent Observations
+- [type] **title**: <content first sentence, cut to 160 runes>      (max 3)
+
+Full bodies: mem_search / mem_get_observation.
+```
+
+Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped. Sections with no rows are omitted entirely, and an empty project returns an empty string. Recent user prompts are **not** part of this block (they cost more than they buy inside the budget) — read them with `GET /prompts/recent` / `GET /prompts/search` instead. The MemoryLake backend renders the identical layout minus `### Recent Sessions` (it has no session tracking).
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 

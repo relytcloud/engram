@@ -2,6 +2,7 @@ package memorylake
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -720,16 +721,25 @@ func TestBackend_FormatContext_ScopeFilter(t *testing.T) {
 	}
 }
 
-// TestBackend_FormatContext_TruncatesContentTo300 is the I3 regression:
-// internal/store's FormatContext truncates every observation's content to
-// 300 runes before rendering it (store.go's truncate(obs.Content, 300)); the
-// MemoryLake backend must match that so a project's rendered context block
-// has the same shape regardless of which backend produced it.
-func TestBackend_FormatContext_TruncatesContentTo300(t *testing.T) {
+// TestBackend_FormatContext_TruncatesPinnedContentTo300 is the I3 regression:
+// internal/store's FormatContext truncates a pinned observation's content to
+// 300 runes before rendering it (store.go's truncate(obs.Content,
+// contextPinnedTruncLen)); the MemoryLake backend must match that so a
+// project's rendered context block has the same shape regardless of which
+// backend produced it.
+//
+// Since the layered rewrite (Phase 2 R3b) this 300-rune cut applies to the
+// pinned block only — recent-observation lines are cut to their first sentence
+// (contextSummaryTruncLen) on both backends, which
+// TestBackend_FormatContext_LayeredBudget covers. The fact below is therefore
+// pinned; the unpinned tail of this test asserts the 160-rune summary cap.
+func TestBackend_FormatContext_TruncatesPinnedContentTo300(t *testing.T) {
 	long := strings.Repeat("a", 400)
 	items := []map[string]any{
 		{"id": "fact-1", "fact": long, "created_at": "2026-07-20T00:00:00Z",
-			"metadata": map[string]any{metaTitle: "T", metaType: "note", metaScope: "global"}},
+			"metadata": map[string]any{metaTitle: "T", metaType: "note", metaScope: "global", "pinned": true}},
+		{"id": "fact-2", "fact": strings.Repeat("b", 400), "created_at": "2026-07-20T01:00:00Z",
+			"metadata": map[string]any{metaTitle: "U", metaType: "note", metaScope: "global"}},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts") {
@@ -751,6 +761,11 @@ func TestBackend_FormatContext_TruncatesContentTo300(t *testing.T) {
 	want := strings.Repeat("a", 300) + "..."
 	if !strings.Contains(out, want) {
 		t.Fatalf("FormatContext missing expected 300-rune truncation with ellipsis:\n%s", out)
+	}
+	wantSummary := strings.Repeat("b", contextSummaryTruncLen) + "…"
+	if !strings.Contains(out, wantSummary) {
+		t.Fatalf("FormatContext missing expected %d-rune summary cap on the recent line:\n%s",
+			contextSummaryTruncLen, out)
 	}
 }
 
@@ -803,5 +818,74 @@ func TestListAllFacts_TerminatesAgainstInfiniteContinuationToken(t *testing.T) {
 	}
 	if stats.TotalObservations != maxListAllFactsPages {
 		t.Fatalf("TotalObservations=%d, want %d (one fact per page, capped)", stats.TotalObservations, maxListAllFactsPages)
+	}
+}
+
+// ─── Layered mem_context budget (Phase 2 R3b) ────────────────────────────────
+
+// TestBackend_FormatContext_LayeredBudget mirrors internal/store's
+// TestFormatContextLayeredBudget: the MemoryLake rendering must produce the
+// same layered block (single "## Memory Context" heading, at most
+// contextRecentObs observation summaries cut to their first sentence, the
+// expand-on-demand footer, whole block under contextByteCap) so a project's
+// context looks the same on either backend. This backend has no sessions, so
+// the "### Recent Sessions" section is simply absent.
+func TestBackend_FormatContext_LayeredBudget(t *testing.T) {
+	items := []map[string]any{
+		{"id": "fact-pin", "fact": "PINNED-MARKER pinned body. second pinned sentence.",
+			"created_at": "2026-07-20T00:00:00Z",
+			"metadata":   map[string]any{metaTitle: "pinned-title", metaType: "decision", metaScope: "global", "pinned": true}},
+	}
+	for i := 0; i < 10; i++ {
+		items = append(items, map[string]any{
+			"id":         fmt.Sprintf("fact-%d", i),
+			"fact":       fmt.Sprintf("title-%d first sentence. tail sentence that must not appear.", i),
+			"created_at": fmt.Sprintf("2026-07-21T%02d:00:00Z", i),
+			"metadata":   map[string]any{metaTitle: fmt.Sprintf("title-%d", i), metaType: "note", metaScope: "global"},
+		})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts") {
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	out, err := b.FormatContext("proj", "global")
+	if err != nil {
+		t.Fatalf("FormatContext: %v", err)
+	}
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.HasPrefix(out, "## Memory Context\n") {
+		t.Fatalf("missing layered heading:\n%s", out)
+	}
+	if !strings.Contains(out, "PINNED-MARKER") {
+		t.Fatalf("pinned content must never be dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "Full bodies: mem_search / mem_get_observation.") {
+		t.Fatalf("missing expand-on-demand footer:\n%s", out)
+	}
+	if got := strings.Count(out, "title-"); got != contextRecentObs*2 {
+		// Each rendered observation prints its title once and its first
+		// sentence (which starts with the same "title-N" token) once.
+		t.Fatalf("rendered %d title- tokens, want %d (%d observations):\n%s",
+			got, contextRecentObs*2, contextRecentObs, out)
+	}
+	if strings.Contains(out, "tail sentence that must not appear") {
+		t.Fatalf("observation body not cut to first sentence:\n%s", out)
+	}
+	if strings.Contains(out, "title-0 first sentence") {
+		t.Fatalf("oldest observation must be dropped:\n%s", out)
+	}
+	if !strings.Contains(out, "title-9") {
+		t.Fatalf("newest observation must be rendered:\n%s", out)
+	}
+	if strings.Contains(out, "### Recent Sessions") {
+		t.Fatalf("MemoryLake backend has no sessions to render:\n%s", out)
 	}
 }

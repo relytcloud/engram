@@ -451,7 +451,7 @@ func TestCoreReadHandlersAndHelpersE2E(t *testing.T) {
 		t.Fatalf("expected 200 context, got %d", contextResp.StatusCode)
 	}
 	contextData := decodeJSON[map[string]string](t, contextResp)
-	if !strings.Contains(contextData["context"], "Memory from Previous Sessions") {
+	if !strings.Contains(contextData["context"], "## Memory Context") {
 		t.Fatalf("expected formatted context output")
 	}
 

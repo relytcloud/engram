@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -400,18 +402,19 @@ func (b *MemoryLakeBackend) Timeline(syncID string, before, after int) (*store.T
 }
 
 // maxFormatContextRecent bounds how many non-pinned facts FormatContext
-// includes, mirroring the local store's cfg.MaxContextResults ceiling (a
+// considers, mirroring the local store's cfg.MaxContextResults ceiling (a
 // fixed reasonable default here since this backend has no equivalent config
-// field).
+// field). The layered layout renders at most contextRecentObs of them.
 const maxFormatContextRecent = 20
 
 // formatContextContentTruncateLen mirrors internal/store's FormatContext,
-// which truncates every observation's content to 300 runes (via its
-// unexported truncate helper) before rendering pinned/recent lines — see
-// internal/store/store.go's FormatContext. internal/store does not export
-// that helper, so truncate below replicates it so MemoryLake-backed projects
-// produce the same shape of context block as SQLite-backed ones (task-12
-// hardening brief I3).
+// which truncates a *pinned* observation's content to 300 runes (via its
+// unexported truncate helper, as contextPinnedTruncLen) before rendering the
+// pinned lines — see internal/store/store.go's FormatContext. internal/store
+// does not export that helper, so truncate below replicates it so
+// MemoryLake-backed projects produce the same shape of context block as
+// SQLite-backed ones (task-12 hardening brief I3). Recent-observation lines use
+// firstSentence on both backends instead.
 const formatContextContentTruncateLen = 300
 
 // truncate mirrors internal/store's unexported truncate(s, max): a rune-safe
@@ -426,11 +429,125 @@ func truncate(s string, max int) string {
 	return string(runes[:max]) + "..."
 }
 
-// FormatContext renders a human-readable text block of the project's facts,
-// optionally filtered by scope, with pinned facts (metadata["pinned"] == true)
-// listed ahead of the most recent unpinned ones — the same priority order as
-// the local store's FormatContext (pinned section before recent-observations
-// section).
+// Layered mem_context contract (Phase 2 spec R3b) — a byte-for-byte mirror of
+// internal/store's constants of the same names (see internal/store/store.go).
+// internal/memorylake does import internal/store, but these are deliberately
+// unexported there (presentation detail of the local backend, not part of its
+// API), so they are duplicated here the same way truncate is. Keep in sync.
+const (
+	contextByteCap         = 1600
+	contextRecentObs       = 3
+	contextSummaryTruncLen = 160
+)
+
+// contextFooter closes every context block with the expand-on-demand pointer
+// (identical string to internal/store's contextFooter).
+const contextFooter = "Full bodies: mem_search / mem_get_observation.\n"
+
+// firstSentence returns content up to the first sentence terminator, capped
+// at contextSummaryTruncLen on a rune boundary. Deterministic — key entities in
+// the opening sentence always survive (Phase 2 spec R3 rule).
+//
+// A '.' only terminates when it is followed by whitespace/end-of-string and is
+// not flanked by digits, so decimals survive:
+// "PostgreSQL 15.3 is required. More." → "PostgreSQL 15.3 is required."
+// The other terminators (!?。！？ and \n) always terminate.
+//
+// Known tradeoff (ACCEPTED): abbreviations whose '.' is followed by a space
+// still terminate — "e.g. use flags. Done." → "e.g." — because the guard is
+// deliberately context-free (digit + whitespace rules only). We do NOT carry an
+// abbreviation dictionary; the summary is a scanning aid, not prose.
+//
+// Canonical twin: internal/mcp.firstSentence (internal/mcp/search_index.go),
+// whose rune cap is spelled searchSummaryMaxRunes (same value, 160);
+// internal/store carries the third copy. internal/memorylake must not import
+// internal/mcp (import cycle), so this duplication mirrors truncate above. Keep
+// the three copies behaviourally identical.
+func firstSentence(content string) string {
+	c := strings.TrimSpace(content)
+	runes := []rune(c)
+	for i, r := range runes {
+		if r == '!' || r == '?' || r == '\n' || r == '。' || r == '！' || r == '？' {
+			c = string(runes[:i+1])
+			break
+		}
+		if r != '.' {
+			continue
+		}
+		// Must be followed by whitespace or end-of-string. This alone keeps
+		// decimals intact ("15.3" — the '3' is not whitespace).
+		if i+1 < len(runes) && !unicode.IsSpace(runes[i+1]) {
+			continue
+		}
+		// Must not be flanked by digits, looking past the whitespace, so a
+		// spaced decimal/enumeration ("15. 3") is not a sentence end either.
+		if i > 0 && unicode.IsDigit(runes[i-1]) && unicode.IsDigit(nextNonSpace(runes[i+1:])) {
+			continue
+		}
+		c = string(runes[:i+1])
+		break
+	}
+	if utf8.RuneCountInString(c) > contextSummaryTruncLen {
+		runes := []rune(c)
+		c = string(runes[:contextSummaryTruncLen]) + "…"
+	}
+	return strings.TrimSpace(c)
+}
+
+// nextNonSpace returns the first non-whitespace rune of runes, or 0 when there
+// is none (0 is not a digit, so callers treat "nothing follows" as not-a-digit).
+func nextNonSpace(runes []rune) rune {
+	for _, r := range runes {
+		if !unicode.IsSpace(r) {
+			return r
+		}
+	}
+	return 0
+}
+
+// renderLayeredContext assembles the layered block and enforces
+// contextByteCap by dropping the oldest observation line (this backend has no
+// session lines — see FormatContext). Pinned lines are never dropped. Mirrors
+// internal/store's renderLayeredContext.
+func renderLayeredContext(pinnedLines, obsLines []string) string {
+	for {
+		out := joinLayeredContext(pinnedLines, obsLines)
+		if len(out) <= contextByteCap {
+			return out
+		}
+		if n := len(obsLines); n > 0 {
+			obsLines = obsLines[:n-1]
+			continue
+		}
+		return out
+	}
+}
+
+func joinLayeredContext(pinnedLines, obsLines []string) string {
+	var b strings.Builder
+	b.WriteString("## Memory Context\n\n")
+	writeContextSection(&b, "### Pinned\n", pinnedLines)
+	writeContextSection(&b, "### Recent Observations\n", obsLines)
+	b.WriteString(contextFooter)
+	return b.String()
+}
+
+func writeContextSection(b *strings.Builder, heading string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	b.WriteString(heading)
+	for _, line := range lines {
+		b.WriteString(line)
+	}
+	b.WriteString("\n")
+}
+
+// FormatContext renders the layered context block of the project's facts,
+// optionally filtered by scope: pinned facts (metadata["pinned"] == true)
+// first, then up to contextRecentObs first-sentence summaries of the most
+// recent unpinned facts, then the expand-on-demand footer — the same layout
+// (and the same contextByteCap budget) as the local store's FormatContext.
 //
 // project is accepted for signature compatibility but ignored: a backend
 // instance is already bound to a single MemoryLake project (see
@@ -477,28 +594,24 @@ func (b *MemoryLakeBackend) FormatContext(project, scope string) (string, error)
 		return "", nil
 	}
 
-	var out strings.Builder
-	out.WriteString("## Memory Context (MemoryLake)\n\n")
-
-	if len(pinned) > 0 {
-		out.WriteString("### Pinned\n")
-		for _, f := range pinned {
-			o := ObservationFromFact(f)
-			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, truncate(o.Content, formatContextContentTruncateLen))
-		}
-		out.WriteString("\n")
+	pinnedLines := make([]string, 0, len(pinned))
+	for _, f := range pinned {
+		o := ObservationFromFact(f)
+		pinnedLines = append(pinnedLines, fmt.Sprintf("- [%s] **%s**: %s\n",
+			o.Type, o.Title, truncate(o.Content, formatContextContentTruncateLen)))
 	}
 
-	if len(recent) > 0 {
-		out.WriteString("### Recent Observations\n")
-		for _, f := range recent {
-			o := ObservationFromFact(f)
-			fmt.Fprintf(&out, "- [%s] **%s**: %s\n", o.Type, o.Title, truncate(o.Content, formatContextContentTruncateLen))
-		}
-		out.WriteString("\n")
+	if len(recent) > contextRecentObs {
+		recent = recent[:contextRecentObs]
+	}
+	obsLines := make([]string, 0, len(recent))
+	for _, f := range recent {
+		o := ObservationFromFact(f)
+		obsLines = append(obsLines, fmt.Sprintf("- [%s] **%s**: %s\n",
+			o.Type, o.Title, firstSentence(o.Content)))
 	}
 
-	return out.String(), nil
+	return renderLayeredContext(pinnedLines, obsLines), nil
 }
 
 // isPinned reports whether a fact's metadata carries the pinned flag set by

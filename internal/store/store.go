@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	sqlite "modernc.org/sqlite"
@@ -3295,8 +3297,147 @@ SELECT 1 FROM (
 
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
+// Layered mem_context contract (Phase 2 spec R3b). mem_context is called at
+// every session start and after every compaction, so the whole block is hard
+// capped at contextByteCap bytes (~400 tokens at the 4-bytes-per-token
+// approximation). Overflow is resolved by dropping the oldest observation
+// lines first, then the oldest session lines; pinned content is never dropped
+// (capping the pinned block itself is a separate concern).
+//
+// The identical contract is implemented by internal/memorylake's FormatContext
+// so a project's context block looks the same on either backend — keep the two
+// in sync.
+const (
+	contextByteCap         = 1600
+	contextRecentObs       = 3
+	contextRecentSessions  = 5
+	contextSummaryTruncLen = 160
+)
+
+// contextPinnedTruncLen is the pre-existing pinned/observation content cut used
+// by FormatContext before the layered rewrite. The layered layout keeps it for
+// the pinned block only (recent observations now use firstSentence).
+const contextPinnedTruncLen = 300
+
+// contextFooter closes every context block with the expand-on-demand pointer:
+// the block carries first sentences only, full bodies are one call away.
+const contextFooter = "Full bodies: mem_search / mem_get_observation.\n"
+
+// firstSentence returns content up to the first sentence terminator, capped
+// at contextSummaryTruncLen on a rune boundary. Deterministic — key entities in
+// the opening sentence always survive (Phase 2 spec R3 rule).
+//
+// A '.' only terminates when it is followed by whitespace/end-of-string and is
+// not flanked by digits, so decimals survive:
+// "PostgreSQL 15.3 is required. More." → "PostgreSQL 15.3 is required."
+// The other terminators (!?。！？ and \n) always terminate.
+//
+// Known tradeoff (ACCEPTED): abbreviations whose '.' is followed by a space
+// still terminate — "e.g. use flags. Done." → "e.g." — because the guard is
+// deliberately context-free (digit + whitespace rules only). We do NOT carry an
+// abbreviation dictionary; the summary is a scanning aid, not prose.
+//
+// Canonical twin: internal/mcp.firstSentence (internal/mcp/search_index.go),
+// whose rune cap is spelled searchSummaryMaxRunes (same value, 160).
+// internal/mcp imports internal/store, so internal/store cannot import it back;
+// this duplication mirrors how mcp duplicates eval/metrics.ApproxTokens. Keep
+// the three copies (mcp, store, memorylake) behaviourally identical.
+func firstSentence(content string) string {
+	c := strings.TrimSpace(content)
+	runes := []rune(c)
+	for i, r := range runes {
+		if r == '!' || r == '?' || r == '\n' || r == '。' || r == '！' || r == '？' {
+			c = string(runes[:i+1])
+			break
+		}
+		if r != '.' {
+			continue
+		}
+		// Must be followed by whitespace or end-of-string. This alone keeps
+		// decimals intact ("15.3" — the '3' is not whitespace).
+		if i+1 < len(runes) && !unicode.IsSpace(runes[i+1]) {
+			continue
+		}
+		// Must not be flanked by digits, looking past the whitespace, so a
+		// spaced decimal/enumeration ("15. 3") is not a sentence end either.
+		if i > 0 && unicode.IsDigit(runes[i-1]) && unicode.IsDigit(nextNonSpace(runes[i+1:])) {
+			continue
+		}
+		c = string(runes[:i+1])
+		break
+	}
+	if utf8.RuneCountInString(c) > contextSummaryTruncLen {
+		runes := []rune(c)
+		c = string(runes[:contextSummaryTruncLen]) + "…"
+	}
+	return strings.TrimSpace(c)
+}
+
+// nextNonSpace returns the first non-whitespace rune of runes, or 0 when there
+// is none (0 is not a digit, so callers treat "nothing follows" as not-a-digit).
+func nextNonSpace(runes []rune) rune {
+	for _, r := range runes {
+		if !unicode.IsSpace(r) {
+			return r
+		}
+	}
+	return 0
+}
+
+// renderLayeredContext assembles the layered block and enforces
+// contextByteCap by dropping the oldest observation line, then the oldest
+// session line, until the rendered block fits. Every slice is newest-first, so
+// "oldest" is the last element. Pinned lines are never dropped: if a block is
+// still over cap once observations and sessions are gone, it is returned as-is.
+func renderLayeredContext(pinnedLines, sessionLines, obsLines []string) string {
+	for {
+		out := joinLayeredContext(pinnedLines, sessionLines, obsLines)
+		if len(out) <= contextByteCap {
+			return out
+		}
+		if n := len(obsLines); n > 0 {
+			obsLines = obsLines[:n-1]
+			continue
+		}
+		if n := len(sessionLines); n > 0 {
+			sessionLines = sessionLines[:n-1]
+			continue
+		}
+		return out
+	}
+}
+
+func joinLayeredContext(pinnedLines, sessionLines, obsLines []string) string {
+	var b strings.Builder
+	b.WriteString("## Memory Context\n\n")
+	writeContextSection(&b, "### Pinned\n", pinnedLines)
+	writeContextSection(&b, "### Recent Sessions\n", sessionLines)
+	writeContextSection(&b, "### Recent Observations\n", obsLines)
+	b.WriteString(contextFooter)
+	return b.String()
+}
+
+func writeContextSection(b *strings.Builder, heading string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	b.WriteString(heading)
+	for _, line := range lines {
+		b.WriteString(line)
+	}
+	b.WriteString("\n")
+}
+
+// FormatContext renders the layered context block for a project: pinned
+// observations, then up to contextRecentSessions one-line session entries, then
+// up to contextRecentObs observation summaries, then the expand-on-demand
+// footer — all within contextByteCap bytes.
+//
+// Recent user prompts are deliberately NOT part of the layered block: they cost
+// more bytes than they buy inside a 400-token budget. They remain available via
+// RecentPrompts / SearchPrompts.
 func (s *Store) FormatContext(project, scope string) (string, error) {
-	sessions, err := s.RecentSessions(project, 5)
+	sessions, err := s.RecentSessions(project, contextRecentSessions)
 	if err != nil {
 		return "", err
 	}
@@ -3311,58 +3452,45 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		return "", err
 	}
 
-	prompts, err := s.RecentPrompts(project, 10)
-	if err != nil {
-		return "", err
-	}
-
-	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 {
+	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 {
 		return "", nil
 	}
 
-	var b strings.Builder
-	b.WriteString("## Memory from Previous Sessions\n\n")
-
-	if len(sessions) > 0 {
-		b.WriteString("### Recent Sessions\n")
-		for _, sess := range sessions {
-			summary := ""
-			if sess.Summary != nil {
-				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
-			}
-			fmt.Fprintf(&b, "- **%s** (%s)%s [%d observations]\n",
-				sess.Project, timeutil.FormatLocal(sess.StartedAt), summary, sess.ObservationCount)
-		}
-		b.WriteString("\n")
+	pinnedLines := make([]string, 0, len(pinned))
+	for _, obs := range pinned {
+		pinnedLines = append(pinnedLines, fmt.Sprintf("- [%s] **%s**: %s\n",
+			obs.Type, obs.Title, truncate(obs.Content, contextPinnedTruncLen)))
 	}
 
-	if len(prompts) > 0 {
-		b.WriteString("### Recent User Prompts\n")
-		for _, p := range prompts {
-			fmt.Fprintf(&b, "- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
-		}
-		b.WriteString("\n")
+	sessionLines := make([]string, 0, len(sessions))
+	for _, sess := range sessions {
+		sessionLines = append(sessionLines, fmt.Sprintf("- %s %s\n",
+			timeutil.FormatLocal(sess.StartedAt), sessionSummaryLine(sess)))
 	}
 
-	if len(pinned) > 0 {
-		b.WriteString("### Pinned\n")
-		for _, obs := range pinned {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
-		}
-		b.WriteString("\n")
+	if len(observations) > contextRecentObs {
+		observations = observations[:contextRecentObs]
+	}
+	obsLines := make([]string, 0, len(observations))
+	for _, obs := range observations {
+		obsLines = append(obsLines, fmt.Sprintf("- [%s] **%s**: %s\n",
+			obs.Type, obs.Title, firstSentence(obs.Content)))
 	}
 
-	if len(observations) > 0 {
-		b.WriteString("### Recent Observations\n")
-		for _, obs := range observations {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
-		}
-		b.WriteString("\n")
-	}
+	return renderLayeredContext(pinnedLines, sessionLines, obsLines), nil
+}
 
-	return b.String(), nil
+// sessionSummaryLine renders the one-line session tail: the summary's first
+// sentence when there is one, "(active)" for a still-open session, and
+// "(no summary)" for a session that ended without one.
+func sessionSummaryLine(sess SessionSummary) string {
+	if sess.Summary != nil && strings.TrimSpace(*sess.Summary) != "" {
+		return firstSentence(*sess.Summary)
+	}
+	if sess.EndedAt == nil {
+		return "(active)"
+	}
+	return "(no summary)"
 }
 
 // ─── Export / Import ─────────────────────────────────────────────────────────
