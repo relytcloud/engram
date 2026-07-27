@@ -2903,7 +2903,7 @@ func printSetupUsage() {
 	fmt.Println("                          installed agent slug (default: full). Unknown or")
 	fmt.Println("                          missing values fall back to full with a warning.")
 	fmt.Println("                          slim currently only takes effect for claude-code,")
-	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("                          and only when the installed engram is >= 0.4.0.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
