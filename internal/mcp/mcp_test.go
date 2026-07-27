@@ -7478,7 +7478,7 @@ func TestServerInstructionsBudget(t *testing.T) {
 	if len(s) > 1300 {
 		t.Fatalf("serverInstructions is %d bytes, budget 1300", len(s))
 	}
-	for _, must := range []string{"mem_save", "mem_search", "mem_context", "SKILL", "memorylake"} {
+	for _, must := range []string{"mem_save", "mem_search", "mem_context", "SKILL", "memorylake", "batched at task end"} {
 		if !strings.Contains(strings.ToLower(s), strings.ToLower(must)) {
 			t.Fatalf("instructions missing %q", must)
 		}

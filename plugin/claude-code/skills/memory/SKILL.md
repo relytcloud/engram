@@ -115,7 +115,7 @@ IF judgment_required IS TRUE:
     explicit direction, include their words as the evidence field. This persists
     the verdict and closes the pending conflict row.
 
-### Deferred tools (use ToolSearch when needed)
+### Deferred tools (use ToolSearch when needed; the session-start hook preloads several of these — ToolSearch only if a call fails)
 
   mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end,
   mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
