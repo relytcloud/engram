@@ -2,10 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 
 	"github.com/Gentleman-Programming/engram/internal/memorylake"
@@ -36,15 +37,45 @@ func setupMemoryLakeEnv(t *testing.T, srvURL, project, projID string) {
 	}
 }
 
+// fakeMemoryLakeRecorder records what newFakeMemoryLakeServer's fake API was
+// asked to do, so tests can assert the CLI really went through MemoryLake's
+// direct fact-add write path rather than inferring it from the absence of a
+// local sqlite row.
+type fakeMemoryLakeRecorder struct {
+	mu sync.Mutex
+	// factPosts counts POST .../projects/proj-1/memories/facts calls (the
+	// direct fact-add endpoint AddObservation writes through).
+	factPosts int
+	// factTexts collects every verbatim fact string posted to that endpoint,
+	// in order.
+	factTexts []string
+}
+
+func (r *fakeMemoryLakeRecorder) snapshot() (int, []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.factPosts, append([]string(nil), r.factTexts...)
+}
+
 // newFakeMemoryLakeServer stands up a minimal MemoryLake V3 API covering
 // exactly what MemoryLakeBackend.AddObservation / Search / NewBackend need:
-// actor provisioning, conversation+message append, fact snapshot/backfill
-// polling, and search. Mirrors internal/memorylake/backend_test.go's fixture
-// servers (TestBackend_AddObservation_ReturnsInt64ViaBackfill /
-// TestBackend_Search_PassesThrough).
-func newFakeMemoryLakeServer(t *testing.T, searchHits []map[string]any) (*httptest.Server, *int32) {
+// actor provisioning, the direct fact-add endpoint, and search.
+//
+// AddObservation writes verbatim through MemoryLake's direct fact-add
+// endpoint — POST /api/v3/workspaces/<ws>/projects/<projID>/memories/facts
+// with body {"facts": ["<text>"]}, answered with
+// {"success":true,"data":{"facts":[{"id":...,"fact":...}]}} (see
+// internal/memorylake/writequeue.go's Client.AddFacts and backend.go's
+// AddObservation). It does NOT go through conversations/messages plus async
+// fact extraction anymore, so this fixture deliberately serves no
+// conversation, message, or fact-backfill/PATCH routes: an attempt to use
+// them is a real regression and must fail the test.
+//
+// Mirrors internal/memorylake/backend_test.go's
+// TestBackend_AddObservation_WritesVerbatimFactDirectly fixture.
+func newFakeMemoryLakeServer(t *testing.T, searchHits []map[string]any) (*httptest.Server, *fakeMemoryLakeRecorder) {
 	t.Helper()
-	var appended int32
+	rec := &fakeMemoryLakeRecorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/v3/actors":
@@ -52,30 +83,39 @@ func newFakeMemoryLakeServer(t *testing.T, searchHits []map[string]any) (*httpte
 		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
 			json.NewEncoder(w).Encode(map[string]any{"success": true})
 		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			// Still live, but only for session lifecycle: CreateSession
+			// ensures a conversation keyed by the session id (backend.go).
+			// Observations no longer flow through it.
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
-		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
-			atomic.StoreInt32(&appended, 1)
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
-		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts"):
-			var items []map[string]any
-			if atomic.LoadInt32(&appended) == 1 {
-				items = []map[string]any{
-					{"id": "fact-1", "fact": "extracted", "metadata": map[string]any{}},
-				}
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts":
+			var body struct {
+				Facts []string `json:"facts"`
 			}
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": items}})
-		case r.Method == "PATCH" && r.URL.Path == "/api/v3/workspaces/ws-1/projects/proj-1/memories/facts/fact-1":
-			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
-				"id": "fact-1", "fact": "extracted", "metadata": map[string]any{},
-			}})
+			json.NewDecoder(r.Body).Decode(&body)
+			rec.mu.Lock()
+			rec.factPosts++
+			rec.factTexts = append(rec.factTexts, body.Facts...)
+			rec.mu.Unlock()
+			created := make([]map[string]any, 0, len(body.Facts))
+			for i, f := range body.Facts {
+				created = append(created, map[string]any{
+					"id": fmt.Sprintf("fact-%d", i+1), "fact": f, "metadata": map[string]any{},
+				})
+			}
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"facts": created}})
 		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/search":
 			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"facts": searchHits}})
 		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			// Must NOT be t.Fatalf: this runs on the http handler goroutine,
+			// where runtime.Goexit kills the whole test binary (the package
+			// then fails with no named test in CI logs). Fail loudly but let
+			// the request — and the test — finish.
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &appended
+	return srv, rec
 }
 
 // TestCmdSave_EnabledProjectRoutesToMemoryLake is the RED/GREEN case for
@@ -83,7 +123,7 @@ func newFakeMemoryLakeServer(t *testing.T, searchHits []map[string]any) (*httpte
 // NewRoutingSelector `engram mcp` uses, landing the observation in
 // MemoryLake instead of local sqlite.
 func TestCmdSave_EnabledProjectRoutesToMemoryLake(t *testing.T) {
-	srv, _ := newFakeMemoryLakeServer(t, nil)
+	srv, rec := newFakeMemoryLakeServer(t, nil)
 	setupMemoryLakeEnv(t, srv.URL, "myproj", "proj-1")
 
 	cfg := testConfig(t)
@@ -95,6 +135,20 @@ func TestCmdSave_EnabledProjectRoutesToMemoryLake(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Memory saved:") {
 		t.Fatalf("unexpected save output: %q", stdout)
+	}
+	// The printed id is the sync id the backend returned, i.e. the real fact
+	// id the direct fact-add endpoint handed back — not a local sqlite rowid.
+	if !strings.Contains(stdout, "#fact-1") {
+		t.Fatalf("expected save output to report the MemoryLake fact id, got: %q", stdout)
+	}
+
+	// The write went through the direct fact-add endpoint, verbatim.
+	posts, texts := rec.snapshot()
+	if posts != 1 {
+		t.Fatalf("fact-add posts=%d, want exactly 1", posts)
+	}
+	if len(texts) != 1 || !strings.Contains(texts[0], "ml-content") || !strings.Contains(texts[0], "ml-title") {
+		t.Fatalf("posted fact texts=%q, want one text carrying the title and content verbatim", texts)
 	}
 
 	// Verify the local sqlite store received NOTHING for this project — the
@@ -142,7 +196,10 @@ func TestCmdSearch_EnabledProjectRoutesToMemoryLake(t *testing.T) {
 // if it receives any request.
 func TestCmdSaveAndSearch_NotEnabledProjectNeverHitsMemoryLakeNetwork(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("unexpected MemoryLake network call for a non-enabled project: %s %s", r.Method, r.URL.Path)
+		// t.Errorf, not t.Fatalf: this is the http handler goroutine, where
+		// a Fatal's runtime.Goexit would tear down the whole test binary.
+		t.Errorf("unexpected MemoryLake network call for a non-enabled project: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
 	setupMemoryLakeEnv(t, srv.URL, "some-other-enabled-project", "proj-1")
