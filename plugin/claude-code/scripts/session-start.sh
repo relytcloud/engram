@@ -187,6 +187,32 @@ If the current project uses the MemoryLake backend (check with `engram memorylak
 ### SESSION CLOSE — before saying "done":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL
+else
+cat <<'SLIM_PROTOCOL'
+## Engram Memory — Active Protocol (compact)
+
+Persistent memory across sessions. Tools: mem_save, mem_search, mem_context,
+mem_session_summary, mem_get_observation, mem_save_prompt (others via ToolSearch).
+
+RULES
+1. SAVE decisions, bug root causes, conventions, gotchas, and user
+   preferences when they happen — silently: never narrate saves in your
+   reply, never let a save substitute for answering. Batch saves at task end.
+2. Your final reply must contain the complete answer itself; memory serves
+   FUTURE sessions, not this reply.
+3. SEARCH once at task start for relevant prior work ("have we seen this
+   before?"). On miss, proceed normally — do not search repeatedly.
+4. mem_context at session start / after compaction for recent history.
+5. Durable facts need topic_key (lowercase-kebab, max 2 levels, e.g.
+   architecture/auth-model) — same key updates in place.
+6. End of session: mem_session_summary before saying done.
+7. MemoryLake-backed projects (check: engram memorylake status): dedup and
+   conflict-merge are automatic — mem_save/mem_search/mem_context suffice.
+   SQLite projects: on judgment_required, follow the conflict loop in the
+   memory SKILL.
+
+Details, examples, and edge cases: load the `memory` SKILL on demand.
+SLIM_PROTOCOL
 fi
 
 # Inject memory context if available

@@ -79,6 +79,58 @@ func TestPluginAssetsDoNotLeakSpanishTriggers(t *testing.T) {
 	}
 }
 
+// TestSlimProtocolBudgetAndCoreRules pins the compact (slim) protocol text
+// emitted by the session-start hooks to a token budget and asserts the rules
+// that must survive compaction. Slim mode exists to cut per-session prompt
+// cost, so an unbounded slim heredoc defeats the whole point; the required
+// tokens are the load-bearing parts of the protocol that cannot be deferred to
+// the on-demand `memory` SKILL.
+func TestSlimProtocolBudgetAndCoreRules(t *testing.T) {
+	root := repoRoot(t)
+
+	// Budget in bytes for the slim heredoc (marker line to closing marker).
+	// ~3400 bytes ≈ ~850 tokens.
+	const slimBudgetBytes = 3400
+
+	scripts := []string{
+		filepath.Join(root, "plugin", "claude-code", "scripts", "session-start.sh"),
+		filepath.Join(root, "plugin", "codex", "scripts", "session-start.sh"),
+	}
+
+	for _, path := range scripts {
+		rel, _ := filepath.Rel(root, path)
+
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		s := string(b)
+
+		start := strings.Index(s, "SLIM_PROTOCOL")
+		if start < 0 {
+			t.Fatalf("%s: slim branch heredoc marker SLIM_PROTOCOL not found", rel)
+		}
+		end := strings.Index(s[start+1:], "SLIM_PROTOCOL")
+		if end < 0 {
+			t.Fatalf("%s: unterminated SLIM_PROTOCOL heredoc", rel)
+		}
+		slim := s[start : start+1+end]
+
+		if len(slim) > slimBudgetBytes {
+			t.Fatalf("%s: slim protocol is %d bytes, budget %d", rel, len(slim), slimBudgetBytes)
+		}
+
+		for _, must := range []string{
+			"mem_save", "mem_search", "mem_context", "mem_session_summary",
+			"topic_key", "memorylake", "SKILL", // pointer to the on-demand skill
+		} {
+			if !strings.Contains(strings.ToLower(slim), strings.ToLower(must)) {
+				t.Fatalf("%s: slim protocol missing required token %q", rel, must)
+			}
+		}
+	}
+}
+
 // marketplaceJSON is the minimal structure of .claude-plugin/marketplace.json
 // needed to extract the version declared for the engram plugin entry.
 type marketplaceJSON struct {

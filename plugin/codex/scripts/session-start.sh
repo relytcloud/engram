@@ -137,7 +137,18 @@ fi
 ENCODED_PROJECT=$(printf '%s' "$PROJECT" | jq -sRr @uri)
 CONTEXT=$(curl -sf "${ENGRAM_URL}/context?project=${ENCODED_PROJECT}" --max-time 3 2>/dev/null | jq -r '.context // empty')
 
+# Resolve protocol verbosity mode for this slug. All slim/full branching
+# (including the engram-version floor check) lives in Go — see `engram
+# protocol-mode`. A missing/old engram binary or an unrecognized subcommand
+# never yields "slim" here, so this always defaults safely to full. $mode is
+# NEVER echoed/logged to this hook's own stdout.
+mode=$(engram protocol-mode codex 2>/dev/null)
+if [ "$mode" != "slim" ]; then
+  mode="full"
+fi
+
 # Inject Memory Protocol + context — stdout is returned to Codex as additionalContext
+if [ "$mode" != "slim" ]; then
 cat <<'PROTOCOL'
 ## Engram Persistent Memory — ACTIVE PROTOCOL
 
@@ -176,6 +187,33 @@ If the current project uses the MemoryLake backend (check with `engram memorylak
 ### SESSION CLOSE — before saying "done":
 Call `mem_session_summary` with: Goal, Discoveries, Accomplished, Next Steps, Relevant Files.
 PROTOCOL
+else
+cat <<'SLIM_PROTOCOL'
+## Engram Memory — Active Protocol (compact)
+
+Persistent memory across sessions. Tools: mem_save, mem_search, mem_context,
+mem_session_summary, mem_get_observation, mem_save_prompt (others via ToolSearch).
+
+RULES
+1. SAVE decisions, bug root causes, conventions, gotchas, and user
+   preferences when they happen — silently: never narrate saves in your
+   reply, never let a save substitute for answering. Batch saves at task end.
+2. Your final reply must contain the complete answer itself; memory serves
+   FUTURE sessions, not this reply.
+3. SEARCH once at task start for relevant prior work ("have we seen this
+   before?"). On miss, proceed normally — do not search repeatedly.
+4. mem_context at session start / after compaction for recent history.
+5. Durable facts need topic_key (lowercase-kebab, max 2 levels, e.g.
+   architecture/auth-model) — same key updates in place.
+6. End of session: mem_session_summary before saying done.
+7. MemoryLake-backed projects (check: engram memorylake status): dedup and
+   conflict-merge are automatic — mem_save/mem_search/mem_context suffice.
+   SQLite projects: on judgment_required, follow the conflict loop in the
+   memory SKILL.
+
+Details, examples, and edge cases: load the `memory` SKILL on demand.
+SLIM_PROTOCOL
+fi
 
 # Inject memory context if available
 if [ -n "$CONTEXT" ]; then
