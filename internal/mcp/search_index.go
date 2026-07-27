@@ -154,11 +154,17 @@ func searchResultEntry(r store.SearchResult) map[string]any {
 	return entry
 }
 
-// SearchPayloadTokens approximates the FULL agent-visible cost of a mem_search
+// SearchPayloadTokens approximates the agent-visible cost of a mem_search
 // response at the given budget: the text index plus the structured entries of
 // the hits that were actually shown. Budget-omitted hits contribute nothing —
-// they ship neither text nor structured metadata — so eval (eval/runner/l1.go)
-// measures exactly what handleSearch returns.
+// they ship neither text nor structured metadata.
+//
+// This is a FLOOR, not an exact count. Unmeasured (typically ~60+ tokens per
+// query, more on relation-heavy corpora): relation-annotation lines, the
+// "Found N memories" header, the "Index only: …" trailer/nudge strings, and
+// respondWithProject's JSON wrapper keys/escaping. Per-hit content (index
+// line + structured entry) IS single-sourced with handleSearch and cannot
+// drift; the envelope framing above is not.
 func SearchPayloadTokens(results []store.SearchResult, budgetTokens int) int {
 	lines := searchIndexEntries(results, budgetTokens)
 	total := approxTokens(renderSearchIndex(lines, len(results)))
