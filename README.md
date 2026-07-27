@@ -193,13 +193,22 @@ On a MemoryLake-backed project, memories are stored as **V3 facts** under the `e
 
 ## Cloud (Opt-In Replication)
 
-Cloud is optional and always project-scoped (`--project` required; `engram sync --cloud --all` is blocked). Local SQLite stays authoritative; cloud is replication / shared access only.
+Cloud is optional and always project-scoped (`--project` required; `engram sync --cloud --all` is blocked). Local SQLite stays authoritative; cloud is replication/shared access only.
 
 ```bash
 docker compose -f docker-compose.cloud.yml up -d
 engram cloud config --server http://127.0.0.1:18080
 engram cloud enroll smoke-project
 engram sync --cloud --project smoke-project
+```
+
+Upgrading a project whose legacy cloud state predates the current sync contract follows the guided flow `doctor -> repair -> bootstrap -> status/rollback` (local SQLite remains source of truth throughout):
+
+```bash
+engram cloud upgrade doctor --project my-project     # diagnose legacy state
+engram cloud upgrade repair --project my-project     # fix repairable mutations
+engram cloud upgrade bootstrap --project my-project  # re-baseline cloud from local
+engram cloud upgrade status --project my-project     # verify (rollback available)
 ```
 
 Authenticated mode, upgrade flow, dashboard, and env details → [Engram Cloud docs](docs/engram-cloud/README.md) · [DOCS.md — Cloud CLI](DOCS.md#cloud-cli-opt-in).

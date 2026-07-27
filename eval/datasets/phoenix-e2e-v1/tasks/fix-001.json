@@ -1,0 +1,18 @@
+{
+  "id": "fix-001",
+  "category": "small-fix",
+  "prompt": "Users report that certain queries hang intermittently instead of returning: the query appears to stall indefinitely and never completes. The hang shows up only under some plans (notably ones involving a LIMIT) where the plan contains a Share Input Scan node, and it happens only some of the time. Investigate the root cause in the executor and propose a fix (which file/function(s) need to change and how).",
+  "rubric": {
+    "answer_points": [
+      "Root cause is in src/backend/executor/nodeShareInputScan.c: cross-slice shared-scan readers and the writer coordinate through a shared-memory hash table (shareinput_Xslice_hash) of per-share 'xslice state' entries",
+      "The entry is normally removed by whichever participant (reader or writer) references it last; if a reader is squelched (e.g. its Hash Join's inner side had no rows) before the writer even initializes, the reader can remove the entry first",
+      "When the writer later initializes, it finds no existing entry, creates a new one, and tries to communicate with readers that are already squelched and gone — so the writer hangs",
+      "Fix direction: disallow a reader from removing the xslice-state hash entry when it is squelching (e.g. release_shareinput_reference needs to know it's being called during a squelch, such as via a new bool parameter) so the writer can still find/use it",
+      "A finer-grained debug GUC (e.g. debug_shareinput_xslice) is a reasonable addition for diagnosing this class of issue"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 30,
+  "timeout_min": 20
+}

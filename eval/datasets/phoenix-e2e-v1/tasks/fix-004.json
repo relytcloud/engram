@@ -1,0 +1,20 @@
+{
+  "id": "fix-004",
+  "category": "small-fix",
+  "prompt": "After dropping a large ZDB table, the table's on-disk files and their associated metadata in FDB stick around far longer than the configured retention window — sometimes they appear to linger almost indefinitely rather than being cleaned up promptly. Investigate the dropped-table cleanup path on the Phoenix (PG) side and propose a fix (which file/function(s) need to change and how).",
+  "rubric": {
+    "answer_points": [
+      "Relevant code is in contrib/zdb/src/storage/zdb_vacuum.c: GenerateBackupTaskForDroppedTable() and GenerateGCTaskForDroppedTable()",
+      "Both functions previously reused live-table scheduling knobs: a schedule-interval throttle (skipping a shard if its last backup/GC task was too recent) and a retention window (deletedBackupInterval / deletedGCInterval derived from gZdbVacuumBackupDeleteInterval)",
+      "For a dropped table there's nothing to roll back, so the retention window should be 0, and the throttle should not gate dispatch — otherwise, with a small file_num_per_task, draining a shard can require many dispatch rounds that the throttle needlessly delays (worst case ~24h + retention window)",
+      "Fix direction: for the dropped-table path, always dispatch a task for any shard without a RUNNING task (drop the schedule-interval check), and set deletedBackupInterval/deletedGCInterval to 0",
+      "The agent should flag that the actual tombstone-vs-key-lifecycle root cause (BACKUP tombstone cleared while segfile keys still present) is fixed on the gmeta side, not in this repo, and should not be guessed at without reading gmeta source"
+    ],
+    "gotcha_points": [
+      "did NOT invent or assume the internal behavior of the gmeta-side fix without flagging it as unverified/out of worktree"
+    ],
+    "max_score": 10
+  },
+  "max_turns": 30,
+  "timeout_min": 20
+}

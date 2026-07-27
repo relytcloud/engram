@@ -1,0 +1,18 @@
+{
+  "id": "arch-001",
+  "category": "architecture-qa",
+  "prompt": "I need to add a new UDF that inspects ZDB's on-disk file layout for a table. Where's the main entry point for the ZDB extension, and how is the storage code organized so I know where to hook in?",
+  "rubric": {
+    "answer_points": [
+      "Main entry point is contrib/zdb/src/zdb.c",
+      "contrib/zdb/src/storage/ holds core storage: Parquet reader/writer, catalog, visimap, sharding, vacuum, delta, flush, auto-partition, standby",
+      "contrib/zdb/src/storage/parquet/ holds the Parquet format code: schema, data, encoding, statistics, NDP file handling",
+      "Actual row data is stored as Parquet files via Apache Arrow",
+      "Metadata (not the row data itself) lives in FoundationDB via the GMetaService, with NDP used for caching/near-data processing"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 20,
+  "timeout_min": 15
+}

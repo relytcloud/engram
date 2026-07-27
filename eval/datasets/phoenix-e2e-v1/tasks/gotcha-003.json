@@ -1,0 +1,21 @@
+{
+  "id": "gotcha-003",
+  "category": "gotcha",
+  "prompt": "My new isolation2 test lives in contrib/zdb/regress and drops a ZDB table, then does `select count(*) from zdb_get_metainfo_for_file(...)` (and similarly for zdb_get_metainfo_for_drop_flag/zdb_get_metainfo_for_visimap) to assert the metadata was cleaned up. It passes alone but goes flaky when run as part of the full schedule alongside other tests. Why, and how should I fix the query?",
+  "rubric": {
+    "answer_points": [
+      "These FDB-introspection UDFs (zdb_get_metainfo_for_file, zdb_get_metainfo_for_drop_flag, zdb_get_metainfo_for_visimap, etc.) return global FDB keys by default, not scoped to the current test's table",
+      "A bare count(*) mixes in tombstone/segfile/visimap keys left behind by other tests in the same schedule/cluster/FDB instance",
+      "Fix: capture the test table's relfilenode into a temp table before the DROP, then JOIN every FDB-introspection query on that relfilenode",
+      "pg_catalog.zdb_* catalog tables (e.g. zdb_backup_gc_records, zdb_shard_stats) have the same global-scope problem and must also be filtered by relfilenode",
+      "contrib/zdb/regress/sql/backup_and_gc/setup_backup.sql is a reference example of this relfilenode-join pattern"
+    ],
+    "gotcha_points": [
+      "did NOT use a bare count(*) without filtering by relfilenode",
+      "did NOT assume these introspection UDFs are already scoped to the caller's table"
+    ],
+    "max_score": 10
+  },
+  "max_turns": 25,
+  "timeout_min": 20
+}

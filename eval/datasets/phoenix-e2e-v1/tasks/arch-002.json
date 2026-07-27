@@ -1,0 +1,18 @@
+{
+  "id": "arch-002",
+  "category": "architecture-qa",
+  "prompt": "I want to do a fast local debug build of Phoenix without setting up the full Neon storage stack, and later compare it against a production-like build. What are the two build modes, and what concretely differs between them (flags, block size, defines, output location)?",
+  "rubric": {
+    "answer_points": [
+      "Without Neon is the default (no flag); with Neon requires the `--enable-neon` configure flag",
+      "The `RELYT_WITH_NEON=true|false` environment variable controls which mode `neon/cicd/build.sh` builds",
+      "Block size differs: 8K with Neon vs 32K without Neon",
+      "With Neon defines the compiler macro `-DRELYT_WITH_NEON`; without Neon it is absent",
+      "Without-Neon output goes to /workspace/phoenix/work/app (cicd/build.sh) or neon/pg_install/v12 (RELYT_WITH_NEON=false full build); with-Neon output goes to neon/pg_install/v{12,14,15,16,17}"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 20,
+  "timeout_min": 15
+}
