@@ -827,13 +827,21 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
 
+Results are returned as a **reference-first index**, not as observation bodies. One line per hit:
+
+```
+1. [decision] auth model — Auth uses JWT with 15m expiry. (id: obs-1f2e…, ~299 tok, score -0.00)
+```
+
+The summary is the hit's first sentence (hard-capped at 160 characters on a rune boundary), `id` is the `sync_id` to pass to `mem_get_observation` for the full body, and `~N tok` is the approximate cost of that expansion (`ceil(bytes/4)`). The text index is budgeted: the optional `budget` argument caps its approximate token size (default 600). Hits that do not fit are dropped from the text with an explicit `(+K more omitted — raise budget or refine query)` line — never silently. The structured `results` array in the response envelope still lists every hit (ids/titles/metadata only, no bodies).
+
 Set `all_projects: true` to search across every project instead of the resolved one. This bypasses project detection entirely and ignores the `project` argument, so an agent can recall a decision logged elsewhere without knowing the project key. The response envelope reports `project_source: "all_projects"` and an empty `project` to reflect the cross-project scope.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are searched across all projects (cross-project personal scope).
 
-Each structured search result includes lifecycle metadata: `state` (`active` or `needs_review`) and, when set, `review_after`. Text output also appends `state: needs_review` for stale observations.
+Each structured search result includes lifecycle metadata: `state` (`active` or `needs_review`) and, when set, `review_after`. Lifecycle state, created-at, project, and scope are carried by the structured `results` entries; the text index line itself stays one line per hit.
 
-When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after the title/content block:
+When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after that hit's index line:
 
 ```
 supersedes: #<id> (<title>)       — this memory supersedes another

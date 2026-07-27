@@ -295,7 +295,7 @@ func registerTools(srv *server.MCPServer, sel BackendSelector, cfg MCPConfig, al
 	if shouldRegister("mem_search", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_search",
-				mcp.WithDescription("Search your persistent memory across all sessions. Use this to find past decisions, bugs fixed, patterns used, files changed, or any context from previous coding sessions."),
+				mcp.WithDescription("Search your persistent memory across all sessions. Use this to find past decisions, bugs fixed, patterns used, files changed, or any context from previous coding sessions. Returns an index (title + summary + id), not full bodies; call mem_get_observation with an id for the full body — scan first, expand deliberately."),
 				mcp.WithTitleAnnotation("Search Memory"),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
@@ -322,6 +322,9 @@ func registerTools(srv *server.MCPServer, sel BackendSelector, cfg MCPConfig, al
 				),
 				mcp.WithNumber("limit",
 					mcp.Description("Max results (default: 10, max: 20)"),
+				),
+				mcp.WithNumber("budget",
+					mcp.Description("Approximate token budget for the returned index (default: 600). Hits past the budget are dropped with an explicit \"more omitted\" marker — raise it only when you truly need to scan more."),
 				),
 			),
 			withAudit("mem_search", handleSearch(sel, cfg, activity)),
@@ -982,6 +985,9 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
+		// R3a: 0 (or absent/negative) means "use the default index budget" —
+		// FormatSearchIndex/searchIndexEntries owns that default.
+		budget := intArg(req, "budget", 0)
 
 		// Validate match_mode before any project resolution or DB work.
 		if matchMode != "" && matchMode != "all" && matchMode != "any" {
@@ -1063,28 +1069,26 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 			// Errors from relation loading are swallowed — search must not fail.
 		}
 
+		// R3a: results render as a budgeted reference-first INDEX (one line per
+		// hit: title + first-sentence summary + id + token cost) instead of
+		// per-hit bodies. The agent scans the index and expands deliberately via
+		// mem_get_observation. Entry lines come from searchIndexEntries (shared
+		// with the exported FormatSearchIndex, which eval/runner/l1.go measures)
+		// so budgeting lives in exactly one place; handleSearch interleaves its
+		// per-hit relation annotations after each entry line.
+		indexLines := searchIndexEntries(results, budget)
+
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
-		anyTruncated := false
 		structuredResults := make([]map[string]any, 0, len(results))
 		for i, r := range results {
-			projectDisplay := ""
-			if r.Project != nil {
-				projectDisplay = fmt.Sprintf(" | project: %s", *r.Project)
+			// Entries beyond the budget are omitted from the text index (an
+			// explicit omission marker is emitted below) but still reported in
+			// the structured envelope, which carries ids/titles only.
+			shown := i < len(indexLines)
+			if shown {
+				b.WriteString(indexLines[i])
 			}
-			preview := truncate(r.Content, 300)
-			if len(r.Content) > 300 {
-				anyTruncated = true
-				preview += " [preview]"
-			}
-			stateDisplay := ""
-			if r.State() == store.ObservationStateNeedsReview {
-				stateDisplay = " | state: needs_review"
-			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
-				i+1, r.ID, r.Type, r.Title,
-				preview,
-				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
 			entry := map[string]any{
 				"id":      r.ID,
 				"sync_id": r.SyncID,
@@ -1113,7 +1117,7 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 			// <id> is the observation's integer primary key. <title> is the related
 			// observation's title; "(deleted)" when the observation is missing or soft-deleted.
 			// Prefixes (supersedes:, superseded_by:, conflicts:) are stable across Phase 3.
-			if rels, ok := relationsMap[r.SyncID]; ok {
+			if rels, ok := relationsMap[r.SyncID]; ok && shown {
 				for _, rel := range rels.AsSource {
 					switch {
 					case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:
@@ -1147,11 +1151,11 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 					}
 				}
 			}
-			b.WriteString("\n")
 		}
-		if anyTruncated {
-			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
+		if len(indexLines) < len(results) {
+			b.WriteString(searchOmissionLine(len(results) - len(indexLines)))
 		}
+		b.WriteString("---\nIndex only: title + summary + id per hit. Call mem_get_observation(id: <ID>) for the full body of the ones you actually need.\n")
 
 		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
 			b.WriteString(nudge)

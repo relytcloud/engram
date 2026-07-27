@@ -2,13 +2,13 @@
 package runner
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/Gentleman-Programming/engram/eval/dataset"
 	"github.com/Gentleman-Programming/engram/eval/metrics"
 	"github.com/Gentleman-Programming/engram/eval/scorecard"
+	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
@@ -25,8 +25,9 @@ type L1Config struct {
 }
 
 // RunL1 runs every retrieval case, judging hits with keyword groups over
-// title+content and measuring the agent-visible payload size (JSON of the
-// full result list — the closest cheap proxy for the mem_search response).
+// title+content and measuring the agent-visible payload size (the budgeted
+// mem_search index rendered by mcp.FormatSearchIndex — the actual text the
+// agent pays for).
 func RunL1(b SearchBackend, cases []dataset.RetrievalCase, cfg L1Config) (scorecard.Scorecard, error) {
 	if cfg.Limit == 0 {
 		cfg.Limit = 10
@@ -53,8 +54,11 @@ func RunL1(b SearchBackend, cases []dataset.RetrievalCase, cfg L1Config) (scorec
 			}
 		}
 		dr := metrics.DistractorRatio(rank, len(results))
-		payload, _ := json.Marshal(results)
-		tokens := float64(metrics.ApproxTokens(string(payload)))
+		// Measure what the agent actually sees: the mem_search index text
+		// (mcp.FormatSearchIndex at its default budget), not a JSON dump of
+		// the full result rows.
+		payload := mcp.FormatSearchIndex(results, 0)
+		tokens := float64(metrics.ApproxTokens(payload))
 
 		ranks = append(ranks, rank)
 		totalTokens += tokens
