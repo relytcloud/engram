@@ -448,7 +448,20 @@ func judge(tpl string, task e2e.Task, res e2e.RunResult, model string) e2e.Judge
 // verdict and an empty error string; on failure it returns a descriptive error
 // string (claude stderr included, truncated) and a zero verdict.
 func judgeOnce(prompt, model string) (e2e.JudgeVerdict, string) {
-	out, err := exec.Command("claude", "-p", prompt, "--output-format", "json", "--model", model, "--max-turns", "1").Output()
+	// Invocation hardening: the judge is a pure text-in/JSON-out call, so we
+	// disable ALL agentic capability. Judge prompts whose AGENT_RESULT embeds
+	// shell commands / file paths otherwise tempt the model to invoke a tool on
+	// its single turn; under --max-turns 1 that aborts the run (exit status 1,
+	// empty result), which silently killed a large fraction of baseline
+	// verdicts. `--tools ""` disables every built-in tool and
+	// `--strict-mcp-config` (with no --mcp-config) drops all MCP servers, so no
+	// tool is ever reachable and --max-turns 1 is safe. The appended sentence
+	// is belt-and-suspenders steering (not a rubric change — the frozen
+	// judge_prompt.md is untouched).
+	prompt += "\n\nDo not use any tools; reply with the JSON immediately."
+	out, err := exec.Command("claude", "-p", prompt,
+		"--output-format", "json", "--model", model, "--max-turns", "1",
+		"--tools", "", "--strict-mcp-config").Output()
 	if err != nil {
 		msg := err.Error()
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
