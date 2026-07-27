@@ -26,8 +26,8 @@ type L1Config struct {
 
 // RunL1 runs every retrieval case, judging hits with keyword groups over
 // title+content and measuring the agent-visible payload size (the budgeted
-// mem_search index rendered by mcp.FormatSearchIndex — the actual text the
-// agent pays for).
+// mem_search index text plus the structured entries the handler ships, via
+// mcp.SearchPayloadTokens — the actual payload the agent pays for).
 func RunL1(b SearchBackend, cases []dataset.RetrievalCase, cfg L1Config) (scorecard.Scorecard, error) {
 	if cfg.Limit == 0 {
 		cfg.Limit = 10
@@ -54,11 +54,12 @@ func RunL1(b SearchBackend, cases []dataset.RetrievalCase, cfg L1Config) (scorec
 			}
 		}
 		dr := metrics.DistractorRatio(rank, len(results))
-		// Measure what the agent actually sees: the mem_search index text
-		// (mcp.FormatSearchIndex at its default budget), not a JSON dump of
-		// the full result rows.
-		payload := mcp.FormatSearchIndex(results, 0)
-		tokens := float64(metrics.ApproxTokens(payload))
+		// Measure what the agent actually sees: the FULL mem_search payload at
+		// the default budget — index text PLUS the structured entries of the
+		// shown hits (mcp.SearchPayloadTokens, shared with handleSearch so the
+		// measurement cannot drift from what ships). Not a JSON dump of the
+		// full result rows, and not the text alone.
+		tokens := float64(mcp.SearchPayloadTokens(results, 0))
 
 		ranks = append(ranks, rank)
 		totalTokens += tokens

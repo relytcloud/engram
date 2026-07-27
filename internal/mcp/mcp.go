@@ -1080,31 +1080,17 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
-		structuredResults := make([]map[string]any, 0, len(results))
+		structuredResults := make([]map[string]any, 0, len(indexLines))
 		for i, r := range results {
-			// Entries beyond the budget are omitted from the text index (an
-			// explicit omission marker is emitted below) but still reported in
-			// the structured envelope, which carries ids/titles only.
-			shown := i < len(indexLines)
-			if shown {
-				b.WriteString(indexLines[i])
+			// The budget bounds the WHOLE agent-visible payload: hits beyond it
+			// ship neither an index line nor a structured entry. The omission
+			// marker emitted below tells the agent how to see the rest (raise
+			// budget or refine query), so nothing is silently lost.
+			if i >= len(indexLines) {
+				continue
 			}
-			entry := map[string]any{
-				"id":      r.ID,
-				"sync_id": r.SyncID,
-				"title":   r.Title,
-				"type":    r.Type,
-				"state":   r.State(),
-				"scope":   r.Scope,
-				"pinned":  r.Pinned,
-			}
-			if r.Project != nil {
-				entry["project"] = *r.Project
-			}
-			if r.ReviewAfter != nil {
-				entry["review_after"] = *r.ReviewAfter
-			}
-			structuredResults = append(structuredResults, entry)
+			b.WriteString(indexLines[i])
+			structuredResults = append(structuredResults, searchResultEntry(r))
 
 			// Append relation annotations. Skip orphaned (filtered by store).
 			//
@@ -1117,7 +1103,7 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 			// <id> is the observation's integer primary key. <title> is the related
 			// observation's title; "(deleted)" when the observation is missing or soft-deleted.
 			// Prefixes (supersedes:, superseded_by:, conflicts:) are stable across Phase 3.
-			if rels, ok := relationsMap[r.SyncID]; ok && shown {
+			if rels, ok := relationsMap[r.SyncID]; ok {
 				for _, rel := range rels.AsSource {
 					switch {
 					case rel.Relation == store.RelationSupersedes && rel.JudgmentStatus == store.JudgmentStatusJudged:

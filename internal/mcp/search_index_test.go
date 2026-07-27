@@ -117,8 +117,91 @@ func TestHandleSearchBudgetArgTrimsIndex(t *testing.T) {
 	if !strings.Contains(text, "more omitted") {
 		t.Fatalf("budget arg not honored (no omission marker): %s", text)
 	}
-	// The structured envelope still lists every hit — only the text index is trimmed.
-	if !strings.Contains(text, "\"results\":[") || strings.Count(text, "\"sync_id\"") != 5 {
-		t.Fatalf("structured envelope should keep all 5 hits: %s", text)
+	// The budget bounds the WHOLE payload: the structured envelope carries only
+	// the SHOWN hits, so an omitted hit costs neither text nor metadata.
+	shown := strings.Count(text, "(id: obs-") // index lines only, not the trailer
+	if shown == 0 || shown >= 5 {
+		t.Fatalf("expected some but not all of 5 hits shown, got %d: %s", shown, text)
+	}
+	if !strings.Contains(text, "\"results\":[") {
+		t.Fatalf("structured envelope missing: %s", text)
+	}
+	if got := strings.Count(text, "\"sync_id\""); got != shown {
+		t.Fatalf("envelope must carry exactly the %d shown hits, got %d: %s", shown, got, text)
+	}
+}
+
+// TestSearchPayloadTokensCountsStructuredEntries pins the L1 measurement
+// contract: the helper measures text + shown structured entries, and
+// budget-omitted hits contribute nothing.
+func TestSearchPayloadTokensCountsStructuredEntries(t *testing.T) {
+	var many []store.SearchResult
+	for i := 0; i < 10; i++ {
+		r := sr(fmt.Sprintf("hit %d", i), strings.Repeat("word ", 40))
+		many = append(many, r)
+	}
+
+	// Generous budget: every hit is shown, so the payload cost must exceed the
+	// text-only cost by the structured entries.
+	textOnly := approxTokens(FormatSearchIndex(many, 100000))
+	full := SearchPayloadTokens(many, 100000)
+	if full <= textOnly {
+		t.Fatalf("payload tokens (%d) must exceed text-only tokens (%d) for shown hits", full, textOnly)
+	}
+
+	// Tight budget: only the first hit survives. Omitted hits add no structured
+	// cost, so the payload must equal text + exactly one entry.
+	const tight = 30
+	lines := searchIndexEntries(many, tight)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line under tight budget, got %d", len(lines))
+	}
+	entry, err := jsonMarshal(searchResultEntry(many[0]))
+	if err != nil {
+		t.Fatalf("marshal entry: %v", err)
+	}
+	want := approxTokens(FormatSearchIndex(many, tight)) + approxTokens(string(entry))
+	if got := SearchPayloadTokens(many, tight); got != want {
+		t.Fatalf("tight-budget payload tokens = %d, want %d (text + 1 entry only)", got, want)
+	}
+}
+
+func TestFirstSentenceTerminators(t *testing.T) {
+	long := strings.Repeat("a", 300)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"decimal not a terminator", "PostgreSQL 15.3 is required. More.", "PostgreSQL 15.3 is required."},
+		// ACCEPTED tradeoff: no abbreviation dictionary, so "e.g." terminates.
+		{"abbreviation terminates (accepted)", "e.g. use flags. Done.", "e.g."},
+		{"plain sentence", "One. Two.", "One."},
+		{"spaced decimal not a terminator", "Bump to 15. 3 was old. Next.", "Bump to 15. 3 was old."},
+		{"bang terminates", "Stop! Now.", "Stop!"},
+		{"newline terminates", "Header\nbody text.", "Header"},
+		{"cjk terminates", "使用 JWT。其他内容。", "使用 JWT。"},
+		{"no terminator caps at 160 runes", long, strings.Repeat("a", 160) + "…"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := firstSentence(tc.in); got != tc.want {
+				t.Fatalf("firstSentence(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSearchIndexFlattensTitleNewlines guards the one-line-per-hit contract:
+// a newline-bearing title must not split the index line.
+func TestSearchIndexFlattensTitleNewlines(t *testing.T) {
+	r := sr("auth\nmodel", "We use JWT. Rest is body.")
+	r.SyncID = "obs-auth-model" // real sync ids never contain newlines
+	out := FormatSearchIndex([]store.SearchResult{r}, 0)
+	if strings.Count(strings.TrimSuffix(out, "\n"), "\n") != 0 {
+		t.Fatalf("index must stay one line per hit: %q", out)
+	}
+	if !strings.Contains(out, "auth model") {
+		t.Fatalf("newline in title not flattened to space: %q", out)
 	}
 }
