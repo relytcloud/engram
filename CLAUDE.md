@@ -16,10 +16,11 @@ go test ./...                      # unit tests (all tests NOT tagged //go:build
 go test -tags e2e ./internal/server/...   # e2e tests (separate CI job; required check)
 go test ./internal/store/ -run TestName   # single package / single test
 make templ                         # regenerate templ → *_templ.go after editing dashboard .templ files
-./setup.sh                         # link repo skills/* into .claude/skills, .codex/skills, .gemini/skills
+./setup.sh                         # link repo skills/* into .claude/skills, .codex/skills, .gemini/skills (DEV-ONLY — not the user installer)
+./install.sh                       # END-USER installer/upgrader: latest release binary + Claude Code plugin (curl-able from raw.githubusercontent.com)
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly `go test ./...` and the e2e job — no separate lint step. There is no Makefile build target; `make` only wraps templ generation.
+CI (`.github/workflows/ci.yml`) runs `go test ./...`, the e2e job, and an `install-script` job (bash -n + shellcheck + live install/upgrade smoke of install.sh) — no separate Go lint step. There is no Makefile build target; `make` only wraps templ generation.
 
 ## Skills Are Mandatory
 

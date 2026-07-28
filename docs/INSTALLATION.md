@@ -2,7 +2,7 @@
 
 # Installation
 
-- [Homebrew (macOS / Linux)](#homebrew-macos--linux)
+- [Quick install (macOS / Linux)](#quick-install-macos--linux)
 - [Windows](#windows)
 - [Install from source (macOS / Linux)](#install-from-source-macos--linux)
 - [Download binary (all platforms)](#download-binary-all-platforms)
@@ -12,48 +12,42 @@
 
 ---
 
-## Homebrew (macOS / Linux)
+## Quick install (macOS / Linux)
+
+One command installs the latest binary AND wires the Claude Code plugin
+(this fork ships no Homebrew tap — the tap in older docs belongs to upstream):
 
 ```bash
-brew install gentleman-programming/tap/engram
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh | bash
 ```
 
-Upgrade to latest:
-
-```bash
-brew update && brew upgrade engram
-```
-
-> **Migrating from Cask?** If you installed engram before v1.0.1, it was distributed as a Cask. Uninstall first, then reinstall:
-> ```bash
-> brew uninstall --cask engram 2>/dev/null; brew install gentleman-programming/tap/engram
-> ```
-
-> **Keep `engram serve` running across `brew upgrade`?** On macOS, `brew upgrade engram` replaces the binary and kills any running `engram serve` process — autosync stops silently until you relaunch it. To make autosync survive upgrades and reboots, use the launchd template in [Running as a Service → Using launchd (macOS)](../DOCS.md#using-launchd-macos). Run `engram cloud status` afterwards: the `Local daemon:` line should report `running`.
+The script auto-discovers the latest release, verifies the sha256 checksum,
+installs to `~/.local/bin/engram`, and runs `engram setup claude-code`.
+Upgrade = re-run the same command. Options go after `bash -s --`:
+`--version X.Y.Z`, `--dir <path>`, `--no-plugin`, `--force`, `--dry-run`,
+`--protocol slim`. The script supports macOS/Linux (amd64/arm64) only —
+Windows users see below.
 
 ---
 
 ## Windows
 
-**Option A: Install via `go install` (recommended for technical users)**
+**Option A: Build from source (recommended for technical users)**
 
-If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it:
+If you have Go installed, this is the cleanest and most trustworthy path — the binary is compiled on your machine from source, so no antivirus will flag it.
 
-```powershell
-go install github.com/Gentleman-Programming/engram/cmd/engram@latest
-# Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
-```
-
-Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
-
-**Option B: Build from source**
+> Do NOT use `go install github.com/...@latest` for this fork: the Go module
+> path still points at the upstream repo, so `go install` would fetch
+> upstream code, not this fork. Clone and build instead:
 
 ```powershell
-git clone https://github.com/Gentleman-Programming/engram.git
+git clone https://github.com/relytcloud/engram.git
 cd engram
 go install ./cmd/engram
 # Binary goes to %GOPATH%\bin\engram.exe (typically %USERPROFILE%\go\bin\)
 ```
+
+Ensure `%GOPATH%\bin` (or `%USERPROFILE%\go\bin`) is on your `PATH`.
 
 > **Want a real version string instead of `dev`?**
 >
@@ -78,7 +72,7 @@ go install ./cmd/engram
 
 **Option C: Download the prebuilt binary**
 
-1. Go to [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases)
+1. Go to [GitHub Releases](https://github.com/relytcloud/engram/releases)
 2. Download `engram_<version>_windows_amd64.zip` (or `arm64` for ARM devices)
 3. Extract `engram.exe` to a folder in your `PATH` (e.g. `C:\Users\<you>\bin\`)
 
@@ -120,7 +114,7 @@ Expand-Archive engram_*_windows_amd64.zip -DestinationPath "$env:USERPROFILE\bin
 ## Install from source (macOS / Linux)
 
 ```bash
-git clone https://github.com/Gentleman-Programming/engram.git
+git clone https://github.com/relytcloud/engram.git
 cd engram
 go install ./cmd/engram
 # Binary goes to $GOPATH/bin (typically ~/go/bin/)
@@ -149,7 +143,7 @@ go install ./cmd/engram
 
 ## Download binary (all platforms)
 
-Grab the latest release for your platform from [GitHub Releases](https://github.com/Gentleman-Programming/engram/releases).
+Grab the latest release for your platform from [GitHub Releases](https://github.com/relytcloud/engram/releases).
 
 | Platform | File |
 |----------|------|
@@ -164,7 +158,7 @@ Grab the latest release for your platform from [GitHub Releases](https://github.
 
 ## Requirements
 
-- **Go 1.24+** to build from source (not needed if installing via Homebrew or downloading a binary)
+- **Go 1.25+** to build from source (not needed if using the quick-install script or downloading a binary)
 - That's it. No runtime dependencies.
 
 The binary includes SQLite (via [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — pure Go, no CGO). Works natively on **macOS**, **Linux**, and **Windows** (x86_64 and ARM64).

@@ -6,9 +6,40 @@ Engram 是给 AI 编码 agent 用的**持久记忆**服务:单个 Go 二进制,�
 
 ---
 
-## 一、安装二进制
+## 零、一键安装(推荐)
 
-有两种方式:**下载预编译包(推荐)** 或 **从源码编译**。
+一条命令完成「二进制安装 + Claude Code 插件接入」,自动发现并使用**最新版本**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh | bash
+```
+
+它会:自动解析最新 release 版本 → 下载对应平台包并**校验 sha256** → 安装到 `~/.local/bin/engram` → 运行 `engram setup claude-code`(注册插件市场 + 装插件 + 写 MCP 配置)→ 升级时自动刷新插件资产。**升级 = 重跑同一条命令**。
+
+传参数用 `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh \
+  | bash -s -- --dir /usr/local/bin --no-plugin
+```
+
+| 参数 | 含义 |
+|---|---|
+| `--version X.Y.Z` | 锁定指定版本(默认自动用最新) |
+| `--dir <路径>` | 安装目录(默认 `~/.local/bin`) |
+| `--no-plugin` | 只装二进制,跳过 Claude Code 插件 |
+| `--force` | 版本相同也强制重装 |
+| `--dry-run` | 只打印将做什么,不改任何东西 |
+| `--protocol slim` | 安装时启用紧凑记忆协议 |
+
+> 脚本仅支持 macOS / Linux(amd64/arm64);Windows 请看下方手动步骤。
+> 非交互管道下,allowlist 授权提问会被自动跳过(脚本会提示如何补做)。
+
+---
+
+## 一、手动安装二进制
+
+不想用一键脚本时,有两种方式:**下载预编译包** 或 **从源码编译**。
 
 ### 方式 A:下载预编译 release 包(推荐)
 
@@ -69,9 +100,14 @@ install -m 0755 engram ~/.local/bin/engram
 
 ```bash
 curl -fsSL -O "https://github.com/relytcloud/engram/releases/download/v${VER}/checksums.txt"
-shasum -a 256 -c checksums.txt --ignore-missing   # macOS
-# sha256sum -c checksums.txt --ignore-missing      # Linux
+# 注意:macOS 的 BSD shasum 不支持 --ignore-missing,用 awk 精确比对(两平台通用):
+PKG="engram_${VER}_darwin_arm64.tar.gz"   # 换成你下载的包名
+expected=$(awk -v f="$PKG" '$2 == f {print $1}' checksums.txt)
+actual=$(shasum -a 256 "$PKG" | awk '{print $1}')   # Linux 用 sha256sum
+[ "$expected" = "$actual" ] && echo OK || echo "校验失败,不要安装"
 ```
+
+> 一键脚本(上文「零」节)默认自动做这一步。
 
 ### 方式 B:从源码编译
 
@@ -126,7 +162,7 @@ engram setup claude-code
 它会自动做三件事:
 
 1. `claude plugin marketplace add relytcloud/engram`(注册插件市场,幂等);
-2. `claude plugin install engram@engram`(安装插件:hooks + skills);
+2. `claude plugin install engram`(安装插件:hooks + skills;代码当前用的是不带限定的插件名);
 3. 写入用户级 MCP 配置 `~/.claude/mcp/engram.json`,内容形如:
 
    ```json
@@ -169,17 +205,22 @@ rm -f ~/.claude/mcp/engram.json       # 删 MCP 配置
 
 ### 老用户升级(v0.4.0 重要)
 
-v0.4.0 同时更新了**二进制**和**插件资产**(hooks 协议文本、skills),两者都要升级才能获得完整效果:
+v0.4.0 同时更新了**二进制**和**插件资产**(hooks 协议文本、skills),两者都要升级才能获得完整效果。**最简单:重跑一键安装脚本**,二进制和插件一次到位:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh | bash
+```
+
+手动路径(等价):
 
 ```bash
 # 1) 更新二进制(重复安装步骤下载 v0.4.0 包,覆盖旧二进制即可)
 
-# 2) 更新插件(hooks + skills)。最简单:重跑一键接入(幂等,会重装插件并修正 MCP 配置)
+# 2) 更新插件(hooks + skills)。重跑一键接入(幂等,会重装插件并修正 MCP 配置)
 engram setup claude-code
-
-# 或者手动刷新插件市场再更新:
-#   claude plugin marketplace update engram
-#   claude plugin update engram@engram
+#    再刷新插件资产(plugin install 对已装插件是 no-op,不会拉新 hooks/skills):
+claude plugin marketplace update engram
+claude plugin update engram@engram
 
 # 3) 重启 Claude Code 加载新插件
 ```
