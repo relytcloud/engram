@@ -1,5 +1,15 @@
 # Baseline Report — Memory Eval Foundation (Phase 1)
 
+> **CORRECTION (2026-07-28)**: the original run's 12 no-memory tuples (all 10
+> gotcha + fix-005 ×2) had silently died on `OAuth session expired` and were
+> scored 0, inflating the headline uplift. After checkpoint re-running exactly
+> those tuples, the corrected baseline is **memory 6.000 / no-memory 6.367 /
+> uplift −0.367** (gotcha no-memory = 7.90, not 0.00 — the no-memory arm reads
+> the same CLAUDE.md the gotcha tasks were mined from). The corrected sidecar
+> and scorecard are committed; the analysis below reflects the ORIGINAL
+> (artifact-contaminated) numbers and is retained as a historical record —
+> read `wave1-report.md` for the corrected picture and its implications.
+
 **Date**: 2026-07-24 (L3 re-judge completed 2026-07-27)
 **Baseline commit**: `2adc24c` (engram, branch feat/memory-eval-foundation)
 **Spec**: `docs/superpowers/specs/2026-07-24-memory-eval-optimization-design.md`
