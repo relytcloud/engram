@@ -2,7 +2,7 @@
 
 Engram 是给 AI 编码 agent 用的**持久记忆**服务:单个 Go 二进制,内置 SQLite(默认、真源)+ 可选 MemoryLake 后端,通过 MCP(stdio)、CLI、HTTP、TUI 四种接口对外。本文覆盖 **macOS 和 Linux** 的安装,以及**如何把它接入 Claude Code 作为插件**。
 
-> 版本:以 [Releases](https://github.com/relytcloud/engram/releases) 页最新的 `vX.Y.Z` 为准,下文示例用 `v0.2.0`。
+> 版本:以 [Releases](https://github.com/relytcloud/engram/releases) 页最新的 `vX.Y.Z` 为准,下文示例用 `v0.4.0`。
 
 ---
 
@@ -28,16 +28,16 @@ uname -sm
 
 | 系统 | 架构 | 包名 |
 |---|---|---|
-| macOS Apple Silicon | `Darwin arm64` | `engram_0.2.0_darwin_arm64.tar.gz` |
-| macOS Intel | `Darwin x86_64` | `engram_0.2.0_darwin_amd64.tar.gz` |
-| Linux x86_64 | `Linux x86_64` | `engram_0.2.0_linux_amd64.tar.gz` |
-| Linux ARM64 | `Linux aarch64` | `engram_0.2.0_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `Darwin arm64` | `engram_0.4.0_darwin_arm64.tar.gz` |
+| macOS Intel | `Darwin x86_64` | `engram_0.4.0_darwin_amd64.tar.gz` |
+| Linux x86_64 | `Linux x86_64` | `engram_0.4.0_linux_amd64.tar.gz` |
+| Linux ARM64 | `Linux aarch64` | `engram_0.4.0_linux_arm64.tar.gz` |
 
 #### macOS(Apple Silicon 示例)
 
 ```bash
 cd /tmp
-VER=0.2.0
+VER=0.4.0
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_darwin_arm64.tar.gz"
 tar -xzf engram.tar.gz engram
@@ -54,7 +54,7 @@ xattr -d com.apple.quarantine ~/.local/bin/engram 2>/dev/null || true
 
 ```bash
 cd /tmp
-VER=0.2.0
+VER=0.4.0
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_linux_amd64.tar.gz"
 tar -xzf engram.tar.gz engram
@@ -97,7 +97,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # zsh
 exec $SHELL          # 或重开终端
 
 # 验证:
-engram version       # 应打印 0.2.0
+engram version       # 应打印 0.4.0
 which engram         # 应指向 ~/.local/bin/engram
 ```
 
@@ -166,6 +166,42 @@ claude mcp add engram -- "$(which engram)" mcp --tools=agent
 claude plugin uninstall engram        # 卸插件
 rm -f ~/.claude/mcp/engram.json       # 删 MCP 配置
 ```
+
+### 老用户升级(v0.4.0 重要)
+
+v0.4.0 同时更新了**二进制**和**插件资产**(hooks 协议文本、skills),两者都要升级才能获得完整效果:
+
+```bash
+# 1) 更新二进制(重复安装步骤下载 v0.4.0 包,覆盖旧二进制即可)
+
+# 2) 更新插件(hooks + skills)。最简单:重跑一键接入(幂等,会重装插件并修正 MCP 配置)
+engram setup claude-code
+
+# 或者手动刷新插件市场再更新:
+#   claude plugin marketplace update engram
+#   claude plugin update engram@engram
+
+# 3) 重启 Claude Code 加载新插件
+```
+
+v0.4.0 中**随升级自动生效**的改进(无需任何配置):
+
+- **answer-first 记忆协议**:agent 静默批量保存记忆、不再用「已存入记忆」代替回答;
+- **检索索引模式**:`mem_search` 返回轻量索引(标题+摘要+id),按需用 `mem_get_observation` 展开全文,检索 token 消耗约降 60%;
+- **分层上下文**:`mem_context` 输出分层且有 400 token 预算上限;
+- **置顶核心记忆**:`mem_pin` 的记忆渲染在上下文最顶部(1KB 上限),适合放"丢了会反复踩坑"的关键事实。
+
+### (可选)紧凑协议模式(slim)
+
+v0.4.0 起可启用**紧凑协议**,把每次会话注入的协议文本从约 2500 token 压到约 320 token(规则细节移入按需加载的 skill),行为不变:
+
+```bash
+engram protocol-mode claude-code --set slim   # 启用(需二进制 ≥ 0.4.0)
+engram protocol-mode claude-code --set full   # 随时回退(默认)
+engram protocol-mode claude-code              # 查看当前生效模式
+```
+
+> 注意:旧版二进制(< 0.4.0)即使设置了 slim 也会安全回退到 full,不会出错。
 
 ---
 
