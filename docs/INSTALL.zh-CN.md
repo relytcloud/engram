@@ -2,7 +2,7 @@
 
 Engram 是给 AI 编码 agent 用的**持久记忆**服务:单个 Go 二进制,内置 SQLite(默认、真源)+ 可选 MemoryLake 后端,通过 MCP(stdio)、CLI、HTTP、TUI 四种接口对外。本文覆盖 **macOS 和 Linux** 的安装,以及**如何把它接入 Claude Code 作为插件**。
 
-> 版本:以 [Releases](https://github.com/relytcloud/engram/releases) 页最新的 `vX.Y.Z` 为准,下文示例用 `v0.4.0`。
+> 版本:以 [Releases](https://github.com/relytcloud/engram/releases) 页最新的 `vX.Y.Z` 为准,下文示例用 `v0.5.0`。
 
 ---
 
@@ -59,16 +59,16 @@ uname -sm
 
 | 系统 | 架构 | 包名 |
 |---|---|---|
-| macOS Apple Silicon | `Darwin arm64` | `engram_0.4.0_darwin_arm64.tar.gz` |
-| macOS Intel | `Darwin x86_64` | `engram_0.4.0_darwin_amd64.tar.gz` |
-| Linux x86_64 | `Linux x86_64` | `engram_0.4.0_linux_amd64.tar.gz` |
-| Linux ARM64 | `Linux aarch64` | `engram_0.4.0_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `Darwin arm64` | `engram_0.5.0_darwin_arm64.tar.gz` |
+| macOS Intel | `Darwin x86_64` | `engram_0.5.0_darwin_amd64.tar.gz` |
+| Linux x86_64 | `Linux x86_64` | `engram_0.5.0_linux_amd64.tar.gz` |
+| Linux ARM64 | `Linux aarch64` | `engram_0.5.0_linux_arm64.tar.gz` |
 
 #### macOS(Apple Silicon 示例)
 
 ```bash
 cd /tmp
-VER=0.4.0
+VER=0.5.0
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_darwin_arm64.tar.gz"
 tar -xzf engram.tar.gz engram
@@ -85,7 +85,7 @@ xattr -d com.apple.quarantine ~/.local/bin/engram 2>/dev/null || true
 
 ```bash
 cd /tmp
-VER=0.4.0
+VER=0.5.0
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_linux_amd64.tar.gz"
 tar -xzf engram.tar.gz engram
@@ -133,7 +133,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # zsh
 exec $SHELL          # 或重开终端
 
 # 验证:
-engram version       # 应打印 0.4.0
+engram version       # 应打印 0.5.0
 which engram         # 应指向 ~/.local/bin/engram
 ```
 
@@ -181,9 +181,13 @@ engram setup claude-code
 新开一个 Claude Code 会话,确认能看到 `mem_*` 工具(如让它调用 `mem_context`)。或用 CLI 侧验证记忆链路本身正常:
 
 ```bash
-engram save "第一条测试记忆" --project demo
+# 注意: save 需要两个位置参数 <标题> <内容>,flags 必须放在其后
+engram save "第一条测试记忆" "验证 engram 记忆链路正常" --project demo
 engram search "测试" --project demo
 ```
+
+> ⚠️ `engram save` 的语法是 `save <title> <content> [--type ...] [--project ...] [--scope ...] [--topic ...]`。
+> 如果只传一个位置参数,后面的 `--project` 会被当成 content,所有 flags 都不会生效,并静默回退到按当前目录检测项目。
 
 ### 手动接入(不想用市场插件时)
 
@@ -203,9 +207,9 @@ claude plugin uninstall engram        # 卸插件
 rm -f ~/.claude/mcp/engram.json       # 删 MCP 配置
 ```
 
-### 老用户升级(v0.4.0 重要)
+### 老用户升级
 
-v0.4.0 同时更新了**二进制**和**插件资产**(hooks 协议文本、skills),两者都要升级才能获得完整效果。**最简单:重跑一键安装脚本**,二进制和插件一次到位:
+新版本可能同时更新**二进制**和**插件资产**(hooks 协议文本、skills),两者都要升级才能获得完整效果。**最简单:重跑一键安装脚本**,二进制和插件一次到位:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh | bash
@@ -214,7 +218,7 @@ curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh |
 手动路径(等价):
 
 ```bash
-# 1) 更新二进制(重复安装步骤下载 v0.4.0 包,覆盖旧二进制即可)
+# 1) 更新二进制(重复安装步骤下载最新版本包,覆盖旧二进制即可)
 
 # 2) 更新插件(hooks + skills)。重跑一键接入(幂等,会重装插件并修正 MCP 配置)
 engram setup claude-code
@@ -225,7 +229,9 @@ claude plugin update engram@engram
 # 3) 重启 Claude Code 加载新插件
 ```
 
-v0.4.0 中**随升级自动生效**的改进(无需任何配置):
+**v0.5.0 升级注意**:默认 MemoryLake 端点从 `app.memorylake.ai` 改为 **`app.memorylake.cn`**。如果你之前在旧端点上启用过 MemoryLake 项目,升级后保存会报 `NOT_FOUND (404): Project not found` —— 因为 `~/.engram/memorylake.json` 里缓存的 `proj_id` 是租户级的。把受影响项目的 `proj_id` 值清空(改为 `""`)即可,下次调用会在新租户上自动重建项目;旧租户上的记忆不会自动迁移。继续用旧端点的话,显式配置 `engram memorylake config --url "https://app.memorylake.ai/openapi/memorylake"` 即可。
+
+v0.4.0 起**随升级自动生效**的改进(无需任何配置):
 
 - **answer-first 记忆协议**:agent 静默批量保存记忆、不再用「已存入记忆」代替回答;
 - **检索索引模式**:`mem_search` 返回轻量索引(标题+摘要+id),按需用 `mem_get_observation` 展开全文,检索 token 消耗约降 60%;
@@ -255,11 +261,11 @@ engram protocol-mode claude-code              # 查看当前生效模式
 **推荐:用 `engram memorylake config` 命令**(持久化到 `~/.engram/memorylake.json`,文件权限 `0600`,含 API key),一次配置,CLI 和 Claude Code 拉起的 MCP 子进程都能读到,不用每个 shell 都 export:
 
 ```bash
-# base_url 不传就默认 https://app.memorylake.ai/openapi/memorylake
+# base_url 不传就默认 https://app.memorylake.cn/openapi/memorylake
 engram memorylake config --api-key "sk-你的APIKey"
 
 # 需要时可一并指定:
-engram memorylake config --url "https://app.memorylake.ai/openapi/memorylake" \
+engram memorylake config --url "https://app.memorylake.cn/openapi/memorylake" \
                          --api-key "sk-你的APIKey" --workspace engram
 
 engram memorylake config           # 无参数 = 查看当前生效配置(api_key 会掩码显示)
@@ -269,7 +275,7 @@ engram memorylake config --clear   # 清空已保存的连接配置
 **优先级:环境变量 > 上面保存的配置 > 内置默认**。所以 CI / 临时覆盖仍可用环境变量:
 
 ```bash
-export ENGRAM_MEMORYLAKE_BASE_URL="https://app.memorylake.ai/openapi/memorylake"
+export ENGRAM_MEMORYLAKE_BASE_URL="https://app.memorylake.cn/openapi/memorylake"
 export ENGRAM_MEMORYLAKE_API_KEY="sk-你的APIKey"
 export ENGRAM_MEMORYLAKE_WORKSPACE="engram"     # 默认 engram
 export ENGRAM_MEMORYLAKE_ACTOR="$(hostname)"    # 多人共享 project 时区分贡献者;默认取主机名

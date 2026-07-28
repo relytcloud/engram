@@ -2437,7 +2437,7 @@ func printMemorylakeUsage() {
 // effective config. With no setter flags it just prints the current effective
 // config. Resolution precedence at runtime is env var > this saved file >
 // built-in default (see memorylake.LoadConfig); when --url is never set the
-// default https://app.memorylake.ai/openapi/memorylake applies.
+// default https://app.memorylake.cn/openapi/memorylake applies.
 func cmdMemorylakeConfig(cfg store.Config) {
 	path := memorylake.DefaultEnablementPath()
 	conn, err := memorylake.LoadConnection(path)
@@ -3103,7 +3103,7 @@ Commands:
                                        Also accepted as ENGRAM_PROJECT=NAME env var.
   tui                Launch interactive terminal UI
   search <query>     Search memories [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]
-  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE]
+  save <title> <msg> Save a memory  [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]
   delete <obs_id>    Delete an observation [--hard] (soft-delete by default; --hard removes permanently)
   delete session <id>
                      Delete a session by ID (session must have no observations)
@@ -3133,7 +3133,7 @@ Commands:
                        --dry-run  Preview what would be merged (no changes)
   memorylake config [--url <url>] [--api-key <key>] [--workspace <ws>] [--actor <actor>] [--clear]
                      Set/show MemoryLake connection config (saved to ~/.engram/memorylake.json)
-                     Precedence: env var > saved config > default url https://app.memorylake.ai/openapi/memorylake
+                     Precedence: env var > saved config > default url https://app.memorylake.cn/openapi/memorylake
   memorylake status  Show MemoryLake backend enablement per project (sqlite vs memorylake)
   memorylake enable --project <name> [--migrate|--no-migrate]
                      Enable the MemoryLake backend for a project. On first enable it

@@ -201,7 +201,7 @@ Engram routes **per project**. By default every project uses local **SQLite** â€
 
 ```bash
 # 1) Configure the connection once (persisted to ~/.engram/memorylake.json, mode 0600).
-#    --url defaults to https://app.memorylake.ai/openapi/memorylake when omitted.
+#    --url defaults to https://app.memorylake.cn/openapi/memorylake when omitted.
 engram memorylake config --api-key sk-your-key
 engram memorylake config                 # print effective config (api key masked)
 #    Precedence at runtime: env var > saved config > built-in default.
