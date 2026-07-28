@@ -36,6 +36,12 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+release:
+  extra_files:
+    # Attach the installer so each release carries a tag-pinned copy
+    # (the canonical, always-latest copy is raw.githubusercontent.com/.../main/install.sh).
+    - glob: ./install.sh
+
 changelog:
   sort: asc
   filters:

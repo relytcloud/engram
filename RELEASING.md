@@ -78,11 +78,23 @@ GitHub Release archives. (Homebrew was intentionally dropped; do not re-add a
 
 ## Installing a released binary
 
+Preferred — the installer script (auto-discovers the latest release, verifies
+sha256, installs the binary AND wires the Claude Code plugin):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh | bash
+# pin a specific release instead:
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh | bash -s -- --version X.Y.Z
+```
+
+Manual (pinned-version) alternative:
+
 ```bash
 # Example: linux/amd64
 curl -fsSL -o engram.tar.gz \
   https://github.com/relytcloud/engram/releases/download/vX.Y.Z/engram_X.Y.Z_linux_amd64.tar.gz
 tar -xzf engram.tar.gz engram
+mkdir -p ~/.local/bin
 install -m 0755 engram ~/.local/bin/engram   # ensure ~/.local/bin is on PATH
 engram --version
 ```
