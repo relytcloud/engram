@@ -26,7 +26,7 @@ import (
 )
 
 func main() {
-	suite := flag.String("suite", "", "l1 | l1-verify | l2 | l3 | judge-calibrate | dump-facts")
+	suite := flag.String("suite", "", "l1 | l1-verify | l2 | l3 | compare | judge-calibrate | dump-facts")
 	dsPath := flag.String("dataset", "", "dataset path (l1/l3)")
 	project := flag.String("project", "phoenix", "engram project name")
 	out := flag.String("out", "", "output scorecard path (default eval/results/<sha>-<date>-<suite>.json)")
@@ -39,6 +39,9 @@ func main() {
 	phoenixDir := flag.String("phoenix-dir", "/workspace/phoenix", "repo dir claude runs in (l3)")
 	probe := flag.Bool("probe-only", false, "run only the isolation probe (l3)")
 	taskID := flag.String("task", "", "task id for judge-calibrate")
+	tasksCSV := flag.String("tasks", "", "l3: comma-separated task id filter (default: all tasks)")
+	baseCard := flag.String("base", "", "compare: baseline scorecard path")
+	curCard := flag.String("cur", "", "compare: current scorecard path")
 	flag.Parse()
 
 	switch *suite {
@@ -53,7 +56,9 @@ func main() {
 		if dsDir == "" {
 			dsDir = "eval/datasets/phoenix-e2e-v1"
 		}
-		runL3(dsDir, strings.Split(*arms, ","), *engramBin, *phoenixDir, *model, *out, *n, *probe)
+		runL3(dsDir, strings.Split(*arms, ","), *engramBin, *phoenixDir, *model, *out, *n, *probe, *tasksCSV)
+	case "compare":
+		runCompare(*baseCard, *curCard)
 	case "judge-calibrate":
 		judgeCalibrate(*dsPath, *taskID, *model)
 	case "dump-facts":
@@ -207,8 +212,44 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
-func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out string, n int, probeOnly bool) {
+// runCompare prints the base-vs-current scorecard diff table to stdout. It is
+// the round-over-round guardrail check: every optimization round compares its
+// fresh scorecard against the frozen baseline card.
+func runCompare(basePath, curPath string) {
+	base, err := scorecard.Load(basePath)
+	if err != nil {
+		fatal("base: %v", err)
+	}
+	cur, err := scorecard.Load(curPath)
+	if err != nil {
+		fatal("cur: %v", err)
+	}
+	fmt.Print(scorecard.CompareMarkdown(base, cur))
+}
+
+// validateL3Flags rejects flag combinations that would produce a misleading
+// scorecard. A -tasks filter yields a PARTIAL grid, so it must never be written
+// to the default full-grid path (eval/results/<sha>-<date>-l3.json) where it
+// would silently masquerade as — or overwrite — a complete run.
+func validateL3Flags(out, tasksCSV string) error {
+	if strings.TrimSpace(tasksCSV) != "" && out == "" {
+		return fmt.Errorf("-tasks requires an explicit -out " +
+			"(partial runs must not overwrite the default full-grid scorecard path)")
+	}
+	return nil
+}
+
+func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out string, n int, probeOnly bool, tasksCSV string) {
+	// Validate flags first: this must fatal before any arm materialization or
+	// claude invocation so a bad invocation costs nothing.
+	if err := validateL3Flags(out, tasksCSV); err != nil {
+		fatal("%v", err)
+	}
 	tasks, err := e2e.LoadTasks(filepath.Join(dsDir, "tasks"))
+	if err != nil {
+		fatal("tasks: %v", err)
+	}
+	tasks, err = e2e.FilterTasks(tasks, tasksCSV)
 	if err != nil {
 		fatal("tasks: %v", err)
 	}
@@ -358,10 +399,16 @@ func runL3(dsDir string, armNames []string, engramBin, phoenixDir, model, out st
 	if a, b := m["mean_score_memory"], m["mean_score_no-memory"]; len(armNames) > 1 {
 		m["uplift"] = a - b
 	}
+	env := map[string]string{"model": model, "n": strconv.Itoa(n), "arms": strings.Join(armNames, ",")}
+	if f := strings.TrimSpace(tasksCSV); f != "" {
+		// Mark the scorecard as a partial grid so downstream comparison never
+		// treats a filtered run as a full-suite result.
+		env["tasks"] = f
+	}
 	sc := scorecard.Scorecard{
 		Suite: "l3", Date: time.Now().UTC().Format("2006-01-02"), GitSHA: gitSHA(),
 		Metrics: m, PerItem: items,
-		Env: map[string]string{"model": model, "n": strconv.Itoa(n), "arms": strings.Join(armNames, ",")},
+		Env: env,
 	}
 	writeCard(sc, out)
 }

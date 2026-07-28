@@ -532,7 +532,7 @@ func TestCmdContextAndStats(t *testing.T) {
 	if ctxErr != "" {
 		t.Fatalf("expected no stderr for populated context, got: %q", ctxErr)
 	}
-	if !strings.Contains(ctxOut, "## Memory from Previous Sessions") || !strings.Contains(ctxOut, "Recent Observations") {
+	if !strings.Contains(ctxOut, "## Memory Context") || !strings.Contains(ctxOut, "Recent Observations") {
 		t.Fatalf("unexpected populated context output: %q", ctxOut)
 	}
 

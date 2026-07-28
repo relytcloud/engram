@@ -4342,3 +4342,46 @@ func TestCmdMCPAutosyncPollTickerPullsDuringServe(t *testing.T) {
 		t.Fatalf("expected MCP autosync poll ticker proof to complete cleanly, panic=%v stderr=%q", recovered, stderr)
 	}
 }
+
+func TestProtocolModeSetAndFloor(t *testing.T) {
+	stubExitWithPanic(t)
+	cfg := testConfig(t)
+
+	// --set slim persists and (dev build meets floor) reads back slim.
+	withArgs(t, "engram", "protocol-mode", "claude-code", "--set", "slim")
+	stdout, stderr, recovered := captureOutputAndRecover(t, func() { cmdProtocolMode(cfg) })
+	if recovered != nil || stderr != "" || !strings.Contains(stdout, "slim") {
+		t.Fatalf("set slim: panic=%v stderr=%q stdout=%q", recovered, stderr, stdout)
+	}
+	withArgs(t, "engram", "protocol-mode", "claude-code")
+	stdout, _, _ = captureOutputAndRecover(t, func() { cmdProtocolMode(cfg) })
+	if !strings.Contains(stdout, "slim") {
+		t.Fatalf("read after set: want slim, got %q", stdout)
+	}
+
+	// --set full flips back.
+	withArgs(t, "engram", "protocol-mode", "claude-code", "--set", "full")
+	stdout, _, _ = captureOutputAndRecover(t, func() { cmdProtocolMode(cfg) })
+	if !strings.Contains(stdout, "full") {
+		t.Fatalf("set full: got %q", stdout)
+	}
+
+	// invalid value is fatal
+	withArgs(t, "engram", "protocol-mode", "claude-code", "--set", "banana")
+	_, _, recovered = captureOutputAndRecover(t, func() { cmdProtocolMode(cfg) })
+	if _, ok := recovered.(exitCode); !ok {
+		t.Fatalf("invalid --set must exit fatally, got %v", recovered)
+	}
+}
+
+func TestMeetsProtocolVersionFloorForkVersions(t *testing.T) {
+	cases := map[string]bool{
+		"0.3.0": false, "0.4.0": true, "v0.5.1": true, "1.4.0": true,
+		"dev": true, "": false, "garbage": false,
+	}
+	for v, want := range cases {
+		if got := meetsProtocolVersionFloor(v); got != want {
+			t.Errorf("meetsProtocolVersionFloor(%q) = %v, want %v", v, got, want)
+		}
+	}
+}

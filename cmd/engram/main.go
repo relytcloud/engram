@@ -2902,8 +2902,8 @@ func printSetupUsage() {
 	fmt.Println("  --protocol=<slim|full>  Set the session-start protocol verbosity for the")
 	fmt.Println("                          installed agent slug (default: full). Unknown or")
 	fmt.Println("                          missing values fall back to full with a warning.")
-	fmt.Println("                          slim currently only takes effect for claude-code,")
-	fmt.Println("                          and only when the installed engram is >= 1.4.0.")
+	fmt.Println("                          slim currently takes effect for claude-code and codex,")
+	fmt.Println("                          and only when the installed engram is >= 0.4.0.")
 	fmt.Println("  --help, -h              Show this help and exit.")
 }
 
@@ -2933,20 +2933,41 @@ func applyProtocolMode(cfg store.Config, slug, mode string) {
 	}
 }
 
-// cmdProtocolMode implements `engram protocol-mode <slug>`: prints "slim" to
-// stdout ONLY when the persisted mode for slug is "slim" AND the running
-// binary's version meets the slim floor (>= 1.4.0); any other case
-// (unrecognized slug, missing/corrupted mode file, version below floor,
-// unparseable version) prints "full". All branching lives here in Go so it
-// runs under `go test` — the Claude Code hook scripts only read this single
-// line of stdout.
+// cmdProtocolMode implements `engram protocol-mode <slug> [--set slim|full]`.
+//
+// Read path: prints "slim" to stdout ONLY when the persisted mode for slug is
+// "slim" AND the running binary's version meets the slim floor
+// (>= protocolVersionFloor); any other case (unrecognized slug,
+// missing/corrupted mode file, version below floor, unparseable version)
+// prints "full". All branching lives here in Go so it runs under `go test` —
+// the Claude Code hook scripts only read this single line of stdout.
+//
+// Write path: `--set slim|full` persists the mode for slug first (an invalid
+// value is fatal — unlike `engram setup --protocol=<v>`, which only warns,
+// because here setting the mode IS the whole point of the invocation), then
+// falls through to the read path so the printed line is always the effective
+// mode, not merely the requested one.
 func cmdProtocolMode(cfg store.Config) {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: engram protocol-mode <slug>")
+		fmt.Fprintln(os.Stderr, "usage: engram protocol-mode <slug> [--set slim|full]")
 		exitFunc(1)
 		return
 	}
 	slug := os.Args[2]
+
+	if len(os.Args) >= 5 && os.Args[3] == "--set" {
+		want := os.Args[4]
+		if want != setup.ProtocolModeSlim && want != setup.ProtocolModeFull {
+			fmt.Fprintf(os.Stderr, "invalid mode %q: must be slim or full\n", want)
+			exitFunc(1)
+			return
+		}
+		if err := setup.WriteProtocolMode(cfg.DataDir, slug, want); err != nil {
+			fmt.Fprintf(os.Stderr, "write protocol mode: %v\n", err)
+			exitFunc(1)
+			return
+		}
+	}
 
 	mode := setup.ReadProtocolMode(cfg.DataDir, slug)
 	if mode == setup.ProtocolModeSlim && meetsProtocolVersionFloor(version) {
@@ -2957,17 +2978,34 @@ func cmdProtocolMode(cfg store.Config) {
 }
 
 // protocolVersionFloor is the minimum engram version required to honor a
-// persisted "slim" protocol-mode: the slim status block relies on the
-// MCP serverInstructions duplication fix shipped in this release.
-var protocolVersionFloor = [3]int{1, 4, 0}
+// persisted "slim" protocol-mode. This fork versions in the 0.x line, so the
+// floor tracks fork versioning: slim relies on the Wave-1 compact protocol
+// text shipped in v0.4.0 and later.
+var protocolVersionFloor = [3]int{0, 4, 0}
 
-// meetsProtocolVersionFloor reports whether v (e.g. "1.4.0", "v1.5.2", or the
-// build-time "dev" placeholder) is >= protocolVersionFloor. Any unparseable
-// or empty value returns false — the caller then falls back to "full".
+// meetsProtocolVersionFloor reports whether v (e.g. "0.4.0", "v0.5.2", or the
+// build-time "dev" placeholder) is >= protocolVersionFloor. "dev" (a
+// build-from-source binary) is by definition current and meets the floor. Any
+// other unparseable or empty value returns false — the caller then falls back
+// to "full".
 func meetsProtocolVersionFloor(v string) bool {
 	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
-	if v == "" || v == "dev" {
+	if v == "dev" {
+		return true // source builds are by definition current
+	}
+	if v == "" {
 		return false
+	}
+
+	// Drop semver pre-release / build metadata before parsing. Since Go 1.24
+	// a plain `go build` stamps debug.BuildInfo.Main.Version from VCS, so
+	// locally built binaries report a pseudo-version like
+	// "0.4.1-0.20260727111757-cf92b3333032+dirty" rather than "dev"; without
+	// this trim the third segment fails Atoi and every such build silently
+	// falls back to "full". A pre-release of a floor-meeting version counts
+	// as meeting the floor (it already carries the slim protocol text).
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
 	}
 
 	segments := strings.SplitN(v, ".", 3)

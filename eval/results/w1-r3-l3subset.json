@@ -1,0 +1,109 @@
+{
+  "git_sha": "b4db321",
+  "date": "2026-07-27",
+  "suite": "l3",
+  "metrics": {
+    "judge_failed_count": 0,
+    "judge_failed_memory": 0,
+    "judge_failed_no-memory": 0,
+    "mean_score_memory": 7,
+    "mean_score_no-memory": 6.75,
+    "uplift": 0.25
+  },
+  "per_item": [
+    {
+      "id": "fix-001/no-memory/run0",
+      "values": {
+        "duration_s": 1005.572311988,
+        "input_tokens": 50,
+        "output_tokens": 79477,
+        "score": 3,
+        "timed_out": 0
+      },
+      "note": "The answer correctly locates the general area (nodeShareInputScan.c) and correctly identifies LIMIT-induced early termination as the trigger, but invents an entirely different mechanism (ndone/nsharers notification race, missing CHECK_FOR_INTERRUPTS) rather than the actual documented root cause involving the shareinput_Xslice_hash entry being prematurely removed by a squelched reader before the writer initializes. The proposed fix therefore does not address the real bug at all."
+    },
+    {
+      "id": "fix-001/memory/run0",
+      "values": {
+        "duration_s": 434.368211253,
+        "input_tokens": 16150,
+        "output_tokens": 24235,
+        "score": 3,
+        "timed_out": 0
+      },
+      "note": "The agent invented an entirely different (and cross-slice-irrelevant) mechanism involving local shares, Append/Sequence squelch propagation, and Motion deadlock, rather than identifying the actual documented root cause: the cross-slice xslice-state hash table entry being prematurely removed by a squelched reader before the writer initializes. None of the rubric's specific technical points (shareinput_Xslice_hash, release_shareinput_reference bool param, debug_shareinput_xslice GUC) are present, and the proposed fix targets the wrong code path entirely, so despite thorough and well-reasoned analysis, it does not match the actual bug."
+    },
+    {
+      "id": "fix-003/no-memory/run0",
+      "values": {
+        "duration_s": 614.260972599,
+        "input_tokens": 46,
+        "output_tokens": 48032,
+        "score": 4,
+        "timed_out": 0
+      },
+      "note": "The answer correctly identifies the exact file, function, root cause (SIG_IGN on SIGUSR1 despite shared latch use post-InitProcess/InitPostgres), and the fix (pgstat_sigusr1_handler calling latch_sigusr1_handler), matching most core rubric points, but presents it as already-applied historical fact rather than the proposed fix requested, and never mentions the errno save/restore requirement, and spends most of the answer on speculative residual-risk proposals not asked for."
+    },
+    {
+      "id": "fix-003/memory/run0",
+      "values": {
+        "duration_s": 577.503000585,
+        "input_tokens": 99,
+        "output_tokens": 46118,
+        "score": 5,
+        "timed_out": 0
+      },
+      "note": "The agent correctly locates PgstatCollectorMain, identifies SIGUSR1/SIG_IGN and the correct fix (pgstat_sigusr1_handler → latch_sigusr1_handler), but frames this as already-fixed by a prior commit and treats it as secondary to a self-invented blocking-lock root cause not supported by the rubric, and omits the errno save/restore detail."
+    },
+    {
+      "id": "gotcha-001/no-memory/run0",
+      "values": {
+        "duration_s": 20.255161652,
+        "input_tokens": 4,
+        "output_tokens": 1310,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer correctly diagnoses the stale FFI header/incremental-cache issue, gives the exact deletion and rebuild commands including sourcing gcc-toolset-11, and does not fall into any of the listed gotchas (no assumption submodule update alone fixes it, no skipping toolset sourcing, no blind re-run of full build without the manual fix)."
+    },
+    {
+      "id": "gotcha-001/memory/run0",
+      "values": {
+        "duration_s": 17.817611112,
+        "input_tokens": 4,
+        "output_tokens": 1163,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer correctly identifies the stale FFI header/lib caused by Cargo's incremental cache, gives the exact rm + gcc-toolset-11 + rebuild sequence matching the rubric, and explicitly notes recurrence after rebases; no gotchas violated."
+    },
+    {
+      "id": "gotcha-003/no-memory/run0",
+      "values": {
+        "duration_s": 22.711551673,
+        "input_tokens": 6,
+        "output_tokens": 1543,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer correctly identifies root cause (global FDB scan), explains why it flakes in schedule, and gives the correct relfilenode-join fix with the exact reference file, hitting all core rubric points and both gotcha avoidances; it only omits the catalog-table (zdb_backup_gc_records/zdb_shard_stats) generalization."
+    },
+    {
+      "id": "gotcha-003/memory/run0",
+      "values": {
+        "duration_s": 53.102502636,
+        "input_tokens": 14,
+        "output_tokens": 3290,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer correctly identifies the global-scope root cause, explains flakiness mechanism, and provides the exact relfilenode-join fix with correct reference files, matching almost all rubric points; it only omits mention of the pg_catalog.zdb_* catalog tables needing the same treatment."
+    }
+  ],
+  "env": {
+    "arms": "no-memory,memory",
+    "model": "sonnet",
+    "n": "1",
+    "tasks": "gotcha-001,gotcha-003,fix-001,fix-003"
+  }
+}

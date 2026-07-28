@@ -45,7 +45,7 @@ The plugin:
 - **Auto-starts** the engram server if not running
 - **Auto-imports** git-synced memories from `.engram/manifest.json` if present in the project
 - **Creates sessions** on-demand via `ensureSession()` (resilient to restarts/reconnects)
-- **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for when to save, when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
+- **Injects the Memory Protocol** into the agent's system prompt via `chat.system.transform` — strict rules for what to save (silently, batched at task end, never in place of answering), when to search, and a mandatory session close protocol. The protocol is concatenated into the existing system message (not pushed as a separate one), ensuring compatibility with models that only accept a single system block (Qwen, Mistral/Ministral via llama.cpp, etc.)
 - **Injects previous session context** into the compaction prompt
 - **Instructs the compressor** to tell the new agent to persist the compacted summary via `mem_session_summary`
 - **Strips `<private>` tags** before sending data
@@ -57,8 +57,8 @@ The plugin:
 
 The plugin injects a strict protocol into every agent message:
 
-- **WHEN TO SAVE**: Mandatory after bugfixes, decisions, discoveries, config changes, patterns, preferences
-- **WHEN TO SEARCH**: Reactive (user says "remember"/"recordar") + proactive (starting work that might overlap past sessions)
+- **SAVING**: Save bugfixes, decisions, discoveries, config changes, patterns, preferences — silently, batched at task end; saving never replaces answering
+- **SEARCHING**: Once, up front (one `mem_search` at task start), plus reactive recall (user says "remember"/"recordar")
 - **SESSION CLOSE**: Mandatory `mem_session_summary` before ending — "This is NOT optional. If you skip this, the next session starts blind."
 - **AFTER COMPACTION**: Immediately call `mem_context` to recover state
 
@@ -115,7 +115,7 @@ plugin/claude-code/
 │   ├── user-prompt-submit.ps1     # Optional Windows-native fallback for locked-down endpoints
 │   ├── subagent-stop.sh           # Passive capture trigger on subagent completion
 │   └── session-stop.sh            # Logs end-of-session event
-└── skills/memory/SKILL.md         # Memory Protocol (when to save, search, close, recover)
+└── skills/memory/SKILL.md         # Memory Protocol (what to save, search, close, recover)
 ```
 
 ### How It Works
@@ -163,8 +163,8 @@ PowerShell local override/testing example for locked-down Windows endpoints:
 ```
 
 **Memory Protocol skill** (always available):
-- Strict rules for **when to save** (mandatory after bugfixes, decisions, discoveries)
-- **When to search** memory (reactive + proactive)
+- **What to save** (bugfixes, decisions, discoveries) and how — silently, batched at task end, never in place of answering
+- **When to search** memory — once at task start, plus on explicit recall requests
 - **Session close protocol** — mandatory `mem_session_summary` before ending
 - **After compaction** — 3-step recovery: persist summary → load context → continue
 

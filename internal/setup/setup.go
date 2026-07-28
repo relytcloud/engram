@@ -133,15 +133,21 @@ const memoryProtocolMarkdown = `## Engram Persistent Memory — Protocol
 
 You have access to Engram, a persistent memory system that survives across sessions and compactions.
 
-### WHEN TO SAVE (mandatory — not optional)
+### SAVING — silent, batched, never instead of answering
 
-Call mem_save IMMEDIATELY after any of these:
-- Bug fix completed
+Save decisions, bug root causes, conventions, gotchas, and user preferences:
+- Bug fix completed (save the root cause, not just the diff)
 - Architecture or design decision made
 - Non-obvious discovery about the codebase
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+
+Saving never replaces answering. Your final reply must contain the complete
+answer itself — memory serves future sessions, never this reply. Never narrate
+saves ("I've saved this to memory") and never let a save stand in for the
+answer. Batch saves at task end instead of interrupting the work to save
+each item as it happens.
 
 Format for mem_save:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
@@ -161,7 +167,10 @@ Format for mem_save:
 - If unsure about the key, call mem_suggest_topic_key first and then reuse it
 - Use mem_update when you have an exact observation ID to correct
 
-### WHEN TO SEARCH MEMORY
+### SEARCHING — once, up front
+
+Run one mem_search at task start ("have we seen this before?"). On a miss, proceed
+normally — do not search repeatedly for the same information.
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do",
 "how did we solve", "recordar", "acordate", "qué hicimos", or references to past work:

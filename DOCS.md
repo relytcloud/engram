@@ -474,6 +474,7 @@ Response:
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
+| `ENGRAM_MCP_AUDIT_LOG`          | Opt-in audit trail for `engram mcp`. When set to a file path, one `<RFC3339> <tool>` line is appended per `mem_*` tool **call arrival** — it counts attempts, not successful writes, so a call that later errors or is rejected still produces a line. Best-effort: any file/permission failure is silently ignored and never fails the tool call. Primarily intended for the eval harness to measure per-session `mem_*` usage. | (unset — disabled)   |
 | `ENGRAM_BACKEND`                | Global safety valve for the [MemoryLake backend](#memorylake-backend). Set to `sqlite` to force every project onto local SQLite regardless of per-project enablement. Any other value (or unset) defers to the per-project enablement list.             | (unset — per-project) |
 | `ENGRAM_MEMORYLAKE_BASE_URL`    | MemoryLake V3 API base URL. Required to enable the MemoryLake backend for any project.                                                                                                                                                                   | (unset)              |
 | `ENGRAM_MEMORYLAKE_API_KEY`     | MemoryLake API key (`Authorization: Bearer <key>`). Required to enable the MemoryLake backend for any project.                                                                                                                                            | (unset)              |
@@ -826,13 +827,21 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
 
+Results are returned as a **reference-first index**, not as observation bodies. One line per hit:
+
+```
+1. [decision] auth model — Auth uses JWT with 15m expiry. (id: obs-1f2e…, ~299 tok, score -0.00)
+```
+
+The summary is the hit's first sentence (capped at 160 runes, plus an ellipsis when truncated), `id` is the `sync_id` to pass to `mem_get_observation` for the full body, and `~N tok` is the approximate cost of that expansion (`ceil(bytes/4)`). The budget bounds the whole agent-visible payload: the optional `budget` argument caps the index's approximate token size (default 600), and hits that do not fit are dropped from the text with an explicit `(+K more omitted — raise budget or refine query)` line — never silently. Omitted hits are dropped from the structured `results` array too, so they cost nothing; `results` lists exactly the shown hits (ids/titles/metadata only, no bodies). Raise `budget` or refine the query to see the rest.
+
 Set `all_projects: true` to search across every project instead of the resolved one. This bypasses project detection entirely and ignores the `project` argument, so an agent can recall a decision logged elsewhere without knowing the project key. The response envelope reports `project_source: "all_projects"` and an empty `project` to reflect the cross-project scope.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are searched across all projects (cross-project personal scope).
 
-Each structured search result includes lifecycle metadata: `state` (`active` or `needs_review`) and, when set, `review_after`. Text output also appends `state: needs_review` for stale observations.
+Each structured search result includes lifecycle metadata: `state` (`active` or `needs_review`) and, when set, `review_after`. Lifecycle state, created-at, project, and scope are carried by the structured `results` entries; the text index line itself stays one line per hit.
 
-When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after the title/content block:
+When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after that hit's index line:
 
 ```
 supersedes: #<id> (<title>)       — this memory supersedes another
@@ -889,9 +898,41 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 Save user prompts — records what the user asked so future sessions have context about user goals.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
+Prompts are **write-only over MCP**: `mem_save_prompt` is the only prompt tool the MCP server registers, so stdio agents (Claude Code, Codex, Gemini, Cursor, Windsurf) can save prompts but cannot read them back. Reading is via `engram serve` HTTP (`GET /prompts/recent`, `GET /prompts/search`) — the OpenCode plugin and Pi extension already run it — or the cloud dashboard's prompt views. This is the intended Wave-1 posture, not a gap.
+
 ### mem_context
 
-Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
+Get recent memory context from previous sessions, with optional scope filtering for observations.
+
+The block is layered and budgeted (~400 tokens / 1600 bytes hard cap) so it is cheap to call at every session start and after every compaction:
+
+```
+## Memory Context
+
+### Pinned (core memory)
+- [decision] **title**: <content, cut to 300 runes>          (title cut to 120 runes; oldest pin first, section ≤ 1024 bytes)
+(pin cap reached: N pinned facts not shown — mem_unpin to prune)   (only when the 1024 bytes run out)
+
+### Recent Sessions
+- <started_at> <summary first sentence | (active) | (no summary)>   (max 5)
+
+### Recent Observations
+- [type] **title**: <content first sentence, cut to 160 runes>      (title cut to 120 runes; max 3)
+
+Full bodies: mem_search / mem_get_observation.
+```
+
+Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped by that outer cap.
+
+**`### Pinned (core memory)` is capped separately at 1024 bytes** — heading, entry lines, overflow marker and blank separator included. Entries render in **pin-time ascending order** (oldest pin first), so the section is a stable prefix that grows at the end as new pins arrive. When the 1024 bytes are exhausted, the **oldest** pins stop being *rendered* (they stay pinned and searchable) and a trailing `(pin cap reached: N pinned facts not shown — mem_unpin to prune)` line names how many were withheld. Over-pinning therefore evicts your own earlier pins from the block; `mem_unpin` is the prune. In practice, with the 300-rune content cut on each line, only about 2-3 pinned facts render before the 1024 bytes run out.
+
+Two edge cases of that cap are fixed by contract. **A single pinned entry is never dropped and never carries a marker**: if the newest pin alone exceeds 1024 bytes it renders over cap (core memory is never emptied), and since nothing was withheld no `(pin cap reached: …)` line is emitted — the marker's count is always ≥ 1. And **titles are cut to 120 runes** (with `…`) in both the pinned and recent-observation lines: content was already bounded, so an unbounded title was the one remaining way for a pinned line — the one line neither cap may drop — to carry the whole block past the 1600-byte budget.
+
+Pin time is a documented **proxy**, not a stored timestamp: neither backend records when a pin happened (`mem_pin` only flips `observations.pinned` / the MemoryLake `pinned` metadata key and deliberately leaves `updated_at` untouched on SQLite), so the section orders by `updated_at`, falling back to `created_at`. Consequence: re-pinning an old memory does not move it to the end of the section, while editing a pinned memory's content does. Ordering is deterministic either way (id breaks ties).
+
+Sections with no rows are omitted entirely, and an empty project returns an empty string. In a cross-project render (blank project filter — e.g. `scope: personal` with no `project` override) each session line is prefixed with its project: `- <started_at> [<project>] <summary>`. The MemoryLake backend renders the identical layout minus `### Recent Sessions` (it has no session tracking).
+
+Recent user prompts are **not** part of this block (they cost more than they buy inside the budget). The intended Wave-1 posture is that **prompts are write-only for stdio agents**: Claude Code, Codex, Gemini, Cursor, and Windsurf reach Engram over stdio MCP, which exposes `mem_save_prompt` but no prompt-read tool. Saved prompts are readable only through the `engram serve` HTTP API (`GET /prompts/recent`, `GET /prompts/search`) — used by the OpenCode plugin and the Pi extension, which already run `engram serve` — and through the cloud dashboard. Prompts still feed `mem_save --capture_prompt` within the same MCP process, so stdio agents get their value indirectly rather than by reading them back.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
@@ -988,9 +1029,9 @@ Behavior:
 
 The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
 
-### WHEN TO SAVE (mandatory)
+### SAVING — silent, batched, never instead of answering
 
-Call `mem_save` IMMEDIATELY after any of these:
+Save decisions, bug root causes, conventions, gotchas, and user preferences:
 
 - Bug fix completed
 - Architecture or design decision made
@@ -998,6 +1039,12 @@ Call `mem_save` IMMEDIATELY after any of these:
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+
+Saving never replaces answering. The agent's final reply must contain the complete
+answer itself — memory serves future sessions, never this reply. Agents must never
+narrate saves ("I've saved this to memory"), and should batch saves at task end
+rather than interrupting the work to save each item as it happens. Searching is
+once, up front: one `mem_search` at task start; on a miss, proceed normally.
 
 Format for `mem_save`:
 
@@ -1020,7 +1067,7 @@ Format for `mem_save`:
 - If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
 - Use `mem_update` when you have an exact observation ID to correct
 
-### WHEN TO SEARCH MEMORY
+### SEARCHING — once, up front
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do", "how did we solve", "recordar", "acordate", or references to past work:
 
@@ -1028,7 +1075,7 @@ When the user asks to recall something — any variation of "remember", "recall"
 2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use `mem_get_observation` for full untruncated content
 
-Also search memory PROACTIVELY when:
+Search once at task start — on a miss, proceed normally rather than re-running the same query. Also search at task start when:
 
 - Starting work on something that might have been done before
 - The user mentions a topic you have no context on — check if past sessions covered it

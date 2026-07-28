@@ -6231,39 +6231,32 @@ func TestAllTools_ReadResponseEnvelope_WithAssertions(t *testing.T) {
 
 // ─── Phase E — Conflict Surfacing Instructions ────────────────────────────────
 
-// TestServerInstructions_ConflictSurfacingBlock verifies that serverInstructions
-// contains the CONFLICT SURFACING section with all required guidance phrases.
-// This is the RED→GREEN test for Phase E (E.1).
-func TestServerInstructions_ConflictSurfacingBlock(t *testing.T) {
+// TestServerInstructions_ConflictSurfacingPointer verifies that
+// serverInstructions still tells the agent what to do when mem_save returns
+// judgment_required, and where the full walkthrough lives.
+//
+// The walkthrough itself (per-candidate judgment_id rule, ask-vs-resolve
+// heuristic, phrasing example, evidence field) moved out of the per-session
+// instructions into plugin/{claude-code,codex}/skills/memory/SKILL.md under
+// "## Conflict loop (SQLite projects)" — see TestMemorySkillsCarryConflictLoop
+// in plugin/assets_test.go, which pins the phrases there. Keeping the detail
+// here would put an on-demand walkthrough in every session's prompt.
+func TestServerInstructions_ConflictSurfacingPointer(t *testing.T) {
 	required := []string{
-		// Section header — agents must be able to grep for it
-		"## CONFLICT SURFACING",
-
 		// Core trigger condition
 		"judgment_required",
 
-		// The action: iterate candidates and call mem_judge
-		"candidates[]",
-		"mem_judge",
+		// Backend distinction: the loop is SQLite-only
+		"SQLite",
 
-		// Heuristic: low confidence threshold
-		"0.7",
-
-		// Heuristic: ask for high-stakes relation+type combos
-		"supersedes",
-		"conflicts_with",
-		"architecture",
-
-		// Conversational (not blocking) resolution pattern
-		"conversationally",
-
-		// Post-resolution: persist via mem_judge with evidence
-		"evidence",
+		// The delegation target the agent must load for the walkthrough
+		"conflict loop",
+		"SKILL",
 	}
 
 	for _, phrase := range required {
 		if !strings.Contains(serverInstructions, phrase) {
-			t.Errorf("serverInstructions is missing required phrase %q in CONFLICT SURFACING block", phrase)
+			t.Errorf("serverInstructions is missing required phrase %q for conflict-loop delegation", phrase)
 		}
 	}
 }
@@ -7467,4 +7460,102 @@ func TestHandleSearch_MatchModeInvalidError(t *testing.T) {
 	if strings.Contains(text, "Try simpler keywords") {
 		t.Fatalf("parameter-validation error must not contain query-advice suffix \"Try simpler keywords\", got: %s", text)
 	}
+}
+
+// ─── Wave1 R1c — Server instructions token budget ─────────────────────────────
+
+// TestServerInstructionsBudget pins the per-session cost of the MCP server
+// instructions. This text is injected into EVERY session by every MCP client,
+// so it is pure per-session overhead — detail that an agent needs only
+// occasionally (the conflict loop, the deferred tool list) belongs in the
+// on-demand `memory` SKILL, not here. The budget is 1300 bytes ≈ 325 tokens.
+//
+// The required substrings are the load-bearing parts that cannot be deferred:
+// the three core tools, the pointer to the SKILL, and the MemoryLake escape
+// hatch that tells the agent when the conflict loop does not apply.
+func TestServerInstructionsBudget(t *testing.T) {
+	s := ServerInstructions()
+	if len(s) > 1300 {
+		t.Fatalf("serverInstructions is %d bytes, budget 1300", len(s))
+	}
+	for _, must := range []string{"mem_save", "mem_search", "mem_context", "SKILL", "memorylake", "batched at task end"} {
+		if !strings.Contains(strings.ToLower(s), strings.ToLower(must)) {
+			t.Fatalf("instructions missing %q", must)
+		}
+	}
+}
+
+// TestMemSaveDescriptionIsAnswerFirst pins the answer-first contract on the
+// mem_save tool description.
+//
+// This description is not documentation — it is prompt text that ships in every
+// session, including slim protocol mode where it is one of the few things the
+// agent still sees. Save-eager phrasing here ("call this PROACTIVELY", "don't
+// wait to be asked", a bare "WHEN to save" trigger list) is exactly what made
+// agents interrupt an answer to announce a save, so it must fail here rather
+// than be caught in review.
+func TestMemSaveDescriptionIsAnswerFirst(t *testing.T) {
+	lower := strings.ToLower(memSaveDescription)
+
+	required := []string{
+		"final reply must contain the complete answer",
+		"never narrate saves",
+		"batched at task end",
+		"topic_key",
+	}
+	for _, phrase := range required {
+		if !strings.Contains(lower, strings.ToLower(phrase)) {
+			t.Errorf("memSaveDescription is missing required phrase %q", phrase)
+		}
+	}
+
+	banned := []string{
+		"proactively",
+		"don't wait to be asked",
+		"when to save (call",
+		"immediately after any of these",
+	}
+	for _, phrase := range banned {
+		if strings.Contains(lower, phrase) {
+			t.Errorf("memSaveDescription still contains save-eager phrasing %q", phrase)
+		}
+	}
+}
+
+// TestMemSaveToolUsesPinnedDescription guards the wiring: the constant above is
+// only worth pinning if the registered tool actually serves it.
+func TestMemSaveToolUsesPinnedDescription(t *testing.T) {
+	s := newMCPTestStore(t)
+	srv := NewServer(s)
+
+	resp := srv.HandleMessage(context.Background(), []byte(
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal tools/list response: %v", err)
+	}
+
+	var parsed struct {
+		Result struct {
+			Tools []struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal tools/list response: %v", err)
+	}
+
+	for _, tool := range parsed.Result.Tools {
+		if tool.Name != "mem_save" {
+			continue
+		}
+		if tool.Description != memSaveDescription {
+			t.Errorf("registered mem_save description drifted from memSaveDescription\n--- got ---\n%s",
+				tool.Description)
+		}
+		return
+	}
+	t.Fatal("mem_save tool not found in tools/list")
 }

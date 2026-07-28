@@ -56,3 +56,29 @@ func TestRealTaskSetParses(t *testing.T) {
 		t.Errorf("task count %d outside 12-16", len(tasks))
 	}
 }
+
+func TestFilterTasks(t *testing.T) {
+	tasks := []Task{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	got, err := FilterTasks(tasks, "c,a")
+	if err != nil || len(got) != 2 || got[0].ID != "a" || got[1].ID != "c" {
+		t.Fatalf("FilterTasks = %+v, %v", got, err)
+	}
+	if all, err := FilterTasks(tasks, ""); err != nil || len(all) != 3 {
+		t.Fatalf("empty csv should return all, got %d, %v", len(all), err)
+	}
+	if _, err := FilterTasks(tasks, "a,zzz"); err == nil {
+		t.Fatal("unknown id must error")
+	}
+	// Trailing (and interior) empty entries are tolerated, not reported as an
+	// unknown empty id.
+	trailing, err := FilterTasks(tasks, "a,")
+	if err != nil || len(trailing) != 1 || trailing[0].ID != "a" {
+		t.Fatalf("trailing comma: got %+v, %v", trailing, err)
+	}
+	if got, err := FilterTasks(tasks, "a,,b"); err != nil || len(got) != 2 {
+		t.Fatalf("interior empty entry: got %+v, %v", got, err)
+	}
+	if got, err := FilterTasks(tasks, " , "); err != nil || len(got) != 3 {
+		t.Fatalf("all-empty csv should return all, got %+v, %v", got, err)
+	}
+}

@@ -333,13 +333,20 @@ func TestPinnedObservationsAndFormatContextPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("format context: %v", err)
 	}
-	pinnedIdx := strings.Index(ctx, "### Pinned")
+	pinnedIdx := strings.Index(ctx, pinnedSectionHeading)
 	recentIdx := strings.Index(ctx, "### Recent Observations")
 	if pinnedIdx < 0 || recentIdx < 0 || pinnedIdx > recentIdx {
 		t.Fatalf("expected pinned section before recent observations, got:\n%s", ctx)
 	}
 	if !strings.Contains(ctx, "pinned architecture") {
 		t.Fatalf("expected pinned observation in context, got:\n%s", ctx)
+	}
+	// A pinned section that fits under pinnedSectionByteCap is rendered whole:
+	// no entry withheld, no overflow marker. Guards the other side of
+	// capPinnedLines from TestFormatContextPinnedSectionCapAndOrder — an
+	// off-by-one in its drop loop would withhold pins that comfortably fit.
+	if strings.Contains(ctx, "pin cap reached") {
+		t.Fatalf("a single pinned observation must not trip the pinned cap marker, got:\n%s", ctx)
 	}
 	if !strings.Contains(ctx, "recent three") || !strings.Contains(ctx, "recent two") {
 		t.Fatalf("expected max recent unpinned observations in context, got:\n%s", ctx)
@@ -3274,8 +3281,13 @@ func TestStoreAdditionalQueryAndMutationBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("format context: %v", err)
 	}
-	if !strings.Contains(ctx, "Recent User Prompts") {
-		t.Fatalf("expected prompts section in context output")
+	// Prompts are no longer part of the layered context block (Phase 2 R3b) —
+	// they are retrieved via RecentPrompts/SearchPrompts instead.
+	if strings.Contains(ctx, "Recent User Prompts") {
+		t.Fatalf("prompts section must not appear in the layered context output:\n%s", ctx)
+	}
+	if !strings.Contains(ctx, "## Memory Context") {
+		t.Fatalf("expected layered context heading:\n%s", ctx)
 	}
 }
 
@@ -4049,7 +4061,9 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			}
 		})
 
-		t.Run("recent prompts error", func(t *testing.T) {
+		// The layered layout (Phase 2 R3b) no longer reads user prompts, so a
+		// broken user_prompts table must NOT fail FormatContext any more.
+		t.Run("prompt table is not a context dependency", func(t *testing.T) {
 			s := newTestStore(t)
 			if err := s.CreateSession("s-ctx2", "engram", "/tmp/engram"); err != nil {
 				t.Fatalf("create session: %v", err)
@@ -4057,8 +4071,8 @@ func TestHookFallbacksAndAdditionalBranches(t *testing.T) {
 			if _, err := s.db.Exec("DROP TABLE user_prompts"); err != nil {
 				t.Fatalf("drop prompts: %v", err)
 			}
-			if _, err := s.FormatContext("", ""); err == nil {
-				t.Fatalf("expected format context to fail from recent prompts")
+			if _, err := s.FormatContext("", ""); err != nil {
+				t.Fatalf("format context must not depend on user_prompts: %v", err)
 			}
 		})
 	})
@@ -8828,5 +8842,556 @@ func TestSanitizeFTS(t *testing.T) {
 				t.Errorf("sanitizeFTS(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// ─── Layered mem_context budget (Phase 2 R3b) ────────────────────────────────
+
+// TestFormatContextLayeredBudget pins the layered context contract: a single
+// "## Memory Context" heading, one-line sessions whose summary is cut to its
+// first sentence, at most contextRecentObs observation summaries, an
+// expand-on-demand footer, and a hard contextByteCap on the whole block.
+func TestFormatContextLayeredBudget(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-layered", "proj-x", "/tmp/proj-x"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := s.EndSession("s-layered", "long summary. second sentence that must not appear."); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-layered",
+			Type:      "decision",
+			Title:     fmt.Sprintf("title-%d", i),
+			Content:   strings.Repeat("body sentence ", 40),
+			Project:   "proj-x",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation %d: %v", i, err)
+		}
+	}
+
+	out, err := s.FormatContext("proj-x", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.HasPrefix(out, "## Memory Context\n") {
+		t.Fatalf("missing layered heading:\n%s", out)
+	}
+	if strings.Contains(out, "second sentence that must not appear") {
+		t.Fatalf("session summary not truncated to first sentence:\n%s", out)
+	}
+	if !strings.Contains(out, "long summary.") {
+		t.Fatalf("session summary first sentence missing:\n%s", out)
+	}
+	if !strings.Contains(out, "mem_get_observation") {
+		t.Fatalf("missing expand-on-demand footer:\n%s", out)
+	}
+	if got := strings.Count(out, "title-"); got != contextRecentObs {
+		t.Fatalf("rendered %d observations, want %d:\n%s", got, contextRecentObs, out)
+	}
+	// Newest-first: the last three observations survive, the oldest do not.
+	for _, want := range []string{"title-9", "title-8", "title-7"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected newest observation %s in context:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "title-0") {
+		t.Fatalf("oldest observation must be dropped:\n%s", out)
+	}
+	if strings.Contains(out, "Recent User Prompts") {
+		t.Fatalf("prompts section is not part of the layered layout:\n%s", out)
+	}
+}
+
+// TestFormatContextByteCapDropsObservationsThenSessionsNeverPinned proves the
+// drop order when the block exceeds contextByteCap. The fixture below renders
+// well past the cap before any dropping (see the pre-cap guard), so the cap
+// loop in renderLayeredContext genuinely runs, and the surviving set is
+// asserted by name rather than by count:
+//
+//   - all contextRecentSessions session lines survive (observations are dropped
+//     BEFORE sessions),
+//   - the two NEWEST observations (obs-4, obs-3) survive and the oldest of the
+//     three rendered ones (obs-2) is dropped (drop is oldest-first),
+//   - the pinned line and the footer always survive.
+//
+// These assertions are the regression net for three mutations, each of which
+// must fail this test: (a) dropping sessions before observations, (b) dropping
+// newest-first (obsLines[1:]), (c) deleting the cap loop entirely.
+func TestFormatContextByteCapDropsObservationsThenSessionsNeverPinned(t *testing.T) {
+	s := newTestStore(t)
+
+	pinnedBody := "PINNED-MARKER decision body that must never be dropped."
+	// Exactly contextRecentSessions sessions, so every one of them is expected
+	// in the rendered block and "a session line went missing" is unambiguous.
+	for i := 0; i < contextRecentSessions; i++ {
+		id := fmt.Sprintf("s-cap-%d", i)
+		if err := s.CreateSession(id, "proj-cap", "/tmp/proj-cap"); err != nil {
+			t.Fatalf("create session %s: %v", id, err)
+		}
+		if err := s.EndSession(id, fmt.Sprintf("session %d summary %s.", i, strings.Repeat("x", 150))); err != nil {
+			t.Fatalf("end session %s: %v", id, err)
+		}
+	}
+
+	pinnedID, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-cap-0",
+		Type:      "decision",
+		Title:     "pinned-title",
+		Content:   pinnedBody,
+		Project:   "proj-cap",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add pinned observation: %v", err)
+	}
+	if err := s.PinObservation(pinnedID); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-cap-0",
+			Type:      "note",
+			Title:     fmt.Sprintf("obs-%d", i),
+			Content:   strings.Repeat("filler sentence words ", 20) + ".",
+			Project:   "proj-cap",
+			Scope:     "project",
+		}); err != nil {
+			t.Fatalf("add observation %d: %v", i, err)
+		}
+	}
+
+	out, err := s.FormatContext("proj-cap", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+
+	// The fixture must overflow the cap BEFORE dropping, otherwise the drop
+	// order below would be vacuously satisfied by a loop that never runs.
+	pinnedLines := []string{fmt.Sprintf("- [decision] **pinned-title**: %s\n", pinnedBody)}
+	sessionLines := make([]string, 0, contextRecentSessions)
+	// timeutil.FormatLocal renders exactly 19 bytes ("2006-01-02 15:04:05"),
+	// so a 19-byte stand-in keeps this reconstruction byte-exact.
+	tsWidth := strings.Repeat("t", len("2006-01-02 15:04:05"))
+	for i := 0; i < contextRecentSessions; i++ {
+		sessionLines = append(sessionLines, fmt.Sprintf("- %s %s\n", tsWidth,
+			firstSentence(fmt.Sprintf("session %d summary %s.", i, strings.Repeat("x", 150)))))
+	}
+	obsLines := make([]string, 0, contextRecentObs)
+	for i := 0; i < contextRecentObs; i++ {
+		obsLines = append(obsLines, fmt.Sprintf("- [note] **obs-%d**: %s\n", i,
+			firstSentence(strings.Repeat("filler sentence words ", 20)+".")))
+	}
+	if precap := len(joinLayeredContext(pinnedLines, sessionLines, obsLines)); precap <= contextByteCap {
+		t.Fatalf("fixture renders %d bytes before dropping, which is already under the %d-byte cap: "+
+			"the cap loop is not exercised, enlarge the fixture", precap, contextByteCap)
+	}
+
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.Contains(out, "PINNED-MARKER") {
+		t.Fatalf("pinned content must never be dropped by the byte cap:\n%s", out)
+	}
+	if !strings.Contains(out, "Full bodies: mem_search / mem_get_observation.") {
+		t.Fatalf("footer must survive the byte cap:\n%s", out)
+	}
+
+	// (a) Observations are dropped before sessions: every session line survives.
+	for i := 0; i < contextRecentSessions; i++ {
+		want := fmt.Sprintf("session %d summary", i)
+		if !strings.Contains(out, want) {
+			t.Fatalf("session line %q must survive: observations are dropped before sessions:\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, "session "); n != contextRecentSessions {
+		t.Fatalf("rendered %d session lines, want exactly %d:\n%s", n, contextRecentSessions, out)
+	}
+
+	// (b) Drop is oldest-first: the two newest observations survive...
+	for _, want := range []string{"obs-4", "obs-3"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("newest observation %s must survive the byte cap (drop is oldest-first):\n%s", want, out)
+		}
+	}
+	// (c) ...and the oldest of the three rendered observations is dropped. This
+	// only holds if the cap loop actually ran.
+	if strings.Contains(out, "obs-2") {
+		t.Fatalf("oldest rendered observation obs-2 must be dropped by the byte cap:\n%s", out)
+	}
+	// obs-0/obs-1 never even reach the renderer (contextRecentObs = 3).
+	for _, unwanted := range []string{"obs-0", "obs-1"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("observation %s is outside contextRecentObs and must not render:\n%s", unwanted, out)
+		}
+	}
+	if n := strings.Count(out, "**obs-"); n != 2 {
+		t.Fatalf("rendered %d observation lines, want exactly 2 after the cap drop:\n%s", n, out)
+	}
+
+	assertContextSectionOrder(t, out)
+}
+
+// pinnedSectionBody returns the rendered pinned section of a context block:
+// the heading, every entry line, the overflow marker when there is one, and the
+// blank separator line writeContextSection appends. Sections are separated by
+// exactly one blank line and no entry line is empty, so the first "\n\n" after
+// the heading is the section end.
+//
+// This is what pinnedSectionByteCap is measured against, so the helper
+// deliberately re-derives the boundary from the output text rather than calling
+// the renderer's own accounting.
+//
+// Limitation of that re-derivation: an entry whose rendered content contains a
+// BLANK line would end the section early here, so the helper would under-measure
+// it. Production accounting never has that problem — pinnedSectionBytes sums the
+// entry strings themselves — so this is a test-helper caveat only. Keep fixture
+// bodies free of blank lines.
+func pinnedSectionBody(t *testing.T, out string) string {
+	t.Helper()
+	start := strings.Index(out, pinnedSectionHeading)
+	if start < 0 {
+		t.Fatalf("pinned heading %q not found in context block:\n%s", pinnedSectionHeading, out)
+	}
+	rest := out[start:]
+	end := strings.Index(rest[len(pinnedSectionHeading):], "\n\n")
+	if end < 0 {
+		t.Fatalf("pinned section is not terminated by a blank line:\n%s", out)
+	}
+	return rest[:len(pinnedSectionHeading)+end+2]
+}
+
+// TestFormatContextPinnedSectionCapAndOrder pins the R4 core-memory contract on
+// the local store: the pinned section is capped at pinnedSectionByteCap on its
+// own (inside, not instead of, the outer contextByteCap), entries render in
+// pin-time ASCENDING order, and overflow drops the OLDEST pins behind a marker
+// that names exactly how many were withheld.
+//
+// The fixture pins 15 observations whose rendered lines are exactly 120 bytes
+// each (1800 bytes of entries — well past the 1024-byte cap) and stamps them so
+// updated_at (the pin-time proxy, see PinnedObservations) ASCENDS with the pin
+// index while created_at DESCENDS. That inversion is deliberate: an
+// implementation that ordered by created_at, or that reversed the section to
+// newest-first, would keep the wrong pins and fail here.
+//
+// Regression net for four mutations, each of which must fail this test:
+// (a) deleting the cap loop, (b) rendering newest-first / reversing the order,
+// (c) ordering by created_at instead of the pin-time proxy, (d) dropping more
+// pins than the cap requires.
+func TestFormatContextPinnedSectionCapAndOrder(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-pin-cap", "proj-pin-cap", "/tmp/proj-pin-cap"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const (
+		totalPins = 15
+		// "- [decision] **pin-NN**: " (25) + body (94) + "\n" = 120 bytes.
+		lineBytes = 120
+	)
+	body := func(i int) string {
+		return fmt.Sprintf("core fact %02d ", i) + strings.Repeat("y", 81)
+	}
+	for i := 0; i < totalPins; i++ {
+		id, err := s.AddObservation(AddObservationParams{
+			SessionID: "s-pin-cap",
+			Type:      "decision",
+			Title:     fmt.Sprintf("pin-%02d", i),
+			Content:   body(i),
+			Project:   "proj-pin-cap",
+			Scope:     "project",
+		})
+		if err != nil {
+			t.Fatalf("add observation %d: %v", i, err)
+		}
+		if err := s.PinObservation(id); err != nil {
+			t.Fatalf("pin observation %d: %v", i, err)
+		}
+		// updated_at ascends with i (pin-time proxy), created_at descends.
+		if _, err := s.db.Exec(`UPDATE observations SET created_at = ?, updated_at = ? WHERE id = ?`,
+			fmt.Sprintf("2026-02-%02d 00:00:00", 20-i),
+			fmt.Sprintf("2026-03-01 %02d:00:00", i), id); err != nil {
+			t.Fatalf("stamp observation %d: %v", i, err)
+		}
+	}
+
+	// Sanity: the fixture must render past the pinned cap before any dropping,
+	// otherwise every assertion below is vacuous.
+	if precap := len(pinnedSectionHeading) + totalPins*lineBytes + 1; precap <= pinnedSectionByteCap {
+		t.Fatalf("fixture renders %d pinned bytes, already under the %d-byte cap: enlarge it",
+			precap, pinnedSectionByteCap)
+	}
+
+	out, err := s.FormatContext("proj-pin-cap", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+
+	section := pinnedSectionBody(t, out)
+	if len(section) > pinnedSectionByteCap {
+		t.Fatalf("pinned section is %d bytes, cap %d:\n%s", len(section), pinnedSectionByteCap, section)
+	}
+
+	shown := strings.Count(section, "**pin-")
+	if shown == 0 {
+		t.Fatalf("pinned section dropped every entry; core memory must keep the newest:\n%s", section)
+	}
+	if shown == totalPins {
+		t.Fatalf("all %d pinned entries rendered: the cap was not enforced:\n%s", totalPins, section)
+	}
+
+	// The marker names exactly the number withheld.
+	marker := fmt.Sprintf(pinnedCapMarkerFmt, totalPins-shown)
+	if !strings.Contains(section, marker) {
+		t.Fatalf("expected overflow marker %q in:\n%s", marker, section)
+	}
+
+	// Survivors are the NEWEST contiguous suffix: the oldest pins are dropped.
+	for i := 0; i < totalPins-shown; i++ {
+		if strings.Contains(section, fmt.Sprintf("**pin-%02d**", i)) {
+			t.Fatalf("oldest pin pin-%02d must be dropped from rendering:\n%s", i, section)
+		}
+	}
+	for i := totalPins - shown; i < totalPins; i++ {
+		if !strings.Contains(section, fmt.Sprintf("**pin-%02d**", i)) {
+			t.Fatalf("newest pin pin-%02d must survive the pinned cap:\n%s", i, section)
+		}
+	}
+
+	// Ascending pin-time order among the survivors (stable prefix rule).
+	prev := -1
+	for i := totalPins - shown; i < totalPins; i++ {
+		at := strings.Index(section, fmt.Sprintf("**pin-%02d**", i))
+		if at <= prev {
+			t.Fatalf("pinned entries must render in pin-time ascending order; pin-%02d at %d follows %d:\n%s",
+				i, at, prev, section)
+		}
+		prev = at
+	}
+
+	// The cap drops the MINIMUM: one more (older) entry would not have fit.
+	// Dropping one fewer keeps the marker the same width here (8 → 7), so the
+	// only delta is the extra 120-byte line.
+	if len(section)+lineBytes <= pinnedSectionByteCap {
+		t.Fatalf("pinned section is %d bytes with %d entries: one more would still fit under %d, "+
+			"the cap drops more than necessary:\n%s", len(section), shown, pinnedSectionByteCap, section)
+	}
+
+	// The pinned cap operates INSIDE the outer budget, which still never drops
+	// pinned lines and still keeps the footer.
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	if !strings.Contains(out, "Full bodies: mem_search / mem_get_observation.") {
+		t.Fatalf("footer must survive:\n%s", out)
+	}
+}
+
+// TestFormatContextPinnedLoneOverCapEntryRendersWithoutMarker pins the
+// degenerate pinned-cap path: when the section is a SINGLE entry that alone
+// exceeds pinnedSectionByteCap, the entry still renders (core memory is never
+// emptied) and NO overflow marker is emitted. Nothing was withheld, so a
+// "(pin cap reached: 0 pinned facts not shown — mem_unpin to prune)" line would
+// be agent-facing text that is simply false.
+//
+// Twin: internal/memorylake's TestBackend_FormatContext_
+// PinnedLoneOverCapEntryRendersWithoutMarker.
+func TestFormatContextPinnedLoneOverCapEntryRendersWithoutMarker(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-pin-solo", "proj-pin-solo", "/tmp/proj-pin-solo"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// contextPinnedTruncLen emoji runes: exactly at the rune cut (so the body
+	// renders whole, no "...") but 4 bytes each, so the rendered line is ~1220
+	// bytes — past the 998 bytes an entry may occupy once the heading (25) and
+	// the blank separator (1) are charged against the 1024-byte cap.
+	body := strings.Repeat("🔥", contextPinnedTruncLen)
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-pin-solo",
+		Type:      "decision",
+		Title:     "solo-pin",
+		Content:   body,
+		Project:   "proj-pin-solo",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.PinObservation(id); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+
+	out, err := s.FormatContext("proj-pin-solo", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+
+	// Sanity: the lone entry must genuinely be over the cap, otherwise this
+	// test passes on the ordinary "everything fits" path and proves nothing.
+	section := pinnedSectionBody(t, out)
+	if len(section) <= pinnedSectionByteCap {
+		t.Fatalf("fixture pinned section is %d bytes, within the %d-byte cap: the lone-entry "+
+			"over-cap path is not exercised, enlarge the fixture:\n%s",
+			len(section), pinnedSectionByteCap, section)
+	}
+
+	if !strings.Contains(out, "**solo-pin**") {
+		t.Fatalf("the lone pinned entry must render even over cap:\n%s", out)
+	}
+	if !strings.Contains(out, body) {
+		t.Fatalf("the lone pinned entry's body must render whole:\n%s", out)
+	}
+	// No marker in any form: neither the zero-count rendering nor the shared
+	// prefix (which would catch a marker with any other count).
+	if got := fmt.Sprintf(pinnedCapMarkerFmt, 0); strings.Contains(out, got) {
+		t.Fatalf("emitted a zero-count pin-cap marker %q — nothing was withheld:\n%s", got, out)
+	}
+	if strings.Contains(out, "pin cap reached") {
+		t.Fatalf("no pin-cap marker may appear when nothing is withheld:\n%s", out)
+	}
+	if strings.Contains(out, "not shown") {
+		t.Fatalf("no pin-cap marker may appear when nothing is withheld:\n%s", out)
+	}
+}
+
+// TestFormatContextTruncatesTitleKeepingPinnedBlockUnderOuterCap pins the title
+// cut (contextTitleTruncLen) as a cap-enforcement mechanism, not cosmetics: a
+// pinned line is the one thing NEITHER cap can drop, so an unbounded title used
+// to be the remaining way to push the whole block past contextByteCap with
+// nothing left to trim. The pre-cap guard below reconstructs the untruncated
+// line and asserts exactly that.
+//
+// Twin: internal/memorylake's TestBackend_FormatContext_
+// TruncatesTitleKeepingPinnedBlockUnderOuterCap.
+func TestFormatContextTruncatesTitleKeepingPinnedBlockUnderOuterCap(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateSession("s-pin-title", "proj-pin-title", "/tmp/proj-pin-title"); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	longTitle := strings.Repeat("T", 300) // 300 bytes of title
+	body := strings.Repeat("🔥", contextPinnedTruncLen)
+	id, err := s.AddObservation(AddObservationParams{
+		SessionID: "s-pin-title",
+		Type:      "decision",
+		Title:     longTitle,
+		Content:   body,
+		Project:   "proj-pin-title",
+		Scope:     "project",
+	})
+	if err != nil {
+		t.Fatalf("add observation: %v", err)
+	}
+	if err := s.PinObservation(id); err != nil {
+		t.Fatalf("pin observation: %v", err)
+	}
+
+	out, err := s.FormatContext("proj-pin-title", "")
+	if err != nil {
+		t.Fatalf("format context: %v", err)
+	}
+
+	// Pre-cap guard: with the title rendered whole, the pinned line ALONE (which
+	// the outer cap never drops) already carries the block over contextByteCap,
+	// so the truncation below is what keeps the cap enforceable.
+	untruncated := fmt.Sprintf("- [decision] **%s**: %s\n", longTitle, body)
+	if precap := len(joinLayeredContext([]string{untruncated}, nil, nil)); precap <= contextByteCap {
+		t.Fatalf("fixture renders %d bytes with the title untruncated, already under the %d-byte "+
+			"cap: the bypass is not exercised, enlarge the title or body", precap, contextByteCap)
+	}
+
+	if len(out) > contextByteCap {
+		t.Fatalf("context %d bytes, cap %d:\n%s", len(out), contextByteCap, out)
+	}
+	wantTitle := strings.Repeat("T", contextTitleTruncLen) + "…"
+	if !strings.Contains(out, "**"+wantTitle+"**") {
+		t.Fatalf("title must render cut to %d runes with an ellipsis:\n%s", contextTitleTruncLen, out)
+	}
+	if strings.Contains(out, longTitle) {
+		t.Fatalf("untruncated title must not render:\n%s", out)
+	}
+	if !strings.Contains(out, body) {
+		t.Fatalf("the pinned body must still render whole (only the title is cut):\n%s", out)
+	}
+}
+
+// assertContextSectionOrder pins the layered section order of a context block:
+// Pinned, then Recent Sessions, then Recent Observations — most durable first,
+// most volatile last (Phase 2 spec R3b). Headings that are absent (a section
+// with no rows is omitted) are skipped.
+func assertContextSectionOrder(t *testing.T, out string) {
+	t.Helper()
+	pinned := strings.Index(out, pinnedSectionHeading)
+	sessions := strings.Index(out, "### Recent Sessions")
+	observations := strings.Index(out, "### Recent Observations")
+	if pinned < 0 || sessions < 0 || observations < 0 {
+		t.Fatalf("expected all three section headings (pinned=%d sessions=%d observations=%d):\n%s",
+			pinned, sessions, observations, out)
+	}
+	if !(pinned < sessions && sessions < observations) {
+		t.Fatalf("section order must be Pinned < Recent Sessions < Recent Observations, got %d/%d/%d:\n%s",
+			pinned, sessions, observations, out)
+	}
+}
+
+// TestFormatContextCrossProjectSessionAttribution pins the cross-project session
+// line format. A blank project filter (the scope=personal render) makes
+// RecentSessions return rows from every project, so each session line must name
+// its project: "- <ts> [<project>] <summary>". A per-project render must stay
+// byte-identical to the unprefixed form.
+func TestFormatContextCrossProjectSessionAttribution(t *testing.T) {
+	s := newTestStore(t)
+
+	for _, p := range []string{"proj-a", "proj-b"} {
+		id := "s-" + p
+		if err := s.CreateSession(id, p, "/tmp/"+p); err != nil {
+			t.Fatalf("create session %s: %v", id, err)
+		}
+		if err := s.EndSession(id, "did work in "+p+"."); err != nil {
+			t.Fatalf("end session %s: %v", id, err)
+		}
+		if _, err := s.AddObservation(AddObservationParams{
+			SessionID: id, Type: "note", Title: "t-" + p, Content: "body.",
+			Project: p, Scope: "personal",
+		}); err != nil {
+			t.Fatalf("add observation %s: %v", id, err)
+		}
+	}
+
+	cross, err := s.FormatContext("", "personal")
+	if err != nil {
+		t.Fatalf("cross-project format context: %v", err)
+	}
+	for _, want := range []string{"[proj-a] did work in proj-a.", "[proj-b] did work in proj-b."} {
+		if !strings.Contains(cross, want) {
+			t.Fatalf("cross-project render must attribute sessions, missing %q:\n%s", want, cross)
+		}
+	}
+
+	scoped, err := s.FormatContext("proj-a", "personal")
+	if err != nil {
+		t.Fatalf("scoped format context: %v", err)
+	}
+	if strings.Contains(scoped, "[proj-a]") {
+		t.Fatalf("per-project render must not prefix session lines with the project:\n%s", scoped)
+	}
+	if !strings.Contains(scoped, "- did work in proj-a.") &&
+		!strings.Contains(scoped, " did work in proj-a.") {
+		t.Fatalf("per-project render lost the session summary:\n%s", scoped)
+	}
+	if strings.Contains(scoped, "proj-b") {
+		t.Fatalf("per-project render leaked another project:\n%s", scoped)
 	}
 }

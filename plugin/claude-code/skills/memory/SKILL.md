@@ -1,6 +1,6 @@
 ---
 name: engram-memory
-description: "ALWAYS ACTIVE — Persistent memory protocol. You MUST save decisions, conventions, bugs, and discoveries to engram proactively. Do NOT wait for the user to ask."
+description: "ALWAYS ACTIVE — Persistent memory protocol. Save decisions, conventions, bugs, and discoveries to engram silently, batched at task end — never narrate saves. Answering comes first: the final reply must contain the complete answer itself."
 ---
 
 # Engram Persistent Memory — Protocol
@@ -25,37 +25,19 @@ plugin-scoped (`mcp__plugin_engram_engram__...`) server ids.
 Admin tools (deferred — use ToolSearch only if needed):
 - `mem_stats`, `mem_delete`, `mem_timeline`, `mem_capture_passive`
 
-## PROACTIVE SAVE TRIGGERS (mandatory — do NOT wait for user to ask)
+## SAVING — silent, batched, never instead of answering
 
-Call `mem_save` IMMEDIATELY and WITHOUT BEING ASKED after any of these:
+Save decisions, bug root causes, conventions, gotchas, and user preferences.
+But: your final reply must contain the complete answer itself — memory serves
+future sessions, never this reply. Never narrate saves ("I've saved this to
+memory") and never let a save replace the answer. Batch saves at task end.
 
-### After decisions or conventions
-- Architecture or design decision made
-- Team convention documented or established
-- Workflow change agreed upon
-- Tool or library choice made with tradeoffs
+What is worth saving (batched at the end of the task, not mid-answer):
 
-### After completing work
-- Bug fix completed (include root cause)
-- Feature implemented with non-obvious approach
-- Notion/Jira/GitHub artifact created or updated with significant content
-- Configuration change or environment setup done
-
-### After discoveries
-- Non-obvious discovery about the codebase
-- Gotcha, edge case, or unexpected behavior found
-- Pattern established (naming, structure, convention)
-- User preference or constraint learned
-
-### After user confirmation or rejection
-- User confirms a recommendation you made ("go with that", "let's do that", "sounds good", "agreed", "perfect", or the equivalent in the user's language)
-- User rejects an option or approach ("no, better X", "not that one", or the equivalent in the user's language)
-- User expresses a preference ("I prefer X over Y", "always do it this way", or the equivalent in the user's language)
-- User makes a decision after you presented tradeoffs or options
-- A discussion concludes with a clear direction chosen — even if the agent proposed it
-
-### Self-check — ask yourself after EVERY task:
-> "Did I or the user just make a decision, confirm a recommendation, express a preference, fix a bug, learn something non-obvious, or establish a convention? If yes, call mem_save NOW."
+- Architecture, design, workflow, or tool/library decisions — including the ones the user confirms, rejects, or states as a preference
+- Bug fixes (with root cause) and features implemented with a non-obvious approach
+- Conventions and patterns established (naming, structure, approach)
+- Non-obvious discoveries, gotchas, edge cases, and constraints learned
 
 Format for `mem_save`:
 - **title**: Verb + what — short, searchable (e.g. "Fixed N+1 query in UserList", "Chose Zustand over Redux")
@@ -68,6 +50,17 @@ Format for `mem_save`:
   **Where**: Files or paths affected
   **Learned**: Gotchas, edge cases, things that surprised you (omit if none)
 
+### Pinning — the exception, not the habit
+
+Pin (mem_pin) only facts whose loss causes irreversible damage or repeated pitfalls; pinned facts are always in context.
+The pinned block is the one part of `mem_context` the byte budget never drops, and it
+carries its own 1024-byte ceiling: entries render oldest-pin-first, and once the
+ceiling is reached the OLDEST pins stop being rendered behind a
+`(pin cap reached: N pinned facts not shown — mem_unpin to prune)` marker. Over-pinning
+therefore evicts your own earlier pins from context — use `mem_unpin` to prune.
+Concretely: with the 300-rune content cap on each pinned line, only ~2-3 pinned facts
+render before the 1KB cap is reached — over-pinning evicts your own earlier pins.
+
 ### Topic update rules (mandatory)
 
 - Different topics MUST NOT overwrite each other (example: architecture decision vs bugfix)
@@ -77,7 +70,53 @@ Format for `mem_save`:
 
 ### MemoryLake-backed projects
 
-If the current project uses the **MemoryLake backend** (check with `engram memorylake status`), dedup, updating existing memories, and merging contradictions are handled **automatically** by the backend — you only need `mem_save` / `mem_search` / `mem_context`; you do **not** need to call `mem_update`, `mem_judge`, or `mem_compare` yourself. Projects on the default **SQLite backend** are unaffected — keep following the topic-key/upsert rules above.
+If the current project uses the **MemoryLake backend** (check with `engram memorylake status`), dedup, updating existing memories, and merging contradictions are handled **automatically** by the backend — you only need `mem_save` / `mem_search` / `mem_context`; you do **not** need to call `mem_update`, `mem_judge`, or `mem_compare` yourself (`mem_save` never returns `judgment_required` there, so the conflict loop below simply won't trigger). Projects on the default **SQLite backend** are unaffected — keep following the topic-key/upsert and conflict-surfacing rules.
+
+## Conflict loop (SQLite projects)
+
+The MCP server instructions point here instead of carrying this walkthrough in
+every session. It applies to projects on the default **SQLite backend** only.
+
+### CONFLICT SURFACING — when mem_save returns candidates
+
+After every mem_save call, check the response envelope for judgment_required.
+
+IF judgment_required IS TRUE:
+  Iterate candidates[] and call mem_judge once per candidate using the
+  judgment_id from that candidate entry. Do NOT use the top-level judgment_id
+  for multiple candidates — each candidate has its own.
+
+  HEURISTIC — when to ask the user vs. resolve autonomously:
+
+  ASK the user (conversationally, as part of your next reply) when:
+    - confidence is below 0.7, OR
+    - the relation you would choose is supersedes or conflicts_with AND the
+      observation type is architecture, policy, or decision
+
+  RESOLVE silently (call mem_judge without asking) when:
+    - confidence >= 0.7 AND the relation is not supersedes/conflicts_with, OR
+    - the relation is related, compatible, scoped, or not_conflict
+
+  HOW TO ASK (conversationally — never via blocking CLI or dashboard prompt):
+    Raise it naturally in your next reply to the user. Example phrasing:
+    "I noticed memory #abc123 might conflict with what we just saved.
+     Want me to mark the new one as superseding it, or are they about
+     different scopes? I can also mark them as compatible if both still apply."
+
+  AFTER RESOLUTION (both paths):
+    Call mem_judge with the chosen relation, a reason, and if the user gave
+    explicit direction, include their words as the evidence field. This persists
+    the verdict and closes the pending conflict row.
+
+### Deferred tools (use ToolSearch when needed; the session-start hook preloads several of these — ToolSearch only if a call fails)
+
+  mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end,
+  mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
+
+## SEARCHING — once, up front
+
+One mem_search at task start ("have we seen this before?"). On miss, proceed
+normally; do not search repeatedly for the same information.
 
 ## WHEN TO SEARCH MEMORY
 

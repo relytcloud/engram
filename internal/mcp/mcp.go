@@ -189,64 +189,28 @@ func NewServerWithSelector(sel BackendSelector, cfg MCPConfig, allowlist map[str
 }
 
 // serverInstructions tells MCP clients when to use Engram's tools.
-// 7 core tools are eager (always in context). The rest are deferred
-// and require ToolSearch to load.
-const serverInstructions = `Engram provides persistent memory that survives across sessions and compactions.
+//
+// This text is injected into EVERY session by every MCP client, so it is pure
+// per-session overhead and is held to a hard byte budget (see
+// TestServerInstructionsBudget). Keep it to the rules an agent must know
+// unconditionally: the core tools, the save rule (post-compaction recovery in
+// slim mode depends on this line), topic_key, and a pointer to the on-demand
+// `memory` SKILL. Occasional detail — the conflict-resolution loop, the
+// when-to-ask-the-user heuristic, the deferred tool list — lives in
+// plugin/{claude-code,codex}/skills/memory/SKILL.md, which is loaded on demand
+// and therefore costs nothing per session.
+const serverInstructions = `Engram: persistent memory across sessions and compactions.
 
-CORE TOOLS (always available — use without ToolSearch):
-  mem_save — save decisions, bugs, discoveries, conventions PROACTIVELY (do not wait to be asked)
-  mem_search — find past work, decisions, or context from previous sessions
-  mem_context — get recent session history (call at session start or after compaction)
-  mem_session_summary — save end-of-session summary (MANDATORY before saying "done")
-  mem_get_observation — get full untruncated content of a search result by ID
-  mem_save_prompt — save user prompt for context
-  mem_current_project — detect current project from cwd (recommended first call)
+Core tools: mem_save (save decisions/bugs/conventions/gotchas — silently,
+batched at task end, never replacing your answer), mem_search (once at task
+start), mem_context (session start / post-compaction), mem_session_summary
+(before finishing), mem_get_observation (expand a search hit), mem_save_prompt.
+Durable facts use topic_key (lowercase-kebab, max 2 levels) to update in place.
 
-DEFERRED TOOLS (use ToolSearch when needed):
-  mem_update, mem_review, mem_pin, mem_unpin, mem_suggest_topic_key, mem_session_start, mem_session_end,
-  mem_stats, mem_delete, mem_timeline, mem_capture_passive, mem_merge_projects
-
-PROACTIVE SAVE RULE: Call mem_save immediately after ANY decision, bug fix, discovery, or convention — not just when asked.
-
-## MemoryLake-backed projects
-
-If the current project uses the MemoryLake backend (check with "engram memorylake status"),
-dedup, updating existing memories, and merging contradictions are handled AUTOMATICALLY by the
-backend — you only need mem_save / mem_search / mem_context; you do NOT need to call mem_update,
-mem_judge, or mem_compare yourself (mem_save never returns judgment_required there, so the conflict
-loop below simply won't trigger). Projects on the default SQLite backend are unaffected — keep
-following the topic-key/upsert and conflict-surfacing rules below.
-
-## CONFLICT SURFACING — when mem_save returns candidates
-
-After every mem_save call, check the response envelope for judgment_required.
-
-IF judgment_required IS TRUE:
-  Iterate candidates[] and call mem_judge once per candidate using the
-  judgment_id from that candidate entry. Do NOT use the top-level judgment_id
-  for multiple candidates — each candidate has its own.
-
-  HEURISTIC — when to ask the user vs. resolve autonomously:
-
-  ASK the user (conversationally, as part of your next reply) when:
-    - confidence is below 0.7, OR
-    - the relation you would choose is supersedes or conflicts_with AND the
-      observation type is architecture, policy, or decision
-
-  RESOLVE silently (call mem_judge without asking) when:
-    - confidence >= 0.7 AND the relation is not supersedes/conflicts_with, OR
-    - the relation is related, compatible, scoped, or not_conflict
-
-  HOW TO ASK (conversationally — never via blocking CLI or dashboard prompt):
-    Raise it naturally in your next reply to the user. Example phrasing:
-    "I noticed memory #abc123 might conflict with what we just saved.
-     Want me to mark the new one as superseding it, or are they about
-     different scopes? I can also mark them as compatible if both still apply."
-
-  AFTER RESOLUTION (both paths):
-    Call mem_judge with the chosen relation, a reason, and if the user gave
-    explicit direction, include their words as the evidence field. This persists
-    the verdict and closes the pending conflict row.`
+MemoryLake-backed projects (engram memorylake status): dedup/conflict-merge
+are automatic; the three core tools suffice. SQLite projects: if mem_save
+returns judgment_required, follow the conflict loop documented in the memory
+SKILL. Details and examples: load the memory SKILL on demand.`
 
 // NewServerWithTools creates an MCP server registering only the tools in
 // the allowlist. If allowlist is nil, all tools are registered.
@@ -281,6 +245,45 @@ func shouldRegister(name string, allowlist map[string]bool) bool {
 	return allowlist[name]
 }
 
+// memSaveDescription is the mem_save tool description. It ships in EVERY
+// session — including slim protocol mode, which strips almost everything else
+// — so it is held to the same answer-first contract as the injected protocol
+// text: say what is worth saving, then make explicit that saving is silent,
+// batched, and never a substitute for answering. It is a named constant so
+// TestMemSaveDescriptionIsAnswerFirst can pin that contract; edits that
+// reintroduce save-eager phrasing ("call this PROACTIVELY", "don't wait to be
+// asked") must fail a test rather than ship quietly.
+const memSaveDescription = `Save a durable observation to persistent memory, so a future session starts with what this one learned.
+
+WHAT is worth saving:
+- Architectural decisions or tradeoffs
+- Bug fixes (what was wrong, why, how you fixed it)
+- New patterns or conventions established
+- Configuration changes or environment setup
+- Important discoveries or gotchas
+- User preferences and working agreements
+
+HOW to save — silently, batched at task end. Your final reply must contain the complete answer itself; memory serves future sessions, never this reply. Never narrate saves ("I've saved this to memory") and never let a save replace answering.
+
+TOPIC_KEY — pass topic_key for durable facts that supersede themselves (slash-separated lowercase kebab-case, max 2 levels, e.g. architecture/auth-model). The same key updates the existing memory in place instead of adding a near-duplicate row. Omit it for one-off, point-in-time observations.
+
+FORMAT for content — use this structured format:
+  **What**: [concise description of what was done]
+  **Why**: [the reasoning, user request, or problem that drove it]
+  **Where**: [files/paths affected, e.g. src/auth/middleware.ts, internal/store/store.go]
+  **Learned**: [any gotchas, edge cases, or decisions made — omit if none]
+
+TITLE should be short and searchable, like: "JWT auth middleware", "FTS5 query sanitization", "Fixed N+1 in user list"
+
+Examples:
+  title: "Switched from sessions to JWT"
+  type: "decision"
+  content: "**What**: Replaced express-session with jsonwebtoken for auth\n**Why**: Session storage doesn't scale across multiple instances\n**Where**: src/middleware/auth.ts, src/routes/login.ts\n**Learned**: Must set httpOnly and secure flags on the cookie, refresh tokens need separate rotation logic"
+
+  title: "Fixed FTS5 syntax error on special chars"
+  type: "bugfix"
+  content: "**What**: Wrapped each search term in quotes before passing to FTS5 MATCH\n**Why**: Users typing queries like 'fix auth bug' would crash because FTS5 interprets special chars as operators\n**Where**: internal/store/store.go — sanitizeFTS() function\n**Learned**: FTS5 MATCH syntax is NOT the same as LIKE — always sanitize user input"`
+
 // registerTools registers all enabled MCP tools on the given server. Each
 // handler is constructed with sel (a BackendSelector) rather than a fixed
 // backend, so the memory backend used for a given call can vary by resolved
@@ -292,7 +295,7 @@ func registerTools(srv *server.MCPServer, sel BackendSelector, cfg MCPConfig, al
 	if shouldRegister("mem_search", allowlist) {
 		srv.AddTool(
 			mcp.NewTool("mem_search",
-				mcp.WithDescription("Search your persistent memory across all sessions. Use this to find past decisions, bugs fixed, patterns used, files changed, or any context from previous coding sessions."),
+				mcp.WithDescription("Search your persistent memory across all sessions. Use this to find past decisions, bugs fixed, patterns used, files changed, or any context from previous coding sessions. Returns an index (title + summary + id), not full bodies; call mem_get_observation with an id for the full body — scan first, expand deliberately."),
 				mcp.WithTitleAnnotation("Search Memory"),
 				mcp.WithReadOnlyHintAnnotation(true),
 				mcp.WithDestructiveHintAnnotation(false),
@@ -320,8 +323,11 @@ func registerTools(srv *server.MCPServer, sel BackendSelector, cfg MCPConfig, al
 				mcp.WithNumber("limit",
 					mcp.Description("Max results (default: 10, max: 20)"),
 				),
+				mcp.WithNumber("budget",
+					mcp.Description("Approximate token budget for the returned index (default: 600). Hits past the budget are dropped with an explicit \"more omitted\" marker — raise it only when you truly need to scan more."),
+				),
 			),
-			handleSearch(sel, cfg, activity),
+			withAudit("mem_search", handleSearch(sel, cfg, activity)),
 		)
 	}
 
@@ -334,32 +340,7 @@ func registerTools(srv *server.MCPServer, sel BackendSelector, cfg MCPConfig, al
 				mcp.WithDestructiveHintAnnotation(false),
 				mcp.WithIdempotentHintAnnotation(false),
 				mcp.WithOpenWorldHintAnnotation(false),
-				mcp.WithDescription(`Save an important observation to persistent memory. Call this PROACTIVELY after completing significant work — don't wait to be asked.
-
-WHEN to save (call this after each of these):
-- Architectural decisions or tradeoffs
-- Bug fixes (what was wrong, why, how you fixed it)
-- New patterns or conventions established
-- Configuration changes or environment setup
-- Important discoveries or gotchas
-- File structure changes
-
-FORMAT for content — use this structured format:
-  **What**: [concise description of what was done]
-  **Why**: [the reasoning, user request, or problem that drove it]
-  **Where**: [files/paths affected, e.g. src/auth/middleware.ts, internal/store/store.go]
-  **Learned**: [any gotchas, edge cases, or decisions made — omit if none]
-
-TITLE should be short and searchable, like: "JWT auth middleware", "FTS5 query sanitization", "Fixed N+1 in user list"
-
-Examples:
-  title: "Switched from sessions to JWT"
-  type: "decision"
-  content: "**What**: Replaced express-session with jsonwebtoken for auth\n**Why**: Session storage doesn't scale across multiple instances\n**Where**: src/middleware/auth.ts, src/routes/login.ts\n**Learned**: Must set httpOnly and secure flags on the cookie, refresh tokens need separate rotation logic"
-
-  title: "Fixed FTS5 syntax error on special chars"
-  type: "bugfix"
-  content: "**What**: Wrapped each search term in quotes before passing to FTS5 MATCH\n**Why**: Users typing queries like 'fix auth bug' would crash because FTS5 interprets special chars as operators\n**Where**: internal/store/store.go — sanitizeFTS() function\n**Learned**: FTS5 MATCH syntax is NOT the same as LIKE — always sanitize user input"`),
+				mcp.WithDescription(memSaveDescription),
 				mcp.WithString("title",
 					mcp.Required(),
 					mcp.Description("Short, searchable title (e.g. 'JWT auth middleware', 'Fixed N+1 query')"),
@@ -395,7 +376,7 @@ Examples:
 					mcp.Description("Automatically capture the current user prompt when available (default: true). Set false for SDD artifacts or automated saves."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSave(sel, cfg, activity)),
+			withAudit("mem_save", queuedWriteHandler(writeQueue, handleSave(sel, cfg, activity))),
 		)
 	}
 
@@ -430,7 +411,7 @@ Examples:
 					mcp.Description("New topic key (normalized internally)"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleUpdate(sel, cfg)),
+			withAudit("mem_update", queuedWriteHandler(writeQueue, handleUpdate(sel, cfg))),
 		)
 	}
 
@@ -451,7 +432,7 @@ Examples:
 				mcp.WithString("observation_id", mcp.Description("Observation sync_id for action=mark_reviewed (from mem_search/mem_save/mem_get_observation results).")),
 				mcp.WithString("id", mcp.Description("Backward-compatible alias for observation_id.")),
 			),
-			queuedWriteHandler(writeQueue, handleReview(sel, cfg)),
+			withAudit("mem_review", queuedWriteHandler(writeQueue, handleReview(sel, cfg))),
 		)
 	}
 
@@ -476,7 +457,7 @@ Examples:
 					mcp.Description("Observation content used as fallback if title is empty"),
 				),
 			),
-			handleSuggestTopicKey(),
+			withAudit("mem_suggest_topic_key", handleSuggestTopicKey()),
 		)
 	}
 
@@ -499,7 +480,7 @@ Examples:
 					mcp.Description("If true, permanently deletes the observation"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleDelete(sel, cfg)),
+			withAudit("mem_delete", queuedWriteHandler(writeQueue, handleDelete(sel, cfg))),
 		)
 	}
 
@@ -530,7 +511,7 @@ Examples:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSavePrompt(sel, cfg, activity)),
+			withAudit("mem_save_prompt", queuedWriteHandler(writeQueue, handleSavePrompt(sel, cfg, activity))),
 		)
 	}
 
@@ -547,7 +528,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithString("id", mcp.Required(), mcp.Description("Observation sync_id to pin (from mem_search/mem_save/mem_get_observation results)")),
 			),
-			handlePin(sel, cfg, true),
+			withAudit("mem_pin", handlePin(sel, cfg, true)),
 		)
 	}
 	if shouldRegister("mem_unpin", allowlist) {
@@ -562,7 +543,7 @@ Examples:
 				mcp.WithOpenWorldHintAnnotation(false),
 				mcp.WithString("id", mcp.Required(), mcp.Description("Observation sync_id to unpin (from mem_search/mem_save/mem_get_observation results)")),
 			),
-			handlePin(sel, cfg, false),
+			withAudit("mem_unpin", handlePin(sel, cfg, false)),
 		)
 	}
 
@@ -584,7 +565,7 @@ Examples:
 				),
 				// JW7: limit param removed — schema advertised it but handleContext never read it.
 			),
-			handleContext(sel, cfg, activity),
+			withAudit("mem_context", handleContext(sel, cfg, activity)),
 		)
 	}
 
@@ -603,7 +584,7 @@ Examples:
 					mcp.Description("Project to echo in envelope context (omit for auto-detect; stats themselves are global aggregates)"),
 				),
 			),
-			handleStats(sel, cfg),
+			withAudit("mem_stats", handleStats(sel, cfg)),
 		)
 	}
 
@@ -632,7 +613,7 @@ Examples:
 					mcp.Description("Filter by project name (omit for auto-detect)"),
 				),
 			),
-			handleTimeline(sel, cfg),
+			withAudit("mem_timeline", handleTimeline(sel, cfg)),
 		)
 	}
 
@@ -651,7 +632,7 @@ Examples:
 					mcp.Description("The observation sync_id to retrieve (from mem_search/mem_save results)"),
 				),
 			),
-			handleGetObservation(sel, cfg),
+			withAudit("mem_get_observation", handleGetObservation(sel, cfg)),
 		)
 	}
 
@@ -714,7 +695,7 @@ GUIDELINES:
 					mcp.Description("Short-lived token returned by an ambiguous_project error. Required with project_choice_reason=user_selected_after_ambiguous_project."),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionSummary(sel, cfg, activity)),
+			withAudit("mem_session_summary", queuedWriteHandler(writeQueue, handleSessionSummary(sel, cfg, activity))),
 		)
 	}
 
@@ -737,7 +718,7 @@ GUIDELINES:
 					mcp.Description("Working directory"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionStart(sel, cfg, activity)),
+			withAudit("mem_session_start", queuedWriteHandler(writeQueue, handleSessionStart(sel, cfg, activity))),
 		)
 	}
 
@@ -760,7 +741,7 @@ GUIDELINES:
 					mcp.Description("Summary of what was accomplished"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleSessionEnd(sel, cfg, activity)),
+			withAudit("mem_session_end", queuedWriteHandler(writeQueue, handleSessionEnd(sel, cfg, activity))),
 		)
 	}
 
@@ -790,7 +771,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("Source identifier (e.g. 'subagent-stop', 'session-end')"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleCapturePassive(sel, cfg, activity)),
+			withAudit("mem_capture_passive", queuedWriteHandler(writeQueue, handleCapturePassive(sel, cfg, activity))),
 		)
 	}
 
@@ -814,7 +795,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 					mcp.Description("The canonical project name to merge INTO (e.g. 'engram')"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleMergeProjects(sel)),
+			withAudit("mem_merge_projects", queuedWriteHandler(writeQueue, handleMergeProjects(sel))),
 		)
 	}
 
@@ -829,7 +810,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithIdempotentHintAnnotation(true),
 				mcp.WithOpenWorldHintAnnotation(false),
 			),
-			handleCurrentProject(sel, cfg),
+			withAudit("mem_current_project", handleCurrentProject(sel, cfg)),
 		)
 	}
 
@@ -847,7 +828,7 @@ Duplicates are automatically detected and skipped — safe to call multiple time
 				mcp.WithString("project", mcp.Description("Project to diagnose (omit for auto-detect)")),
 				mcp.WithString("check", mcp.Description("Optional diagnostic check code to run")),
 			),
-			handleDoctor(sel, cfg),
+			withAudit("mem_doctor", handleDoctor(sel, cfg)),
 		)
 	}
 
@@ -901,7 +882,7 @@ Re-judging an already-judged ID overwrites the verdict (deliberate revision).`),
 					mcp.Description("Session ID for provenance (default: auto)"),
 				),
 			),
-			queuedWriteHandler(writeQueue, handleJudge(sel, activity)),
+			withAudit("mem_judge", queuedWriteHandler(writeQueue, handleJudge(sel, activity))),
 		)
 	}
 
@@ -958,7 +939,7 @@ ERROR: Returns IsError=true if IDs are unknown, relation is invalid, or cross-pr
 					mcp.Description("Your model identifier for provenance (e.g. \"claude-haiku-4-5\")"),
 				),
 			),
-			handleCompare(sel, cfg, activity),
+			withAudit("mem_compare", handleCompare(sel, cfg, activity)),
 		)
 	}
 }
@@ -1004,6 +985,9 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 		matchMode, _ := req.GetArguments()["match_mode"].(string)
 		allProjects := boolArg(req, "all_projects", false)
 		limit := intArg(req, "limit", 10)
+		// R3a: 0 (or absent/negative) means "use the default index budget" —
+		// FormatSearchIndex/searchIndexEntries owns that default.
+		budget := intArg(req, "budget", 0)
 
 		// Validate match_mode before any project resolution or DB work.
 		if matchMode != "" && matchMode != "all" && matchMode != "any" {
@@ -1085,44 +1069,28 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 			// Errors from relation loading are swallowed — search must not fail.
 		}
 
+		// R3a: results render as a budgeted reference-first INDEX (one line per
+		// hit: title + first-sentence summary + id + token cost) instead of
+		// per-hit bodies. The agent scans the index and expands deliberately via
+		// mem_get_observation. Entry lines come from searchIndexEntries (shared
+		// with the exported FormatSearchIndex, which eval/runner/l1.go measures)
+		// so budgeting lives in exactly one place; handleSearch interleaves its
+		// per-hit relation annotations after each entry line.
+		indexLines := searchIndexEntries(results, budget)
+
 		var b strings.Builder
 		fmt.Fprintf(&b, "Found %d memories:\n\n", len(results))
-		anyTruncated := false
-		structuredResults := make([]map[string]any, 0, len(results))
+		structuredResults := make([]map[string]any, 0, len(indexLines))
 		for i, r := range results {
-			projectDisplay := ""
-			if r.Project != nil {
-				projectDisplay = fmt.Sprintf(" | project: %s", *r.Project)
+			// The budget bounds the WHOLE agent-visible payload: hits beyond it
+			// ship neither an index line nor a structured entry. The omission
+			// marker emitted below tells the agent how to see the rest (raise
+			// budget or refine query), so nothing is silently lost.
+			if i >= len(indexLines) {
+				continue
 			}
-			preview := truncate(r.Content, 300)
-			if len(r.Content) > 300 {
-				anyTruncated = true
-				preview += " [preview]"
-			}
-			stateDisplay := ""
-			if r.State() == store.ObservationStateNeedsReview {
-				stateDisplay = " | state: needs_review"
-			}
-			fmt.Fprintf(&b, "[%d] #%d (%s) — %s\n    %s\n    %s%s | scope: %s%s\n",
-				i+1, r.ID, r.Type, r.Title,
-				preview,
-				timeutil.FormatLocal(r.CreatedAt), projectDisplay, r.Scope, stateDisplay)
-			entry := map[string]any{
-				"id":      r.ID,
-				"sync_id": r.SyncID,
-				"title":   r.Title,
-				"type":    r.Type,
-				"state":   r.State(),
-				"scope":   r.Scope,
-				"pinned":  r.Pinned,
-			}
-			if r.Project != nil {
-				entry["project"] = *r.Project
-			}
-			if r.ReviewAfter != nil {
-				entry["review_after"] = *r.ReviewAfter
-			}
-			structuredResults = append(structuredResults, entry)
+			b.WriteString(indexLines[i])
+			structuredResults = append(structuredResults, searchResultEntry(r))
 
 			// Append relation annotations. Skip orphaned (filtered by store).
 			//
@@ -1169,11 +1137,11 @@ func handleSearch(sel BackendSelector, cfg MCPConfig, activity *SessionActivity)
 					}
 				}
 			}
-			b.WriteString("\n")
 		}
-		if anyTruncated {
-			fmt.Fprintf(&b, "---\nResults above are previews (300 chars). To read the full content of a specific memory, call mem_get_observation(id: <ID>).\n")
+		if len(indexLines) < len(results) {
+			b.WriteString(searchOmissionLine(len(results) - len(indexLines)))
 		}
+		b.WriteString("---\nIndex only: title + summary + id per hit. Call mem_get_observation(id: <ID>) for the full body of the ones you actually need.\n")
 
 		if nudge := activity.NudgeIfNeeded(sessionID); nudge != "" {
 			b.WriteString(nudge)
@@ -1768,6 +1736,10 @@ func handleContext(sel BackendSelector, cfg MCPConfig, activity *SessionActivity
 			projects = "none"
 		}
 
+		// contextByteCap (internal/store) bounds contextResult — the rendered
+		// block — only; this stats/nudge tail is uncapped and is NOT part of the
+		// L2 context measurement (eval/tokenmeter.ContextTokens measures the
+		// block, not this envelope).
 		result := fmt.Sprintf("%s\n---\nMemory stats: %d sessions, %d observations across projects: %s",
 			contextResult, stats.TotalSessions, stats.TotalObservations, projects)
 
