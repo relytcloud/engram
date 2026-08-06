@@ -63,6 +63,12 @@ engram memorylake status                          # 查看各 project 当前后�
 engram memorylake disable --project <project名>   # 改回本地 SQLite
 ```
 
+## 三、架构总览
+
+![Engram + MemoryLake 架构](images/engram-memorylake-arch.svg)
+
+数据流:agent → engram 接口层(MCP / HTTP / CLI / TUI)→ 按 project 路由 → 本地 SQLite(默认、真源)或云端 MemoryLake(仅已 enable 的 project)。enable 列表变更即热重载,运行中的 session 无需重启;`ENGRAM_BACKEND=sqlite` 可强制全部走本地。
+
 ## 参考
 
 完整安装方式(手动安装、源码编译、Windows)、升级说明、API / CLI / 环境变量:见仓库根 `DOCS.md` 与 [Releases](https://github.com/relytcloud/engram/releases)。

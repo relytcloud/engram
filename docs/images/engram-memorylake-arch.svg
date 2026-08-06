@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 620" role="img" aria-label="Engram 架构:各类 agent 通过 MCP、HTTP、CLI、TUI 进入 engram 二进制,BackendSelector 按 project 把调用路由到本地 SQLite(默认)或云端 MemoryLake(已 enable 的 project),enable 列表文件每次调用检测变更并热重载">
+  <style>
+    text { font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+    .box { fill: #ffffff; stroke: #ccd3d2; stroke-width: 1.1; }
+    .frame { fill: #eef0ee; stroke: #ccd3d2; stroke-width: 1.2; }
+    .box-cloud { fill: #e9f3f1; stroke: #0c7a70; stroke-width: 1.3; }
+    .box-local { fill: #f5eedf; stroke: #91621c; stroke-width: 1.3; }
+    .box-inner-cloud { fill: #ffffff; stroke: #7fb5ae; stroke-width: 1; }
+    .t   { font-size: 13px; font-weight: 650; fill: #222b2e; }
+    .t-lg{ font-size: 14.5px; font-weight: 700; fill: #222b2e; }
+    .s   { font-size: 11.5px; fill: #5d6b6f; }
+    .m   { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; fill: #5d6b6f; }
+    .m-ink { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px; fill: #222b2e; font-weight: 600; }
+    .lab { font-size: 11px; fill: #5d6b6f; }
+    .lab-teal  { font-size: 11px; fill: #0c7a70; font-weight: 600; }
+    .lab-ochre { font-size: 11px; fill: #91621c; font-weight: 600; }
+    .edge       { stroke: #5d6b6f; stroke-width: 1.3; fill: none; }
+    .edge-teal  { stroke: #0c7a70; stroke-width: 1.6; fill: none; }
+    .edge-ochre { stroke: #91621c; stroke-width: 1.6; fill: none; }
+    .edge-dash  { stroke-dasharray: 5 4; }
+    .boundary   { stroke: #5d6b6f; stroke-width: 1; stroke-dasharray: 3 5; fill: none; }
+  </style>
+
+  <rect width="1240" height="620" fill="#f6f7f5"/>
+
+  <defs>
+    <marker id="ah" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="#5d6b6f"/>
+    </marker>
+    <marker id="ah-teal" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="#0c7a70"/>
+    </marker>
+    <marker id="ah-ochre" markerWidth="9" markerHeight="8" refX="7.5" refY="4" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="#91621c"/>
+    </marker>
+  </defs>
+
+  <!-- ═══ 左列:客户端 ═══ -->
+  <text x="24" y="66" class="lab" style="letter-spacing:.14em">AGENTS / 客户端</text>
+  <rect class="box" x="24" y="80" width="196" height="72" rx="7"/>
+  <text x="122" y="104" class="t" text-anchor="middle">Claude Code · Codex</text>
+  <text x="122" y="121" class="t" text-anchor="middle">Gemini · Cursor …</text>
+  <text x="122" y="139" class="s" text-anchor="middle">MCP 客户端</text>
+
+  <rect class="box" x="24" y="176" width="196" height="56" rx="7"/>
+  <text x="122" y="199" class="t" text-anchor="middle">OpenCode 插件 · Pi 扩展</text>
+  <text x="122" y="217" class="s" text-anchor="middle">HTTP 客户端(会话跟踪)</text>
+
+  <rect class="box" x="24" y="268" width="196" height="104" rx="7"/>
+  <text x="122" y="308" class="t" text-anchor="middle">开发者终端</text>
+  <text x="122" y="327" class="s" text-anchor="middle">CLI / TUI</text>
+
+  <!-- 客户端 → 接口 -->
+  <line class="edge" x1="220" y1="116" x2="266" y2="116" marker-end="url(#ah)"/>
+  <text x="243" y="108" class="lab" text-anchor="middle">stdio</text>
+  <line class="edge" x1="220" y1="196" x2="266" y2="190" marker-end="url(#ah)"/>
+  <text x="243" y="182" class="lab" text-anchor="middle">HTTP</text>
+  <line class="edge" x1="220" y1="300" x2="266" y2="262" marker-end="url(#ah)"/>
+  <line class="edge" x1="220" y1="340" x2="266" y2="334" marker-end="url(#ah)"/>
+
+  <!-- ═══ engram 二进制 ═══ -->
+  <rect class="frame" x="252" y="40" width="322" height="352" rx="10"/>
+  <text x="270" y="66" class="t-lg">engram</text>
+  <text x="330" y="66" class="s">单一 Go 二进制 · CGO_ENABLED=0</text>
+
+  <rect class="box" x="270" y="88" width="288" height="56" rx="6"/>
+  <text x="284" y="111" class="t">MCP server(stdio)</text>
+  <text x="284" y="130" class="m">mem_save · mem_search · mem_context …</text>
+
+  <rect class="box" x="270" y="162" width="288" height="56" rx="6"/>
+  <text x="284" y="185" class="t">HTTP API — engram serve</text>
+  <text x="284" y="204" class="m">127.0.0.1:7437(仅本机)</text>
+
+  <rect class="box" x="270" y="234" width="288" height="56" rx="6"/>
+  <text x="284" y="257" class="t">CLI</text>
+  <text x="284" y="276" class="m">save · search · sync · memorylake …</text>
+
+  <rect class="box" x="270" y="306" width="288" height="56" rx="6"/>
+  <text x="284" y="329" class="t">TUI(Bubbletea)</text>
+  <text x="284" y="348" class="s">不经路由,始终读写本地 SQLite</text>
+
+  <!-- 接口 → 路由 -->
+  <line class="edge" x1="558" y1="116" x2="634" y2="140" marker-end="url(#ah)"/>
+  <line class="edge" x1="558" y1="190" x2="634" y2="168" marker-end="url(#ah)"/>
+  <line class="edge" x1="558" y1="262" x2="634" y2="198" marker-end="url(#ah)"/>
+
+  <!-- ═══ 路由 ═══ -->
+  <rect class="box" x="640" y="96" width="216" height="136" rx="8"/>
+  <text x="748" y="126" class="t-lg" text-anchor="middle">BackendSelector</text>
+  <text x="748" y="148" class="s" text-anchor="middle">按 project 选择后端</text>
+  <text x="748" y="170" class="m" text-anchor="middle">cmd/engram/routing.go</text>
+  <text x="748" y="196" class="s" text-anchor="middle">安全阀 ENGRAM_BACKEND=sqlite</text>
+  <text x="748" y="214" class="s" text-anchor="middle">→ 无视 enable,全部本地</text>
+
+  <!-- 配置文件 + 热重载 -->
+  <rect class="box" x="270" y="432" width="288" height="80" rx="6"/>
+  <text x="284" y="456" class="m-ink">~/.engram/memorylake.json</text>
+  <text x="284" y="477" class="s">connection:API key · base_url</text>
+  <text x="284" y="496" class="s">enabled_projects:project → proj_id</text>
+  <path class="edge-teal edge-dash" d="M 558 452 L 690 240" marker-end="url(#ah-teal)"/>
+  <text x="586" y="330" class="lab-teal">每次调用 stat(mtime+size)</text>
+  <text x="586" y="347" class="lab-teal">变更即热重载 — enable 即时生效</text>
+
+  <!-- ═══ 本地 SQLite ═══ -->
+  <rect class="box-local" x="640" y="336" width="216" height="176" rx="8"/>
+  <text x="748" y="366" class="t-lg" text-anchor="middle">internal/store</text>
+  <text x="748" y="388" class="s" text-anchor="middle">SQLite + FTS5 — 记忆真源</text>
+  <text x="748" y="412" class="m" text-anchor="middle">~/.engram/engram.db</text>
+  <text x="748" y="440" class="s" text-anchor="middle">BM25 精确检索 · 去重</text>
+  <text x="748" y="458" class="s" text-anchor="middle">topic_key 原地 upsert</text>
+  <text x="748" y="482" class="s" text-anchor="middle">软删除 · 会话 · 时间线</text>
+
+  <line class="edge-ochre" x1="748" y1="232" x2="748" y2="330" marker-end="url(#ah-ochre)"/>
+  <text x="760" y="270" class="lab-ochre">未 enable(默认)</text>
+  <text x="760" y="287" class="lab-ochre">或解析失败时回退</text>
+
+  <line class="edge-ochre edge-dash" x1="558" y1="334" x2="634" y2="368" marker-end="url(#ah-ochre)"/>
+  <text x="568" y="358" class="lab-ochre">TUI 直连</text>
+
+  <!-- ═══ 本机 / 云端边界 ═══ -->
+  <line class="boundary" x1="892" y1="28" x2="892" y2="592"/>
+  <text x="880" y="42" class="lab" text-anchor="end">本机</text>
+  <text x="904" y="42" class="lab">云端</text>
+
+  <!-- 路由 → MemoryLake -->
+  <line class="edge-teal" x1="856" y1="140" x2="914" y2="140" marker-end="url(#ah-teal)"/>
+  <text x="885" y="112" class="lab-teal" text-anchor="middle">已 enable 的 project</text>
+  <text x="885" y="128" class="lab-teal" text-anchor="middle">HTTPS · Bearer sk_…</text>
+
+  <!-- ═══ MemoryLake ═══ -->
+  <rect class="box-cloud" x="920" y="48" width="296" height="512" rx="10"/>
+  <text x="940" y="80" class="t-lg">MemoryLake</text>
+  <text x="940" y="102" class="m">app.memorylake.cn/openapi/memorylake</text>
+
+  <rect class="box-inner-cloud" x="940" y="122" width="256" height="60" rx="6"/>
+  <text x="954" y="146" class="t">租户(tenant)</text>
+  <text x="954" y="165" class="s">由 API key 决定 · 如「质变科技」团队</text>
+  <line class="edge" x1="1068" y1="182" x2="1068" y2="200" marker-end="url(#ah)"/>
+
+  <rect class="box-inner-cloud" x="940" y="204" width="256" height="48" rx="6"/>
+  <text x="954" y="224" class="t">workspace</text>
+  <text x="1042" y="224" class="m-ink">engram</text>
+  <line class="edge" x1="1068" y1="252" x2="1068" y2="270" marker-end="url(#ah)"/>
+
+  <rect class="box-inner-cloud" x="940" y="274" width="256" height="60" rx="6"/>
+  <text x="954" y="298" class="t">project(每个 engram project 一个)</text>
+  <text x="954" y="317" class="s">proj_id 缓存于 memorylake.json</text>
+  <line class="edge" x1="1068" y1="334" x2="1068" y2="352" marker-end="url(#ah)"/>
+
+  <rect class="box-inner-cloud" x="940" y="356" width="256" height="46" rx="6"/>
+  <text x="954" y="384" class="t">V3 facts(记忆)</text>
+
+  <line x1="940" y1="428" x2="1196" y2="428" stroke="#ccd3d2" stroke-width="1"/>
+  <text x="940" y="452" class="lab" style="letter-spacing:.12em">调用语义</text>
+  <text x="940" y="476" class="s"><tspan class="m-ink">mem_save</tspan> → 逐字直写 fact,立即可检索</text>
+  <text x="940" y="497" class="s">(不去重 · topic_key 不再原地更新)</text>
+  <text x="940" y="518" class="s"><tspan class="m-ink">mem_search</tspan> → 语义(向量)检索</text>
+  <text x="940" y="539" class="s"><tspan class="m-ink">prompt</tspan> → 会话追加;首次 enable → 幂等迁移</text>
+</svg>
