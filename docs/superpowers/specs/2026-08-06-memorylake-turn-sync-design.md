@@ -307,9 +307,9 @@ if b.skipPromptAppend {
 
 | flag | 来源 | 为什么不能省 |
 |---|---|---|
-| `--session <id>` | `.session_id` | conversation 的 `custom_id`。transcript 每行也有 `sessionId`，但 `--resume` / `/clear` 后 Claude Code 会改写归属关系，以 hook 给的为准更可靠。缺失时回退到 transcript 末行的 `sessionId`；两者都无则放弃 |
-| `--transcript <path>` | `.transcript_path` | 目录名那个 slug 是 Claude Code 把 cwd 做转写得来的（`/Users/x/engram` → `-Users-x-engram`），转写规则属于其内部实现，在 engram 里复刻一份就是在赌它永不改 |
-| `--cwd <dir>` | `.cwd` | ① hook 子进程的工作目录由 Claude Code 决定，`os.Getwd()` 不可靠。② **不能在 bash 里算项目名**：`_helpers.sh` 的 `detect_project()` 只看 git remote 和目录名，而 Go 的 `DetectProjectFull` 会优先读 `.engram/config` 里的项目名（本仓库正走此路径）。bash 算出的名字遇到用 config 改过名的项目就会与 MCP 侧不一致，开关查表查空，功能静默失效 |
+| `--session <id>`（可选） | `.session_id` | conversation 的 `custom_id`。transcript 每行也有 `sessionId`，但 `--resume` / `/clear` 后 Claude Code 会改写归属关系，以 hook 给的为准更可靠。**未传时回退**到 transcript 末行的 `sessionId`（手工调用时的便利路径）；两者都无则放弃该轮。hook 脚本自己保证非空，所以在 CLI 层不做必填校验 |
+| `--transcript <path>`（必填） | `.transcript_path` | 目录名那个 slug 是 Claude Code 把 cwd 做转写得来的（`/Users/x/engram` → `-Users-x-engram`），转写规则属于其内部实现，在 engram 里复刻一份就是在赌它永不改 |
+| `--cwd <dir>`（可选） | `.cwd` | ① hook 子进程的工作目录由 Claude Code 决定，`os.Getwd()` 不可靠。② **不能在 bash 里算项目名**：`_helpers.sh` 的 `detect_project()` 只看 git remote 和目录名，而 Go 的 `DetectProjectFull` 会优先读 `.engram/config` 里的项目名（本仓库正走此路径）。bash 算出的名字遇到用 config 改过名的项目就会与 MCP 侧不一致，开关查表查空，功能静默失效 |
 | `--verbose`（可选） | — | 打印一行 `appended turn to conversation <session-id> (message <id>, <n> bytes)`，供手工验证 |
 
 flag 手工解析，与仓库其他子命令一致（无 flag 框架）。
@@ -318,7 +318,7 @@ flag 手工解析，与仓库其他子命令一致（无 flag 框架）。
 
 | 情形 | 退出码 |
 |---|---|
-| 用法错误（缺 `--session` / `--transcript`、未知 flag） | **2** + usage 到 stderr |
+| 用法错误（缺 `--transcript`、未知 flag） | **2** + usage 到 stderr |
 | 一切运行时情况（安全阀生效、项目未开启、transcript 缺失、解析失败、网络失败、云端 5xx、写入成功） | **0** |
 
 用法错误报非零、运行时一律零，这个划分是刻意的：hook 脚本自己会 `|| true` 吞掉退出码，所以对用法错误报非零不会打扰用户；而手工调试时把 `--transcirpt` 拼错却静默返回 0，是会浪费掉半小时的那种坑。
