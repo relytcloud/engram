@@ -26,6 +26,29 @@ const turnUsageExitCode = 2
 // budget.
 const defaultTurnMaxBytes = 32768
 
+// defaultTurnRequestTimeoutMS caps how long any single MemoryLake round trip
+// (workspace resolution, actor binding, conversation create, message post) may
+// take on the `engram turn` path specifically. The general
+// ENGRAM_MEMORYLAKE_TIMEOUT_MS default (30s, see internal/memorylake/config.go)
+// is sized for interactive `mem_save` calls; a Stop hook firing after every
+// single turn cannot afford to wait that long per request when MemoryLake is
+// slow or half-dead, so this path clamps down to a tighter ceiling regardless
+// of what is configured globally.
+const defaultTurnRequestTimeoutMS = 10000
+
+// defaultTurnWatchdogMS bounds the wall-clock lifetime of the whole `engram
+// turn` process. NewBackend and AppendTurn together are ~4 sequential HTTP
+// round trips; even with defaultTurnRequestTimeoutMS clamping each one, a
+// pathological string of near-timeout requests could still run for minutes.
+// Because Task 8 wires this command to fire after every completed turn, a
+// slow or unreachable MemoryLake could otherwise leave dozens of these
+// processes alive across a long session. The watchdog is a hard backstop:
+// once it fires the process exits 0 (not 1) because, per this command's exit
+// contract, a watchdog timeout is a runtime outcome like any other — network
+// failure, missing transcript, disabled project — none of which may surface
+// as a non-zero exit to the hook that invoked it.
+const defaultTurnWatchdogMS = 45000
+
 func printTurnUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram turn --transcript <path> [--session <id>] [--cwd <dir>] [--verbose]")
 }
@@ -40,23 +63,41 @@ func cmdTurn() {
 		return
 	}
 
+	// Hard watchdog: fires regardless of where cmdTurn is blocked. Exits 0
+	// because a watchdog timeout is a runtime outcome, not a usage error — see
+	// defaultTurnWatchdogMS.
+	if d := turnWatchdogTimeout(); d > 0 {
+		time.AfterFunc(d, func() { os.Exit(0) })
+	}
+
 	// Global safety valve: honored before anything else so it is impossible for
 	// this path to reach MemoryLake while the valve is closed.
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("ENGRAM_BACKEND")), "sqlite") {
 		return
 	}
 
-	project := detectProject(cwd)
-
+	// Read the enablement file before doing anything project-specific.
+	// detectProject shells out to git (up to twice, internal/project/detect.go),
+	// and this command runs after every single turn for every user — including
+	// the overwhelming majority who never enabled MemoryLake at all. Spending
+	// those forks before knowing whether *any* project has the switch on would
+	// defeat the whole point of this being a cheap no-op on the common path.
 	enab, err := loadMemorylakeEnablement(memorylake.DefaultEnablementPath())
 	if err != nil {
-		logTurnFailure(project, sessionID, fmt.Errorf("load enablement: %w", err))
+		logTurnFailure("", sessionID, fmt.Errorf("load enablement: %w", err))
 		return
 	}
+	if !anyConversationSyncEnabled(enab) {
+		// The overwhelmingly common case. No project has ever asked for this,
+		// so nothing has been detected, opened, dialed, or logged.
+		return
+	}
+
+	project := detectProject(cwd)
+
 	entry, enabled := enab.IsEnabled(project)
 	if !enabled || !entry.SyncConversations {
-		// The overwhelmingly common case. Nothing has been opened, nothing has
-		// been dialed, nothing has been logged.
+		// Some other project has the switch on, but not this one.
 		return
 	}
 	if entry.ProjID == "" {
@@ -85,6 +126,7 @@ func cmdTurn() {
 	}
 
 	mlCfg := loadMemorylakeConfig()
+	mlCfg = clampTurnRequestTimeout(mlCfg)
 	backend, err := memorylake.NewBackend(mlCfg, mlCfg.Workspace, entry.ProjID)
 	if err != nil {
 		logTurnFailure(project, sessionID, fmt.Errorf("construct backend: %w", err))
@@ -100,6 +142,37 @@ func cmdTurn() {
 	if verbose {
 		fmt.Printf("appended turn to conversation %s (message %s, %d bytes)\n", sessionID, msgID, len(content))
 	}
+}
+
+// anyConversationSyncEnabled reports whether at least one project in enab has
+// per-turn conversation sync turned on. It exists so cmdTurn can decide,
+// without calling detectProject, whether spending the git-shellout cost of
+// project detection is worth it at all: when the answer is no for every
+// project, it is no for this one either.
+func anyConversationSyncEnabled(enab *memorylake.Enablement) bool {
+	if enab == nil {
+		return false
+	}
+	for _, entry := range enab.EnabledProjects {
+		if entry.SyncConversations {
+			return true
+		}
+	}
+	return false
+}
+
+// clampTurnRequestTimeout lowers cfg.TimeoutMS to turnRequestTimeoutLimit()
+// when it is unset or larger, so a generously configured (or default, 30s)
+// ENGRAM_MEMORYLAKE_TIMEOUT_MS cannot make a single MemoryLake round trip on
+// this hook-driven path run longer than that limit. It never raises the
+// timeout — a caller who configured something tighter than the limit keeps
+// their tighter value.
+func clampTurnRequestTimeout(cfg memorylake.Config) memorylake.Config {
+	limit := turnRequestTimeoutLimit()
+	if cfg.TimeoutMS <= 0 || cfg.TimeoutMS > limit {
+		cfg.TimeoutMS = limit
+	}
+	return cfg
 }
 
 // parseTurnArgs reads the flags by hand, matching every other subcommand in
@@ -153,6 +226,33 @@ func turnMaxBytes() int {
 	return defaultTurnMaxBytes
 }
 
+// turnRequestTimeoutLimit reads the per-request timeout ceiling used by
+// clampTurnRequestTimeout from ENGRAM_TURN_REQUEST_TIMEOUT_MS, tolerating
+// garbage the same way turnMaxBytes does.
+func turnRequestTimeoutLimit() int {
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_TURN_REQUEST_TIMEOUT_MS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultTurnRequestTimeoutMS
+}
+
+// turnWatchdogTimeout reads the whole-process deadline from
+// ENGRAM_TURN_WATCHDOG_MS, tolerating garbage the same way turnMaxBytes does.
+// A non-positive result disables the watchdog entirely (not used by any
+// current caller, but keeps the helper's contract honest for callers that
+// might want to opt out).
+func turnWatchdogTimeout() time.Duration {
+	ms := defaultTurnWatchdogMS
+	if v := strings.TrimSpace(os.Getenv("ENGRAM_TURN_WATCHDOG_MS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ms = n
+		}
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 // logTurnFailure appends one line to ~/.engram/logs/turn.log.
 //
 // Per-turn sync is fire-and-forget: a failure is never retried and never
@@ -183,6 +283,10 @@ func logTurnFailure(project, sessionID string, cause error) {
 	}
 	defer f.Close()
 
-	fmt.Fprintf(f, "%s project=%s session=%s error=%v\n",
-		time.Now().UTC().Format(time.RFC3339), project, sessionID, cause)
+	// %q on the error, not %v: an error whose message embeds a newline (an
+	// HTTP response body echoed back into it, for one) would otherwise split
+	// one failure across multiple lines in a file whose entire format is one
+	// line per failure.
+	fmt.Fprintf(f, "%s project=%s session=%s error=%q\n",
+		time.Now().UTC().Format(time.RFC3339), project, sessionID, cause.Error())
 }

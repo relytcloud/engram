@@ -213,6 +213,142 @@ func TestCmdTurnEnabledBackendButConversationSyncOffMakesNoCall(t *testing.T) {
 	captureOutput(t, func() { cmdTurn() })
 }
 
+// TestCmdTurnNoProjectEnabledSkipsDetectProject proves the fix for the review
+// finding that detectProject (which shells out to git up to twice) used to run
+// before the enablement file was even consulted. With no project anywhere in
+// the enablement file having conversation sync on, detectProject must never
+// be called at all.
+func TestCmdTurnNoProjectEnabledSkipsDetectProject(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	seedTurnEnablement(t, "acme", false)
+	srv := failingMemoryLake(t)
+	defer srv.Close()
+	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
+	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+
+	var called bool
+	oldDetectProject := detectProject
+	detectProject = func(string) string {
+		called = true
+		return "acme"
+	}
+	t.Cleanup(func() { detectProject = oldDetectProject })
+
+	transcript := writeTurnTranscript(t, "sess-1")
+	withArgs(t, "engram", "turn", "--session", "sess-1", "--transcript", transcript, "--cwd", t.TempDir())
+
+	captureOutput(t, func() { cmdTurn() })
+
+	if called {
+		t.Fatal("detectProject must not be called when no project has conversation sync enabled")
+	}
+}
+
+// TestCmdTurnNoProjectEnabledCreatesNoLogFile proves the not-enabled path is
+// silent on disk too, not just over the network: the existing "no network"
+// tests only prove no socket was opened.
+func TestCmdTurnNoProjectEnabledCreatesNoLogFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	seedTurnEnablement(t, "acme", false)
+
+	transcript := writeTurnTranscript(t, "sess-1")
+	withArgs(t, "engram", "turn", "--session", "sess-1", "--transcript", transcript, "--cwd", t.TempDir())
+
+	captureOutput(t, func() { cmdTurn() })
+
+	logPath := filepath.Join(home, ".engram", "logs", "turn.log")
+	if _, err := os.Stat(logPath); err == nil {
+		t.Fatalf("the not-enabled path must not create %s", logPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error checking %s: %v", logPath, err)
+	}
+}
+
+// TestCmdTurnIncompleteTurnExitsZeroWithoutUploadOrLog covers Turn.Merged
+// returning ok=false: a user message with no assistant reply yet (the turn
+// was interrupted, or is tool-only). This is routine, not a failure, so it
+// must not reach MemoryLake and must not be logged.
+func TestCmdTurnIncompleteTurnExitsZeroWithoutUploadOrLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	seedTurnEnablement(t, "acme", true)
+	srv := failingMemoryLake(t)
+	defer srv.Close()
+	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
+	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+
+	p := filepath.Join(t.TempDir(), "transcript.jsonl")
+	line := `{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"fix the uploader"}}` + "\n"
+	if err := os.WriteFile(p, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	withArgs(t, "engram", "turn", "--session", "sess-1", "--transcript", p, "--cwd", turnProjectDir(t, "acme"))
+
+	captureOutput(t, func() { cmdTurn() })
+
+	logPath := filepath.Join(home, ".engram", "logs", "turn.log")
+	if _, err := os.Stat(logPath); err == nil {
+		t.Fatalf("an incomplete turn is routine and must not be logged to %s", logPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected error checking %s: %v", logPath, err)
+	}
+}
+
+// TestCmdTurnEnabledEntryWithEmptyProjIDMakesNoCall covers a project enabled
+// by an older engram build that never persisted a resolved MemoryLake project
+// id: cmdTurn must leave it for the next mem_save rather than dialing out.
+func TestCmdTurnEnabledEntryWithEmptyProjIDMakesNoCall(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	path := memorylake.DefaultEnablementPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
+		"acme": {ProjID: "", EnabledAt: "2026-08-06T00:00:00Z", SyncConversations: true},
+	}}
+	if err := e.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := failingMemoryLake(t)
+	defer srv.Close()
+	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
+	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+
+	transcript := writeTurnTranscript(t, "sess-1")
+	withArgs(t, "engram", "turn", "--session", "sess-1", "--transcript", transcript, "--cwd", turnProjectDir(t, "acme"))
+
+	captureOutput(t, func() { cmdTurn() })
+}
+
+// TestClampTurnRequestTimeoutCapsAnOverlyGenerousConfig proves the fix for the
+// review finding that a slow MemoryLake could otherwise keep this hook-driven
+// path alive for up to ENGRAM_MEMORYLAKE_TIMEOUT_MS (default 30s) per request.
+func TestClampTurnRequestTimeoutCapsAnOverlyGenerousConfig(t *testing.T) {
+	t.Setenv("ENGRAM_TURN_REQUEST_TIMEOUT_MS", "")
+
+	cfg := memorylake.Config{TimeoutMS: 999999}
+	got := clampTurnRequestTimeout(cfg)
+	if got.TimeoutMS != defaultTurnRequestTimeoutMS {
+		t.Fatalf("TimeoutMS = %d, want clamped to %d", got.TimeoutMS, defaultTurnRequestTimeoutMS)
+	}
+}
+
+// TestClampTurnRequestTimeoutKeepsATighterConfig proves the clamp only lowers,
+// never raises: a caller who configured something tighter than the limit
+// keeps their tighter value.
+func TestClampTurnRequestTimeoutKeepsATighterConfig(t *testing.T) {
+	t.Setenv("ENGRAM_TURN_REQUEST_TIMEOUT_MS", "")
+
+	cfg := memorylake.Config{TimeoutMS: 500}
+	got := clampTurnRequestTimeout(cfg)
+	if got.TimeoutMS != 500 {
+		t.Fatalf("TimeoutMS = %d, want unchanged 500", got.TimeoutMS)
+	}
+}
+
 // seedTurnEnablement writes $HOME/.engram/memorylake.json with project enabled
 // for the MemoryLake backend and conversation sync set to syncOn.
 func seedTurnEnablement(t *testing.T, project string, syncOn bool) {
