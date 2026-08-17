@@ -112,9 +112,17 @@ scan:
 			if e.IsMeta {
 				continue
 			}
-			if txt := cleanUserText(rawText(e.Message.Content)); txt != "" {
-				userParts = append([]string{txt}, userParts...)
+			txt := cleanUserText(rawText(e.Message.Content))
+			if txt == "" {
+				// A wrapper-only entry (e.g. a bare
+				// <local-command-stdout>...</local-command-stdout> from a
+				// slash command like /login) is machine-injected output, not
+				// human input. It must not be mistaken for the turn
+				// boundary, or the real human message above it is never
+				// reached and the turn comes back with no UserText at all.
+				continue
 			}
+			userParts = append([]string{txt}, userParts...)
 			// A real human message starts this turn — stop here.
 			break scan
 		}
@@ -152,10 +160,17 @@ func readLines(path string) ([]string, error) {
 		if window > st.Size() {
 			window = st.Size()
 		}
-		if _, err := f.Seek(st.Size()-window, io.SeekStart); err != nil {
-			return nil, err
+		offset := st.Size() - window
+		if offset > 0 {
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				return nil, err
+			}
+			// The seek landed inside the file, almost certainly mid-line —
+			// the window's first captured line is a truncated fragment, not
+			// a real entry, so it must be dropped. When offset is 0 the
+			// window covers the whole file and nothing was cut.
+			dropFirst = true
 		}
-		dropFirst = true
 	}
 
 	br := bufio.NewReaderSize(f, 256*1024)
@@ -239,6 +254,7 @@ func hasBlockType(raw json.RawMessage, want string) bool {
 var wrapperTags = []string{
 	"command-message",
 	"command-name",
+	"command-args",
 	"system-reminder",
 	"local-command-stdout",
 }

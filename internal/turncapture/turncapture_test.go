@@ -3,6 +3,7 @@ package turncapture
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -148,6 +149,41 @@ func TestLastTurnSkipsSidechainEntries(t *testing.T) {
 	}
 }
 
+// TestLastTurnSkipsWrapperOnlyUserEntry covers a real, observed shape: a
+// standalone type:"user" entry whose content is nothing but a wrapper tag
+// (e.g. the <local-command-stdout> a /login prints). It is machine-injected
+// output, not human input, so it must not be mistaken for the turn boundary
+// — otherwise the real human message above it is never reached and the turn
+// comes back with an empty UserText.
+func TestLastTurnSkipsWrapperOnlyUserEntry(t *testing.T) {
+	stdout := `{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"<local-command-stdout>Login successful</local-command-stdout>"}}`
+	p := writeTranscript(t, lineUserPlain, stdout, lineAsstText)
+
+	turn, err := LastTurn(p)
+	if err != nil {
+		t.Fatalf("LastTurn: %v", err)
+	}
+	if turn.UserText != "add a retry to the uploader" {
+		t.Fatalf("UserText = %q; wrapper-only user entry must not become the turn boundary", turn.UserText)
+	}
+}
+
+// TestLastTurnStripsCommandArgsTag uses a shape verbatim from a real
+// transcript: a bare slash command with no arguments carries an empty
+// <command-args></command-args> alongside <command-name>/<command-message>.
+func TestLastTurnStripsCommandArgsTag(t *testing.T) {
+	slash := "{\"type\":\"user\",\"sessionId\":\"sess-1\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/plugin</command-name>\\n            <command-message>plugin</command-message>\\n            <command-args></command-args>\"}}"
+	p := writeTranscript(t, slash, lineAsstText)
+
+	turn, err := LastTurn(p)
+	if err != nil {
+		t.Fatalf("LastTurn: %v", err)
+	}
+	if turn.UserText != "/plugin" {
+		t.Fatalf("UserText = %q, want /plugin", turn.UserText)
+	}
+}
+
 func TestLastTurnStripsWrapperTags(t *testing.T) {
 	wrapped := `{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"<system-reminder>be nice</system-reminder>please refactor this<local-command-stdout>ok</local-command-stdout>"}}`
 	p := writeTranscript(t, wrapped, lineAsstText)
@@ -227,13 +263,23 @@ func TestLastTurnMissingFileIsError(t *testing.T) {
 }
 
 // TestLastTurnTailWindowOnHugeTranscript exercises the large-file path: with a
-// 1-byte whole-file ceiling the tail window is used, its first (possibly
-// truncated) line is dropped, and the turn is still found inside the window.
+// 1-byte whole-file ceiling the tail window is used, its seek lands squarely
+// inside the middle of the preceding filler line (not on a line boundary),
+// that severed line is dropped, and the turn is still found inside the
+// window without any fragment of the severed line leaking into the result.
 func TestLastTurnTailWindowOnHugeTranscript(t *testing.T) {
-	t.Setenv("ENGRAM_TURN_MAX_TRANSCRIPT_BYTES", "1")
-	t.Setenv("ENGRAM_TURN_TAIL_WINDOW_BYTES", "4096")
+	filler := `{"type":"assistant","sessionId":"sess-1","message":{"role":"assistant","content":[{"type":"text","text":"stale filler reply from an earlier turn"}]}}`
+	fillerLineBytes := len(filler) + 1 // + the trailing newline
+	suffixBytes := len(lineUserPlain) + 1 + len(lineAsstText) + 1
 
-	filler := `{"type":"assistant","sessionId":"sess-1","message":{"role":"assistant","content":[{"type":"text","text":"old"}]}}`
+	// A window sized to land inside the filler line, not on either of its
+	// edges: bigger than the real turn's bytes (suffixBytes) alone, smaller
+	// than the full filler line plus the real turn.
+	window := suffixBytes + fillerLineBytes/2
+
+	t.Setenv("ENGRAM_TURN_MAX_TRANSCRIPT_BYTES", "1")
+	t.Setenv("ENGRAM_TURN_TAIL_WINDOW_BYTES", strconv.Itoa(window))
+
 	p := writeTranscript(t, filler, lineUserPlain, lineAsstText)
 
 	turn, err := LastTurn(p)
@@ -242,5 +288,28 @@ func TestLastTurnTailWindowOnHugeTranscript(t *testing.T) {
 	}
 	if turn.UserText != "add a retry to the uploader" {
 		t.Fatalf("UserText = %q", turn.UserText)
+	}
+	if strings.Contains(turn.UserText, "filler") || strings.Contains(turn.AssistantText, "filler") {
+		t.Fatalf("severed filler line fragment leaked into the turn: user=%q asst=%q", turn.UserText, turn.AssistantText)
+	}
+}
+
+// TestLastTurnTailWindowClampDoesNotDropRealLine covers the case where the
+// configured tail window is larger than the whole file: readLines clamps the
+// window to the file size, the seek offset is 0, and nothing was actually
+// truncated — so line 0 must survive, not be discarded as if it were a
+// severed fragment.
+func TestLastTurnTailWindowClampDoesNotDropRealLine(t *testing.T) {
+	t.Setenv("ENGRAM_TURN_MAX_TRANSCRIPT_BYTES", "1")
+	t.Setenv("ENGRAM_TURN_TAIL_WINDOW_BYTES", "999999")
+
+	p := writeTranscript(t, lineUserPlain, lineAsstText)
+
+	turn, err := LastTurn(p)
+	if err != nil {
+		t.Fatalf("LastTurn: %v", err)
+	}
+	if turn.UserText != "add a retry to the uploader" {
+		t.Fatalf("UserText = %q; a clamped window (offset 0) must not drop the first real line", turn.UserText)
 	}
 }
