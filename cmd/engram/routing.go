@@ -186,6 +186,10 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 		warnMemoryLakeFallback(project, "constructing backend", err)
 		return sqlite, false
 	}
+	// With per-turn conversation sync on, the Stop hook's `engram turn` already
+	// writes the user's prompt as part of the merged turn message — appending
+	// it a second time here would duplicate it in the conversation.
+	backend.SetSkipPromptAppend(entry.SyncConversations)
 	return backend, true
 }
 

@@ -26,6 +26,13 @@ func promptDedupKey(sessionID, project, content string) string {
 // AddObservation itself returns (see its doc comment for why prompts, like
 // observations, have no synchronously-available fact id).
 func (b *MemoryLakeBackend) appendPrompt(p store.AddPromptParams) (string, error) {
+	if b.skipPromptAppend {
+		// Per-turn conversation sync owns this content now (see
+		// skipPromptAppend). Return the same stable, non-empty id shape a real
+		// append would have produced so no caller needs a special case.
+		return contentHash(p.Content), nil
+	}
+
 	convCustomID := p.SessionID
 	if convCustomID == "" {
 		convCustomID = defaultConversationCustomID

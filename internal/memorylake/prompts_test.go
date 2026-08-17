@@ -158,3 +158,62 @@ func TestBackend_AddPrompt_EmptySessionUsesDefaultConversation(t *testing.T) {
 		t.Fatalf("conversation custom_id=%q, want %q", gotConvCustomID, defaultConversationCustomID)
 	}
 }
+
+// TestBackend_SkipPromptAppend_MakesNoRequest is the regression lock for the
+// "not affecting existing behavior" half of per-turn conversation sync: with
+// the flag set, prompt persistence must not touch the network at all (the
+// merged turn message already carries the user's text), yet must still hand
+// callers a stable, non-empty id so no call site needs a special case.
+func TestBackend_SkipPromptAppend_MakesNoRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("no request may be made while prompt append is suppressed (%s %s)", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+	b.SetSkipPromptAppend(true)
+
+	p := store.AddPromptParams{SessionID: "sess-1", Project: "proj", Content: "please fix the bug"}
+
+	id, err := b.AddPrompt(p)
+	if err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+	if id == "" {
+		t.Fatal("AddPrompt must still return a stable non-empty id")
+	}
+
+	id2, inserted, err := b.AddPromptIfMissing(p)
+	if err != nil {
+		t.Fatalf("AddPromptIfMissing: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first AddPromptIfMissing must still report inserted=true")
+	}
+	if id2 != id {
+		t.Fatalf("suppressed ids must be stable for identical content: %q vs %q", id2, id)
+	}
+
+	_, inserted2, err := b.AddPromptIfMissing(p)
+	if err != nil {
+		t.Fatalf("AddPromptIfMissing (repeat): %v", err)
+	}
+	if inserted2 {
+		t.Fatal("repeat AddPromptIfMissing must still report inserted=false")
+	}
+}
+
+// TestBackend_SkipPromptAppend_DefaultsOff proves the flag is opt-in: a backend
+// nobody configured behaves exactly as before.
+func TestBackend_SkipPromptAppend_DefaultsOff(t *testing.T) {
+	var posts int32
+	srv := promptMessageServer(t, &posts)
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	if _, err := b.AddPrompt(store.AddPromptParams{SessionID: "sess-1", Project: "proj", Content: "hello"}); err != nil {
+		t.Fatalf("AddPrompt: %v", err)
+	}
+	if atomic.LoadInt32(&posts) != 1 {
+		t.Fatalf("posts=%d, want 1 — suppression must default to off", posts)
+	}
+}
