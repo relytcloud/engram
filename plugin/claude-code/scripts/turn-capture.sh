@@ -17,9 +17,9 @@
 INPUT=$(cat)
 command -v engram >/dev/null 2>&1 || exit 0
 
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
 
 [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] || exit 0
 
