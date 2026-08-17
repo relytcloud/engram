@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/memorylake"
 )
@@ -346,6 +347,73 @@ func TestClampTurnRequestTimeoutKeepsATighterConfig(t *testing.T) {
 	got := clampTurnRequestTimeout(cfg)
 	if got.TimeoutMS != 500 {
 		t.Fatalf("TimeoutMS = %d, want unchanged 500", got.TimeoutMS)
+	}
+}
+
+// TestTurnWatchdogFireLogsBeforeExiting proves the fix for the review finding
+// that a watchdog timeout used to call os.Exit(0) directly, dropping a slow
+// (but possibly otherwise-successful) turn with zero trace in turn.log — the
+// feature's only diagnostic channel. Exercising the real 45s timer would make
+// this test slow and flaky, so it calls the extracted callback directly
+// instead (as the review asked for) and asserts both halves of its contract:
+// the failure is logged, and only then does it exit — with code 0, since a
+// watchdog timeout is a runtime outcome, not a usage error.
+func TestTurnWatchdogFireLogsBeforeExiting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	var exited bool
+	var exitCode int
+	oldExit := exitFunc
+	exitFunc = func(code int) { exited = true; exitCode = code }
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	turnWatchdogFire("acme", "sess-1", 45*time.Second)
+
+	if !exited {
+		t.Fatal("turnWatchdogFire must call exitFunc")
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0 — a watchdog timeout is a runtime outcome, not a usage error", exitCode)
+	}
+
+	logPath := filepath.Join(home, ".engram", "logs", "turn.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("a watchdog firing must be logged to %s: %v", logPath, err)
+	}
+	if !strings.Contains(string(data), "project=acme") || !strings.Contains(string(data), "session=sess-1") {
+		t.Fatalf("log line must identify project and session, got %q", data)
+	}
+	if !strings.Contains(string(data), "watchdog") {
+		t.Fatalf("log line must explain the watchdog fired, got %q", data)
+	}
+}
+
+// TestTurnWatchdogFireLogsEmptySessionWhenUnresolved covers the case the fix
+// specifically had to get right: the watchdog is armed before LastTurn's
+// fallback to the transcript's own session id has run, so when the caller
+// never passed --session, the log line must show an empty session rather
+// than blocking arming on parsing the transcript first.
+func TestTurnWatchdogFireLogsEmptySessionWhenUnresolved(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldExit := exitFunc
+	exitFunc = func(int) {}
+	t.Cleanup(func() { exitFunc = oldExit })
+
+	turnWatchdogFire("acme", "", 45*time.Second)
+
+	logPath := filepath.Join(home, ".engram", "logs", "turn.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("a watchdog firing must be logged to %s: %v", logPath, err)
+	}
+	// logTurnFailure formats with "session=%s error=...", so an empty session
+	// renders as "session= error=" with nothing between the two.
+	if !strings.Contains(string(data), "session= error=") {
+		t.Fatalf("log line must still be written with an empty session, got %q", data)
 	}
 }
 

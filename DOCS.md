@@ -1630,7 +1630,7 @@ MemoryLake's own extraction pipeline mints memories from it in the background.
 ```bash
 engram memorylake conversations enable  --project <name>
 engram memorylake conversations disable --project <name>
-engram memorylake status   # shows conversations: on|off per enabled project
+engram memorylake status   # each enabled project prints inline, e.g. conversations=on / conversations=off
 ```
 
 Requires the project to be MemoryLake-enabled first (`engram memorylake enable
@@ -1664,15 +1664,25 @@ timeout killing it from outside.
 
 **Limitations**
 
-- **Flipping the switch requires restarting the agent.** `cmd/engram/routing.go`
-  caches one MemoryLake backend per project for the process lifetime, and the
-  prompt-append suppression flag is set once, when that backend is first
-  constructed. If you run `engram memorylake conversations enable` while a
-  long-lived `engram mcp` process (i.e. your already-running agent) is still
-  up, that process keeps its old backend instance and suppression stays off
-  until it restarts — so your prompts keep being appended separately and end
-  up in the conversation twice, alongside the merged turn. **Fix: restart the
-  agent** after toggling the switch.
+- **Once this switch is on, everything you type is uploaded — verbatim,
+  automatically, with no local copy and no undo.** Every user message that
+  goes into a merged turn (including a secret pasted into a prompt) leaves the
+  machine and lands in MemoryLake the moment the turn ends. There is no local
+  mirror of what was sent, and there is no way to retract it afterward.
+- **Flipping the switch requires restarting the agent — in either direction.**
+  `cmd/engram/routing.go` caches one MemoryLake backend per project for the
+  process lifetime, and the prompt-append suppression flag is set once, when
+  that backend is first constructed. If you run `engram memorylake
+  conversations enable` while a long-lived `engram mcp` process (i.e. your
+  already-running agent) is still up, that process keeps its old backend
+  instance and suppression stays off until it restarts — so your prompts keep
+  being appended separately and end up in the conversation twice, alongside
+  the merged turn. Running `disable` against a live process has the opposite
+  failure mode: suppression stays *on*, so that session's prompts stop
+  reaching the conversation at all, and (once conversation sync is off)
+  `engram turn` stops writing anything either — that session contributes
+  nothing to MemoryLake until it restarts. **Fix: restart the agent** after
+  toggling the switch, whichever direction you toggle it.
 - **Claude Code only.** Driven by Claude Code's `Stop` hook and its transcript
   format. Codex, OpenCode and Pi are not covered.
 - **Interrupted turns are not captured.** Claude Code does not fire `Stop` when
@@ -1682,8 +1692,13 @@ timeout killing it from outside.
 - **Every message is stored with role `USER`.** MemoryLake derives a message's
   role from its actor's type and only HUMAN actors can be created through the
   API, so the speaker is carried in the message text instead.
-- **No tool trace.** Which files changed and which commands ran do not leave
-  the machine through this path.
+- **Tool calls and tool output are not captured as such — but text that quotes
+  them still is.** `tool_use`/`tool_result` blocks themselves are excluded
+  from every merged turn. But the assistant's final reply routinely quotes
+  file contents or command output verbatim in its prose, and that quoted text
+  is part of what gets uploaded — this path is not a guarantee that no file or
+  command content ever leaves the machine, only that raw tool-call/tool-result
+  blocks don't.
 - **Subagent turns are skipped.**
 - **While it is on, prompts are not appended separately** — the merged turn
   already contains the user's text, so appending it twice would skew

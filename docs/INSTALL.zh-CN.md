@@ -238,7 +238,14 @@ export ENGRAM_BACKEND=sqlite
 engram memorylake conversations enable --project <项目名>
 ```
 
-开启后每完成一轮问答都会自动写入 MemoryLake,由云端抽取成记忆,不再依赖模型主动保存。仅支持 Claude Code;被 ESC 打断的轮次不会入库。详见 `DOCS.md` 的 "Per-turn conversation sync"。
+开启后每完成一轮问答都会自动写入 MemoryLake,由云端抽取成记忆,不再依赖 agent 主动保存。
+
+启用前务必了解以下几点(完整列表见 `DOCS.md` 的 "Per-turn conversation sync" 一节):
+
+- **一旦开启,你输入的一切都会被逐字、自动上传 —— 没有本地副本,也无法撤回。** 合并进某一轮的每一句用户输入(包括不小心粘进 prompt 里的密钥)都会在这一轮结束的瞬间离开这台机器、写进 MemoryLake,本地不留副本,事后也无法收回。
+- **切换开关需要重启 agent —— 无论开启还是关闭。** `cmd/engram/routing.go` 在进程生命周期内为每个 project 只缓存一个 MemoryLake backend 实例,prompt 追加的抑制标志也只在该 backend 构造时决定一次。如果在一个长期运行的 `engram mcp`(也就是你正在用的、已经启动的 agent)还活着时执行 `conversations enable`,那个进程会继续用旧的 backend 实例、抑制仍然是关闭的 —— 于是你的 prompt 会被重复追加,和合并后的整轮内容一起在 conversation 里出现两次。反过来,对一个存活进程执行 `conversations disable` 会是相反的问题:抑制会一直保持开启,该会话的 prompt 不再进入 conversation,而逐轮同步既然已关闭,`engram turn` 也不再写入任何东西 —— 这个会话在重启前对 MemoryLake 毫无贡献。**修复方法:切换开关后重启 agent**,无论朝哪个方向切换都一样。
+- **不采集工具调用本身,但引用其内容的文本仍会上传。** `tool_use` / `tool_result` 这类工具调用/工具输出块不会进入合并后的消息。但助手的最终回复经常会在正文里逐字引用文件内容或命令输出,这部分文本属于会被上传的内容 —— 这条路径只保证不上传原始的工具调用/工具结果块,不保证文件或命令内容绝不离开这台机器。
+- 仅支持 Claude Code;被 ESC 打断的轮次不会入库。
 
 ---
 

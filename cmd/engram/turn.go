@@ -46,8 +46,24 @@ const defaultTurnRequestTimeoutMS = 10000
 // once it fires the process exits 0 (not 1) because, per this command's exit
 // contract, a watchdog timeout is a runtime outcome like any other — network
 // failure, missing transcript, disabled project — none of which may surface
-// as a non-zero exit to the hook that invoked it.
+// as a non-zero exit to the hook that invoked it. See turnWatchdogFire for
+// what happens when it actually fires, and cmdTurn for where it is armed.
 const defaultTurnWatchdogMS = 45000
+
+// turnWatchdogFire is the watchdog's callback, extracted into a named
+// function so it can be exercised directly in a test rather than contorting a
+// test around a real timer. Firing means cmdTurn was still running after
+// elapsed had passed — almost always a slow or hung MemoryLake round trip —
+// and without this, that outcome would leave nothing behind: turn.log is this
+// feature's only diagnostic channel, and a watchdog kill is exactly the
+// situation a user would most want to be able to diagnose. So the failure is
+// logged first, and only then does the process exit — 0, not 1, because a
+// watchdog timeout is a runtime outcome like any other (see
+// defaultTurnWatchdogMS), not a usage error.
+func turnWatchdogFire(project, sessionID string, elapsed time.Duration) {
+	logTurnFailure(project, sessionID, fmt.Errorf("watchdog fired after %s: turn upload aborted", elapsed))
+	exitFunc(0)
+}
 
 func printTurnUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram turn --transcript <path> [--session <id>] [--cwd <dir>] [--verbose]")
@@ -61,13 +77,6 @@ func cmdTurn() {
 	sessionID, transcript, cwd, verbose, ok := parseTurnArgs()
 	if !ok {
 		return
-	}
-
-	// Hard watchdog: fires regardless of where cmdTurn is blocked. Exits 0
-	// because a watchdog timeout is a runtime outcome, not a usage error — see
-	// defaultTurnWatchdogMS.
-	if d := turnWatchdogTimeout(); d > 0 {
-		time.AfterFunc(d, func() { os.Exit(0) })
 	}
 
 	// Global safety valve: honored before anything else so it is impossible for
@@ -105,6 +114,18 @@ func cmdTurn() {
 		// id. Resolving it here would mean creating a MemoryLake project from a
 		// fire-and-forget hook; let the next mem_save do it instead.
 		return
+	}
+
+	// Hard watchdog: armed only from here on, once it's known this invocation
+	// actually has work to do (backend enabled, conversation sync on, project
+	// id resolved). Every return above this point is the hot path — almost
+	// every invocation of this command — and none of them now pay for
+	// allocating a timer they will never need. sessionID at this point is
+	// whatever the Stop hook passed on the command line; the fallback to the
+	// transcript's own session id (below) hasn't run yet, so an unresolved id
+	// is logged empty rather than delaying arming until after LastTurn runs.
+	if d := turnWatchdogTimeout(); d > 0 {
+		time.AfterFunc(d, func() { turnWatchdogFire(project, sessionID, d) })
 	}
 
 	turn, err := turncapture.LastTurn(transcript)
@@ -153,8 +174,8 @@ func anyConversationSyncEnabled(enab *memorylake.Enablement) bool {
 	if enab == nil {
 		return false
 	}
-	for _, entry := range enab.EnabledProjects {
-		if entry.SyncConversations {
+	for name := range enab.EnabledProjects {
+		if enab.IsConversationSyncEnabled(name) {
 			return true
 		}
 	}

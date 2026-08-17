@@ -116,6 +116,49 @@ func TestLastTurnCollectsQueuedCommandInterjection(t *testing.T) {
 	}
 }
 
+// TestLastTurnCleansQueuedCommandInterjection covers the privacy-leak fix: a
+// queued_command interjection's prompt must go through the same wrapper-tag
+// cleaning as a boundary user entry. A real-world example is a
+// machine-injected <task-notification> blob (carrying absolute filesystem
+// paths and tool-use ids) wrapping what looks like a mid-turn interjection —
+// none of that wrapper content may survive into UserText.
+func TestLastTurnCleansQueuedCommandInterjection(t *testing.T) {
+	queued := `{"type":"attachment","sessionId":"sess-1","attachment":{"type":"queued_command","prompt":"<system-reminder>tool_use_id=abc123 path=/Users/x/secret.txt</system-reminder>also bump the timeout"}}`
+	p := writeTranscript(t, lineUserPlain, queued, lineAsstText)
+
+	turn, err := LastTurn(p)
+	if err != nil {
+		t.Fatalf("LastTurn: %v", err)
+	}
+	if strings.Contains(turn.UserText, "system-reminder") || strings.Contains(turn.UserText, "/Users/x/secret.txt") || strings.Contains(turn.UserText, "tool_use_id") {
+		t.Fatalf("wrapper tag content leaked into UserText: %q", turn.UserText)
+	}
+	want := "add a retry to the uploader\n\nalso bump the timeout"
+	if turn.UserText != want {
+		t.Fatalf("UserText = %q, want %q", turn.UserText, want)
+	}
+}
+
+// TestLastTurnDropsQueuedCommandThatCleansToNothing covers a queued_command
+// interjection whose entire prompt is wrapper content: after cleaning it
+// contributes no segment at all (not an empty one), while the surrounding
+// real user message and assistant reply are unaffected.
+func TestLastTurnDropsQueuedCommandThatCleansToNothing(t *testing.T) {
+	queued := `{"type":"attachment","sessionId":"sess-1","attachment":{"type":"queued_command","prompt":"<local-command-stdout>ok</local-command-stdout>"}}`
+	p := writeTranscript(t, lineUserPlain, queued, lineAsstText)
+
+	turn, err := LastTurn(p)
+	if err != nil {
+		t.Fatalf("LastTurn: %v", err)
+	}
+	if turn.UserText != "add a retry to the uploader" {
+		t.Fatalf("UserText = %q; a queued_command that cleans to nothing must contribute no segment", turn.UserText)
+	}
+	if turn.AssistantText != "Done — the uploader now retries three times." {
+		t.Fatalf("AssistantText = %q", turn.AssistantText)
+	}
+}
+
 // TestLastTurnIgnoresMetaEntries: injected context (skill bodies, system
 // prompts) arrives as an isMeta user entry. It is neither captured nor treated
 // as a turn boundary.

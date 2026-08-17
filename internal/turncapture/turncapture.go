@@ -96,8 +96,16 @@ scan:
 
 		case e.Type == "attachment" && e.Attachment.Type == "queued_command":
 			// A message the user typed while the assistant was still working.
-			// Part of this turn's input, but not its starting boundary.
-			if p := strings.TrimSpace(e.Attachment.Prompt); p != "" {
+			// Part of this turn's input, but not its starting boundary. Must go
+			// through the same cleaning as the boundary "user" case below: a
+			// queued_command's prompt can carry the same machine-injected wrapper
+			// tags (e.g. a <task-notification> blob with absolute filesystem
+			// paths and tool-use ids) that a boundary entry can, and skipping the
+			// clean here would ship those verbatim into MemoryLake. Skip the
+			// segment entirely when it cleans to nothing rather than letting an
+			// empty string through — compact would drop it anyway, but skipping
+			// early keeps the intent explicit and matches the shape below.
+			if p := cleanUserText(e.Attachment.Prompt); p != "" {
 				userParts = append([]string{p}, userParts...)
 			}
 
