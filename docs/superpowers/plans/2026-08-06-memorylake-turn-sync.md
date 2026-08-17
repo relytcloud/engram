@@ -2322,12 +2322,7 @@ func logTurnFailure(project, sessionID string, cause error) {
 		return true
 ```
 
-**(c) `main` 的 switch** —— 加一个 case，让规范的命令列表保持完整（`version` / `help` 同样在两处都有，本条与之一致；实际执行走的是 (b) 的快路径）。
-
-```go
-	case "turn":
-		cmdTurn()
-```
+**(c) `main` 的 switch —— 不要加 case。** (b) 里的 `handleConfigFreeCommand` 已经先一步返回，switch 里的 `case "turn"` 永远不可达。`version` / `help` 在两处都有是历史遗留，别复制它。
 
 **(d) `printUsage`** —— 在 `memorylake conversations` 那段之后插入：
 
