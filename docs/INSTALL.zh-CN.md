@@ -232,6 +232,14 @@ export ENGRAM_BACKEND=sqlite
 - 搜索是**纯语义**(向量),不再是 SQLite 的 FTS5/BM25 精确匹配;但内容**逐字保真**(不再被 mem0 抽取/改写)。
 - **取舍**:直写接口**不做去重 / topic_key upsert / 冲突决策** —— 每次 `mem_save` 都是一条新 fact,`topic_key` 在 MemoryLake 项目上不再是 in-place upsert(迁移时会对已存 fact 去重,但 live save 不会)。
 
+已启用 MemoryLake 的项目还可以开启逐轮对话同步:
+
+```bash
+engram memorylake conversations enable --project <项目名>
+```
+
+开启后每完成一轮问答都会自动写入 MemoryLake,由云端抽取成记忆,不再依赖模型主动保存。仅支持 Claude Code;被 ESC 打断的轮次不会入库。详见 `DOCS.md` 的 "Per-turn conversation sync"。
+
 ---
 
 ## 五、常见问题

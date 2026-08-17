@@ -191,6 +191,12 @@ export ENGRAM_BACKEND=sqlite
 
 On a MemoryLake-backed project, memories are stored as **V3 facts** under the `engram` workspace. `mem_save` writes the observation **verbatim and synchronously** via MemoryLake's direct fact-add endpoint — the content is stored as-is (title preserved), a **real fact id** comes back immediately, and it's queryable right away (no asynchronous extraction). Search is **semantic** (vector). Note the trade-off: the direct write does **no** server-side dedup / `topic_key` upsert / conflict decision, so each save is a new fact. Behavior, limitations, and the differential parity harness → **[DOCS.md — MemoryLake Backend](DOCS.md#memorylake-backend)**.
 
+Enabled projects can additionally opt into per-turn conversation sync
+(`engram memorylake conversations enable --project <name>`), which appends each
+completed turn to MemoryLake and lets its extraction pipeline mint memories
+without the agent having to call `mem_save`. See "Per-turn conversation sync"
+in `DOCS.md`.
+
 ## Cloud (Opt-In Replication)
 
 Cloud is optional and always project-scoped (`--project` required; `engram sync --cloud --all` is blocked). Local SQLite stays authoritative; cloud is replication / shared access only.
