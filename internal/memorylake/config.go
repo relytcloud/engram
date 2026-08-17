@@ -5,6 +5,7 @@ package memorylake
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -110,6 +111,15 @@ func SaveConnection(path string, conn Connection) error {
 type ProjectEntry struct {
 	ProjID    string `json:"proj_id"`
 	EnabledAt string `json:"enabled_at"`
+	// SyncConversations opts this project into per-turn conversation sync:
+	// every completed agent turn is appended to the project's MemoryLake
+	// conversation so MemoryLake's own extraction pipeline can mint memories
+	// from it (see docs/superpowers/specs/2026-08-06-memorylake-turn-sync-design.md).
+	//
+	// The zero value is "off", and `omitempty` keeps it out of the serialized
+	// file until it is turned on — which is what makes an enablement file
+	// written before this field existed read back as "off" with no migration.
+	SyncConversations bool `json:"sync_conversations,omitempty"`
 }
 
 // Enablement is the persisted MemoryLake state at DefaultEnablementPath: the
@@ -172,4 +182,37 @@ func (e *Enablement) Save(path string) error {
 func (e *Enablement) IsEnabled(project string) (ProjectEntry, bool) {
 	entry, ok := e.EnabledProjects[project]
 	return entry, ok
+}
+
+// IsConversationSyncEnabled reports whether project has per-turn conversation
+// sync turned on. It implies backend enablement: a project absent from
+// EnabledProjects is always false.
+//
+// The lookup is a plain map read on the project name as given, exactly like
+// IsEnabled — callers pass a name already produced by project.DetectProject.
+// Do not normalize here: a different key convention between this method and
+// IsEnabled would make the same project resolve differently in the two, and
+// the switch would appear to silently do nothing.
+func (e *Enablement) IsConversationSyncEnabled(project string) bool {
+	entry, ok := e.EnabledProjects[project]
+	return ok && entry.SyncConversations
+}
+
+// SetConversationSync turns per-turn conversation sync on or off for project.
+// It returns an error when project is not enabled for the MemoryLake backend:
+// conversation sync writes into that project's MemoryLake conversation, so it
+// has nowhere to go without a resolved MemoryLake project (decision D1).
+//
+// The caller is responsible for persisting the change via Save.
+func (e *Enablement) SetConversationSync(project string, on bool) error {
+	entry, ok := e.EnabledProjects[project]
+	if !ok {
+		return fmt.Errorf("project %q is not enabled for the MemoryLake backend — run `engram memorylake enable --project %s` first", project, project)
+	}
+	if entry.SyncConversations == on {
+		return nil
+	}
+	entry.SyncConversations = on
+	e.EnabledProjects[project] = entry
+	return nil
 }
