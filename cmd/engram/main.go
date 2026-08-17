@@ -690,7 +690,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode":
+	case "mcp", "serve", "protocol-mode", "turn":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -708,6 +708,9 @@ func handleConfigFreeCommand(args []string) bool {
 		return true
 	case "help", "--help", "-h":
 		printUsage()
+		return true
+	case "turn":
+		cmdTurn()
 		return true
 	case "cloud":
 		if len(args) >= 2 {
@@ -3172,6 +3175,10 @@ Commands:
                      every completed agent turn is appended to the project's MemoryLake
                      conversation and MemoryLake extracts memories from it in the
                      background. Requires the project to be memorylake-enabled first.
+  turn --transcript <path> [--session <id>] [--cwd <dir>] [--verbose]
+                     (internal, invoked by agent hooks) Append the transcript's last
+                     completed turn to the project's MemoryLake conversation. No-op
+                     unless the project has memorylake conversations enabled.
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
                      cursor, vscode-copilot, kilocode)
