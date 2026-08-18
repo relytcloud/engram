@@ -50,7 +50,25 @@ GitHub Release archives. (Homebrew was intentionally dropped; do not re-add a
    - any `feat:` → minor (`vX.(Y+1).0`)
    - a `!` / `BREAKING CHANGE:` commit → major (`v(X+1).0.0`)
 
-3. **(Optional) Dry-run GoReleaser locally** to catch config errors without
+3. **Bump the plugin manifests to the same version, and commit that on `main`
+   before tagging.** The plugin version is not cosmetic: `claude plugin update`
+   decides whether to refresh by comparing version *strings*, so a tag that
+   ships unchanged manifests leaves every installed user on the previous
+   plugin content — it reports `already at the latest version` and exits 0,
+   which no error handling can catch. Three files, always together:
+
+   ```bash
+   # .claude-plugin/marketplace.json
+   # plugin/claude-code/.claude-plugin/plugin.json
+   # plugin/codex/.codex-plugin/plugin.json
+   ./tools/check-plugin-version.sh X.Y.Z   # verifies all three agree and match
+   ```
+
+   The marketplace clone tracks `main`, not the tag, so this commit is what
+   actually reaches users. `release.yml` re-runs this check against the tag and
+   fails the release before publishing if they disagree.
+
+4. **(Optional) Dry-run GoReleaser locally** to catch config errors without
    publishing anything:
 
    ```bash
@@ -59,14 +77,14 @@ GitHub Release archives. (Homebrew was intentionally dropped; do not re-add a
    goreleaser check
    ```
 
-4. **Tag and push.** The tag on `main` is what fires the workflow:
+5. **Tag and push.** The tag on `main` is what fires the workflow:
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin vX.Y.Z
    ```
 
-5. **Watch the workflow.**
+6. **Watch the workflow.**
 
    ```bash
    gh run watch $(gh run list --workflow=release.yml -L1 --json databaseId --jq '.[0].databaseId')
