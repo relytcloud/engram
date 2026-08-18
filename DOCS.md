@@ -1718,7 +1718,15 @@ timeout killing it from outside.
   goes into a merged turn (including a secret pasted into a prompt) leaves the
   machine and lands in MemoryLake the moment the turn ends. There is no local
   mirror of what was sent, and there is no way to retract it afterward.
-- **Flipping the switch requires restarting the agent — in either direction.**
+- **Flipping the switch requires a restart — in either direction — and TWO
+  processes have to go, in this order:** `pkill -f "engram serve"` first, then
+  quit and reopen the agent. Claude Code's prompts reach Engram through a hook
+  that POSTs to `engram serve`, and `cmdServe` gives that server the same
+  caching routing selector (`main.go`, `SetBackendSelector(buildRoutingSelector(...))`)
+  — so `engram serve` is the process actually holding the suppression flag, and
+  it is parented to init rather than to the agent, so it survives the agent
+  quitting. The order matters: `session-start.sh` only starts a server when
+  `/health` fails, so an old one still running means it does nothing.
   Note this differs from `memorylake enable` / `disable`, which ARE hot-reloaded
   and take effect on a running session: the routing selector re-reads the
   enablement file when it changes on disk, but only swaps in the project list —
@@ -1734,8 +1742,9 @@ timeout killing it from outside.
   failure mode: suppression stays *on*, so that session's prompts stop
   reaching the conversation at all, and (once conversation sync is off)
   `engram turn` stops writing anything either — that session contributes
-  nothing to MemoryLake until it restarts. **Fix: restart the agent** after
-  toggling the switch, whichever direction you toggle it.
+  nothing to MemoryLake until it restarts. **Fix: `pkill -f "engram serve"`,
+  then restart the agent** after toggling the switch, whichever direction you
+  toggle it.
 - **Claude Code only.** Driven by Claude Code's `Stop` hook and its transcript
   format. Codex, OpenCode and Pi are not covered.
 - **Interrupted turns are not captured.** Claude Code does not fire `Stop` when

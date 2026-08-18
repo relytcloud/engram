@@ -75,8 +75,10 @@ engram memorylake disable --project <project名>   # 改回本地 SQLite
 # 1) 开启(该 project 必须已经 enable 了 MemoryLake,见上面第 3 步)
 engram memorylake conversations enable --project <project名>
 
-# 2) 重启 agent —— 不能跳过,否则你的 prompt 会被写两次(原因见"注意"第二条)
-#    Claude Code:退出再重新打开即可
+# 2) 重启 —— 不能跳过,否则你的 prompt 会被写两次(原因见"注意"第二条)
+#    要重启的是两个进程,顺序不能反:
+pkill -f "engram serve"   # 先杀掉常驻的 serve(它不随 Claude Code 退出)
+#    然后退出并重新打开 Claude Code —— 它的 SessionStart hook 会自动拉起新的 serve
 
 # 3) 验证
 engram memorylake status
@@ -94,7 +96,7 @@ engram memorylake status
 
 ```bash
 engram memorylake conversations disable --project <project名>
-# 同样需要重启 agent
+# 同样要重启,同样是两个进程:pkill -f "engram serve" 之后重开 Claude Code
 ```
 
 关闭只停止逐轮写入,已经写进 MemoryLake 的内容不会被删除,该 project 的 MemoryLake 后端本身也不受影响(要改回本地 SQLite 用上面第 4 步的 `memorylake disable`)。
@@ -102,7 +104,7 @@ engram memorylake conversations disable --project <project名>
 **注意**(完整列表见 `DOCS.md` 的 "Per-turn conversation sync"):
 
 - **你输入的一切都会逐字、自动上传,没有本地副本,也无法撤回** —— 包括不小心粘进 prompt 里的密钥。工具调用与工具输出本身不采集,但助手回复中引用的文件内容或命令输出会随回复一起上传。
-- **切换这个开关需要重启 agent,开和关都一样。** 这一点与上面的 enable / disable 不同:后者是热重载、对运行中的 session 即时生效,而逐轮同步的 prompt 抑制标志只在 backend 构造时决定一次,同一进程内会一直沿用旧值。不重启的后果是:开启时你的 prompt 会被重复写入(单独一次 + 合并进整轮一次),关闭时这个会话反而完全不再写入。
+- **切换这个开关需要重启,开和关都一样,而且要重启两个进程。** 这一点与上面的 enable / disable 不同:后者是热重载、对运行中的 session 即时生效,而逐轮同步的 prompt 抑制标志只在 backend 构造时决定一次,同一进程内会一直沿用旧值。要重启的是:(a) Claude Code,它带走 `engram mcp`;(b) **常驻的 `engram serve`** —— Claude Code 的 prompt 是由 hook 通过 HTTP 发给 serve 的,所以 serve 才是真正持有那个标志的进程,而它的父进程是 init、不随 Claude Code 退出。先 `pkill -f "engram serve"` 再重开 Claude Code,顺序不能反:SessionStart hook 只在 serve 不存在时才拉起新的,旧进程还活着就什么都不做。不重启的后果是:开启时你的 prompt 会被重复写入(单独一次 + 合并进整轮一次),关闭时这个会话反而完全不再写入。
 - 仅支持 Claude Code。被 ESC 打断的轮次不入库;写入失败的轮次直接丢弃,只在 `~/.engram/logs/turn.log` 留一行记录。
 
 ## 三、架构总览
