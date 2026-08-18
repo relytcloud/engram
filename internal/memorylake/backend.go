@@ -91,6 +91,19 @@ type MemoryLakeBackend struct {
 	// set of already-saved learning dedup keys for this backend's lifetime.
 	passiveMu   sync.Mutex
 	passiveSeen map[string]bool
+
+	// skipPromptAppend suppresses AddPrompt/AddPromptIfMissing's conversation
+	// append. It is set for projects with per-turn conversation sync enabled:
+	// the merged turn message already contains the user's prompt verbatim, so
+	// appending it a second time on its own would put the same sentence in the
+	// conversation twice and skew MemoryLake's extraction.
+	//
+	// Suppressing it costs nothing locally because prompts are write-only on
+	// this backend — no read path reads them back (FormatContext, Stats and
+	// Timeline all have no prompt section; see CreateSession/AddPrompt's doc
+	// comments). Not guarded by a mutex: it is set once by the routing layer
+	// immediately after construction, before the backend reaches any handler.
+	skipPromptAppend bool
 }
 
 // NewBackend constructs a MemoryLakeBackend for the given workspace reference
@@ -131,6 +144,13 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 		actorID:  actorID,
 		sessions: sessions,
 	}, nil
+}
+
+// SetSkipPromptAppend toggles prompt-append suppression — see the
+// skipPromptAppend field comment for why per-turn conversation sync needs it.
+// Call it right after NewBackend, before the backend is handed to any handler.
+func (b *MemoryLakeBackend) SetSkipPromptAppend(v bool) {
+	b.skipPromptAppend = v
 }
 
 // ─── Observation CRUD (Tier A: core) ────────────────────────────────────────

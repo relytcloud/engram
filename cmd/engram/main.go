@@ -690,7 +690,7 @@ func shouldCheckForUpdates(args []string) bool {
 	}
 	command := strings.ToLower(strings.TrimSpace(args[0]))
 	switch command {
-	case "mcp", "serve", "protocol-mode":
+	case "mcp", "serve", "protocol-mode", "turn":
 		return false
 	case "cloud":
 		return len(args) < 2 || strings.ToLower(strings.TrimSpace(args[1])) != "serve"
@@ -708,6 +708,9 @@ func handleConfigFreeCommand(args []string) bool {
 		return true
 	case "help", "--help", "-h":
 		printUsage()
+		return true
+	case "turn":
+		cmdTurn()
 		return true
 	case "cloud":
 		if len(args) >= 2 {
@@ -2416,6 +2419,8 @@ func cmdMemorylake(cfg store.Config) {
 		cmdMemorylakeEnable(cfg)
 	case "disable":
 		cmdMemorylakeDisable(cfg)
+	case "conversations":
+		cmdMemorylakeConversations()
 	case "status", "":
 		cmdMemorylakeStatus(cfg)
 	default:
@@ -2429,6 +2434,7 @@ func printMemorylakeUsage() {
 	fmt.Fprintln(os.Stderr, "usage: engram memorylake config [--url <url>] [--api-key <key>] [--workspace <ws>] [--actor <actor>] [--clear]")
 	fmt.Fprintln(os.Stderr, "       engram memorylake enable --project <name> [--migrate|--no-migrate]")
 	fmt.Fprintln(os.Stderr, "       engram memorylake disable --project <name>")
+	fmt.Fprintln(os.Stderr, "       engram memorylake conversations enable|disable --project <name>")
 	fmt.Fprintln(os.Stderr, "       engram memorylake status")
 }
 
@@ -2691,6 +2697,62 @@ func cmdMemorylakeDisable(cfg store.Config) {
 	fmt.Printf("Disabled MemoryLake backend for project %q (now using local SQLite).\n", project)
 }
 
+// cmdMemorylakeConversations turns per-turn conversation sync on or off for a
+// project: with it on, every completed agent turn is appended to the project's
+// MemoryLake conversation and MemoryLake extracts memories from it in the
+// background (see docs/superpowers/specs/2026-08-06-memorylake-turn-sync-design.md).
+//
+// Takes no store.Config: this only edits ~/.engram/memorylake.json and never
+// touches SQLite.
+func cmdMemorylakeConversations() {
+	action := ""
+	if len(os.Args) > 3 {
+		action = os.Args[3]
+	}
+	if action != "enable" && action != "disable" {
+		fmt.Fprintln(os.Stderr, "engram: memorylake conversations requires enable|disable")
+		printMemorylakeUsage()
+		exitFunc(1)
+		return
+	}
+
+	project := ""
+	for i := 4; i < len(os.Args); i++ {
+		if os.Args[i] == "--project" && i+1 < len(os.Args) {
+			project = os.Args[i+1]
+			i++
+		}
+	}
+	if project == "" {
+		fmt.Fprintln(os.Stderr, "engram: --project <name> is required")
+		printMemorylakeUsage()
+		exitFunc(1)
+		return
+	}
+
+	path := memorylake.DefaultEnablementPath()
+	enablement, err := memorylake.LoadEnablement(path)
+	if err != nil {
+		fatal(err)
+		return
+	}
+	if err := enablement.SetConversationSync(project, action == "enable"); err != nil {
+		fatal(err)
+		return
+	}
+	if err := enablement.Save(path); err != nil {
+		fatal(err)
+		return
+	}
+
+	if action == "enable" {
+		fmt.Printf("Enabled per-turn conversation sync for project %q.\n", project)
+		fmt.Println("Each completed turn is now appended to this project's MemoryLake conversation; MemoryLake extracts memories from it in the background.")
+		return
+	}
+	fmt.Printf("Disabled per-turn conversation sync for project %q (backend enablement unchanged).\n", project)
+}
+
 func cmdMemorylakeStatus(cfg store.Config) {
 	path := memorylake.DefaultEnablementPath()
 	enablement, err := memorylake.LoadEnablement(path)
@@ -2740,7 +2802,11 @@ func cmdMemorylakeStatus(cfg store.Config) {
 			if projID == "" {
 				projID = "(pending)"
 			}
-			fmt.Printf("  %-30s memorylake  (proj_id=%s, enabled_at=%s)\n", name, projID, entry.EnabledAt)
+			convSync := "off"
+			if entry.SyncConversations {
+				convSync = "on"
+			}
+			fmt.Printf("  %-30s memorylake  (proj_id=%s, enabled_at=%s, conversations=%s)\n", name, projID, entry.EnabledAt, convSync)
 		} else {
 			fmt.Printf("  %-30s sqlite\n", name)
 		}
@@ -3142,6 +3208,15 @@ Commands:
                        --no-migrate  Skip the automatic first-enable migration
   memorylake disable --project <name>
                      Disable the MemoryLake backend for a project (reverts to local SQLite)
+  memorylake conversations enable|disable --project <name>
+                     Turn per-turn conversation sync on/off for a project. With it on,
+                     every completed agent turn is appended to the project's MemoryLake
+                     conversation and MemoryLake extracts memories from it in the
+                     background. Requires the project to be memorylake-enabled first.
+  turn --transcript <path> [--session <id>] [--cwd <dir>] [--verbose]
+                     (internal, invoked by agent hooks) Append the transcript's last
+                     completed turn to the project's MemoryLake conversation. No-op
+                     unless the project has memorylake conversations enabled.
   setup [agent]      Install/setup agent integration (opencode, pi, claude-code,
                      gemini-cli, codex, antigravity-cli, windsurf, qwen, kiro,
                      cursor, vscode-copilot, kilocode)

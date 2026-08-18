@@ -59,9 +59,24 @@ engram memorylake enable --project <project名>
 ### 4) 查看 / 关闭
 
 ```bash
-engram memorylake status                          # 查看各 project 当前后端
+engram memorylake status                          # 查看各 project 当前后端,含逐轮同步开关
 engram memorylake disable --project <project名>   # 改回本地 SQLite
 ```
+
+### 5) 开启逐轮对话同步(可选)
+
+对已 enable 的 project,可以让每一轮问答在结束时自动写入 MemoryLake,由云端抽取成记忆 —— 不再依赖 agent 主动调用 `mem_save`。
+
+```bash
+engram memorylake conversations enable  --project <project名>
+engram memorylake conversations disable --project <project名>
+```
+
+开启前请确认你接受这几点(完整列表见 `DOCS.md` 的 "Per-turn conversation sync"):
+
+- **你输入的一切都会逐字、自动上传,没有本地副本,也无法撤回** —— 包括不小心粘进 prompt 里的密钥。工具调用与工具输出本身不采集,但助手回复中引用的文件内容或命令输出会随回复一起上传。
+- **切换这个开关需要重启 agent,开和关都一样。** 这一点与上面的 enable / disable 不同:后者是热重载、对运行中的 session 即时生效,而逐轮同步的 prompt 抑制标志只在 backend 构造时决定一次,同一进程内会一直沿用旧值。不重启的后果是:开启时你的 prompt 会被重复写入(单独一次 + 合并进整轮一次),关闭时这个会话反而完全不再写入。
+- 仅支持 Claude Code。被 ESC 打断的轮次不入库;写入失败的轮次直接丢弃,只在 `~/.engram/logs/turn.log` 留一行记录。
 
 ## 三、架构总览
 

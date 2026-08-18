@@ -58,6 +58,16 @@
             "async": true
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/turn-capture.sh\"",
+            "timeout": 60,
+            "async": true
+          }
+        ]
       }
     ]
   }

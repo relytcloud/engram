@@ -1668,6 +1668,96 @@ The `mem_*` MCP tool set is registered once, globally, and shared by both backen
 
 Because `mem_save` on a MemoryLake-backed project never returns `judgment_required`/`candidates` (see "Known limitations" above), the `mem_judge`/`mem_compare` conflict loop is naturally silent there — agents never enter it. The agent-facing memory protocol (`plugin/*/skills/memory/SKILL.md`, `plugin/*/scripts/session-start.sh` and `post-compaction.sh`) reflects this with one added note: on a MemoryLake-backed project (check `engram memorylake status`), dedup/update/conflict-merge is automatic and agents only need `mem_save` / `mem_search` / `mem_context`, without needing to call `mem_update` / `mem_judge` / `mem_compare` themselves. Default SQLite projects keep the full protocol unchanged — this is one shared, session-level protocol (a session can span both backends across projects), not a separate protocol per backend.
 
+### Per-turn conversation sync
+
+By default, memories only reach MemoryLake when the agent decides to call
+`mem_save`. Per-turn conversation sync removes that dependency: with it on,
+every completed turn — one user message plus the assistant's final reply — is
+appended to the project's MemoryLake conversation the moment the turn ends, and
+MemoryLake's own extraction pipeline mints memories from it in the background.
+
+```bash
+engram memorylake conversations enable  --project <name>
+engram memorylake conversations disable --project <name>
+engram memorylake status   # each enabled project prints inline, e.g. conversations=on / conversations=off
+```
+
+Requires the project to be MemoryLake-enabled first (`engram memorylake enable
+--project <name>`) — the sync writes into that project's MemoryLake
+conversation and has nowhere to go without one.
+
+**What a "turn" is.** The user's message (including anything typed while the
+assistant was still working) plus the assistant's final text reply. Thinking,
+tool calls, and tool output are excluded. Both halves go into a single message
+labelled `**User:**` / `**Assistant:**`; the conversation is keyed by the
+agent's session id, so `--resume` continues the same conversation and `/clear`
+starts a new one.
+
+**How it fires.** Claude Code's `Stop` hook runs `engram turn` after every
+completed turn, passing the transcript path and session id. The hook is
+registered with a 60-second timeout, deliberately above `engram turn`'s own
+45-second internal watchdog (`ENGRAM_TURN_WATCHDOG_MS`) — the watchdog is what
+actually bounds the process (it exits 0 cleanly on expiry), not the hook
+timeout killing it from outside.
+
+**Environment variables**
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ENGRAM_BACKEND=sqlite` | — | Global MemoryLake safety valve; also disables per-turn sync |
+| `ENGRAM_TURN_MAX_BYTES` | `32768` | Byte ceiling for one merged turn message; over-long turns keep head and tail with a truncation marker between |
+| `ENGRAM_TURN_MAX_TRANSCRIPT_BYTES` | `67108864` (64 MiB) | Transcripts above this are read from the tail instead of whole |
+| `ENGRAM_TURN_TAIL_WINDOW_BYTES` | `2097152` (2 MiB) | Size of that tail window |
+| `ENGRAM_TURN_REQUEST_TIMEOUT_MS` | `10000` | Caps each individual MemoryLake round trip on this path |
+| `ENGRAM_TURN_WATCHDOG_MS` | `45000` | Hard ceiling on the whole `engram turn` process; on expiry it exits 0 |
+
+**Limitations**
+
+- **Once this switch is on, everything you type is uploaded — verbatim,
+  automatically, with no local copy and no undo.** Every user message that
+  goes into a merged turn (including a secret pasted into a prompt) leaves the
+  machine and lands in MemoryLake the moment the turn ends. There is no local
+  mirror of what was sent, and there is no way to retract it afterward.
+- **Flipping the switch requires restarting the agent — in either direction.**
+  Note this differs from `memorylake enable` / `disable`, which ARE hot-reloaded
+  and take effect on a running session: the routing selector re-reads the
+  enablement file when it changes on disk, but only swaps in the project list —
+  it does not discard an already-constructed backend.
+  `cmd/engram/routing.go` caches one MemoryLake backend per project for the
+  process lifetime, and the prompt-append suppression flag is set once, when
+  that backend is first constructed. If you run `engram memorylake
+  conversations enable` while a long-lived `engram mcp` process (i.e. your
+  already-running agent) is still up, that process keeps its old backend
+  instance and suppression stays off until it restarts — so your prompts keep
+  being appended separately and end up in the conversation twice, alongside
+  the merged turn. Running `disable` against a live process has the opposite
+  failure mode: suppression stays *on*, so that session's prompts stop
+  reaching the conversation at all, and (once conversation sync is off)
+  `engram turn` stops writing anything either — that session contributes
+  nothing to MemoryLake until it restarts. **Fix: restart the agent** after
+  toggling the switch, whichever direction you toggle it.
+- **Claude Code only.** Driven by Claude Code's `Stop` hook and its transcript
+  format. Codex, OpenCode and Pi are not covered.
+- **Interrupted turns are not captured.** Claude Code does not fire `Stop` when
+  the user presses ESC.
+- **Failures are dropped, not retried.** A turn lost to a network outage is
+  gone; the failure is recorded in `~/.engram/logs/turn.log` and nowhere else.
+- **Every message is stored with role `USER`.** MemoryLake derives a message's
+  role from its actor's type and only HUMAN actors can be created through the
+  API, so the speaker is carried in the message text instead.
+- **Tool calls and tool output are not captured as such — but text that quotes
+  them still is.** `tool_use`/`tool_result` blocks themselves are excluded
+  from every merged turn. But the assistant's final reply routinely quotes
+  file contents or command output verbatim in its prose, and that quoted text
+  is part of what gets uploaded — this path is not a guarantee that no file or
+  command content ever leaves the machine, only that raw tool-call/tool-result
+  blocks don't.
+- **Subagent turns are skipped.**
+- **While it is on, prompts are not appended separately** — the merged turn
+  already contains the user's text, so appending it twice would skew
+  extraction. Prompt storage is write-only on this backend, so nothing local
+  is lost.
+
 ---
 
 ## Next Steps
