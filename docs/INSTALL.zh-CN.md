@@ -67,12 +67,39 @@ engram memorylake disable --project <project名>   # 改回本地 SQLite
 
 对已 enable 的 project,可以让每一轮问答在结束时自动写入 MemoryLake,由云端抽取成记忆 —— 不再依赖 agent 主动调用 `mem_save`。
 
+**先读下面的"注意"三条再决定开不开**,尤其第一条:这个开关会把你输入的内容自动送出本机。
+
+开启分三步,三步都要做:
+
 ```bash
-engram memorylake conversations enable  --project <project名>
-engram memorylake conversations disable --project <project名>
+# 1) 开启(该 project 必须已经 enable 了 MemoryLake,见上面第 3 步)
+engram memorylake conversations enable --project <project名>
+
+# 2) 重启 agent —— 不能跳过,否则你的 prompt 会被写两次(原因见"注意"第二条)
+#    Claude Code:退出再重新打开即可
+
+# 3) 验证
+engram memorylake status
 ```
 
-开启前请确认你接受这几点(完整列表见 `DOCS.md` 的 "Per-turn conversation sync"):
+第 3 步的输出里,该 project 那一行末尾应该变成 `conversations=on`:
+
+```
+  myproject   memorylake  (proj_id=proj-xxxx, enabled_at=2026-08-18T..., conversations=on)
+```
+
+之后照常用 Claude Code 对话就行。**这个功能对对话完全透明** —— 不需要任何额外操作,也不会在对话里看到任何提示,所以"看起来什么都没发生"才是正常的。想确认有没有写入失败,看 `~/.engram/logs/turn.log`:**成功时不写日志**,所以这个文件为空、或者压根不存在,就说明一切正常。
+
+关闭:
+
+```bash
+engram memorylake conversations disable --project <project名>
+# 同样需要重启 agent
+```
+
+关闭只停止逐轮写入,已经写进 MemoryLake 的内容不会被删除,该 project 的 MemoryLake 后端本身也不受影响(要改回本地 SQLite 用上面第 4 步的 `memorylake disable`)。
+
+**注意**(完整列表见 `DOCS.md` 的 "Per-turn conversation sync"):
 
 - **你输入的一切都会逐字、自动上传,没有本地副本,也无法撤回** —— 包括不小心粘进 prompt 里的密钥。工具调用与工具输出本身不采集,但助手回复中引用的文件内容或命令输出会随回复一起上传。
 - **切换这个开关需要重启 agent,开和关都一样。** 这一点与上面的 enable / disable 不同:后者是热重载、对运行中的 session 即时生效,而逐轮同步的 prompt 抑制标志只在 backend 构造时决定一次,同一进程内会一直沿用旧值。不重启的后果是:开启时你的 prompt 会被重复写入(单独一次 + 合并进整轮一次),关闭时这个会话反而完全不再写入。
