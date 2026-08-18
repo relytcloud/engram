@@ -212,6 +212,9 @@ func TestHandleStatsLoaderFailureStillErrorsForMemoryLakeBackend(t *testing.T) {
 // directly on the MemoryBackend interface value.
 func TestHandleSaveCapturesPromptViaMemoryLakeBackend(t *testing.T) {
 	stub := newMemoryLakeStubBackend(t)
+	if err := stub.Store.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	activity := NewSessionActivity(10 * time.Minute)
 	sessionID := defaultSessionID("engram")
 	activity.RecordPrompt(sessionID, "engram", "prompt that should be auto-captured for MemoryLake")

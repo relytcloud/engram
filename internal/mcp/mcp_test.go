@@ -202,6 +202,9 @@ func TestHandlePinAndUnpinObservation(t *testing.T) {
 
 func TestHandleSaveSuggestsTopicKeyWhenMissing(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -442,6 +445,9 @@ func TestHandleSaveResolvesActiveSessionFromStore(t *testing.T) {
 // project, mem_save with no session_id must still use manual-save-{project}.
 func TestHandleSaveFallsBackToManualSaveWhenNoActiveSession(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -515,6 +521,9 @@ func TestHandleSaveResolvesMostRecentActiveSession(t *testing.T) {
 
 func TestHandleSaveWithNilActivityStillSucceeds(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, nil)
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -533,6 +542,9 @@ func TestHandleSaveWithNilActivityStillSucceeds(t *testing.T) {
 
 func TestHandleSavePromptCaptureFailureIsNonFatal(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	activity := NewSessionActivity(10 * time.Minute)
 	activity.RecordPrompt(defaultSessionID("engram"), "engram", "prompt capture should fail non-fatally")
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, activity)
@@ -609,6 +621,9 @@ func TestHandleSavePromptFeedsAutoCaptureContext(t *testing.T) {
 
 func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	activity := NewSessionActivity(10 * time.Minute)
 	activity.RecordPrompt(defaultSessionID("engram"), "engram", "do not capture this prompt")
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, activity)
@@ -638,6 +653,9 @@ func TestHandleSaveCapturePromptFalseSkipsCurrentPrompt(t *testing.T) {
 
 func TestHandleSaveNoCurrentPromptStillSucceeds(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -663,6 +681,9 @@ func TestHandleSaveNoCurrentPromptStillSucceeds(t *testing.T) {
 
 func TestHandleSaveDoesNotSuggestWhenTopicKeyProvided(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	req := mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
@@ -936,6 +957,9 @@ func TestHandleSearchAndCRUDHandlers(t *testing.T) {
 
 func TestHandleSaveReturnsLifecycleState(t *testing.T) {
 	s := newMCPTestStore(t)
+	if err := s.EnrollProject("engram"); err != nil {
+		t.Fatalf("enroll project: %v", err)
+	}
 	h := handleSave(StaticSelector(newSQLiteBackend(s)), MCPConfig{}, NewSessionActivity(10*time.Minute))
 
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{
