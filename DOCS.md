@@ -1718,24 +1718,13 @@ timeout killing it from outside.
   goes into a merged turn (including a secret pasted into a prompt) leaves the
   machine and lands in MemoryLake the moment the turn ends. There is no local
   mirror of what was sent, and there is no way to retract it afterward.
-- **Flipping the switch requires restarting the agent — in either direction.**
-  Note this differs from `memorylake enable` / `disable`, which ARE hot-reloaded
-  and take effect on a running session: the routing selector re-reads the
-  enablement file when it changes on disk, but only swaps in the project list —
-  it does not discard an already-constructed backend.
-  `cmd/engram/routing.go` caches one MemoryLake backend per project for the
-  process lifetime, and the prompt-append suppression flag is set once, when
-  that backend is first constructed. If you run `engram memorylake
-  conversations enable` while a long-lived `engram mcp` process (i.e. your
-  already-running agent) is still up, that process keeps its old backend
-  instance and suppression stays off until it restarts — so your prompts keep
-  being appended separately and end up in the conversation twice, alongside
-  the merged turn. Running `disable` against a live process has the opposite
-  failure mode: suppression stays *on*, so that session's prompts stop
-  reaching the conversation at all, and (once conversation sync is off)
-  `engram turn` stops writing anything either — that session contributes
-  nothing to MemoryLake until it restarts. **Fix: restart the agent** after
-  toggling the switch, whichever direction you toggle it.
+- **Toggling the switch takes effect immediately — no restart.** Like
+  `memorylake enable` / `disable`, the routing selector re-reads the enablement
+  file when it changes on disk and re-derives the prompt-append suppression flag
+  on every resolve, so a `conversations enable|disable` run from another terminal
+  applies to already-running `engram mcp` / `engram serve` processes on their
+  very next call. (Before this was fixed, the flag was set once at backend
+  construction and a stale one duplicated every user prompt in the conversation.)
 - **Claude Code only.** Driven by Claude Code's `Stop` hook and its transcript
   format. Codex, OpenCode and Pi are not covered.
 - **Interrupted turns are not captured.** Claude Code does not fire `Stop` when
