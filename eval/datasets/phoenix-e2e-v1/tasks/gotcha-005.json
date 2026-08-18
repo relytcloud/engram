@@ -1,0 +1,20 @@
+{
+  "id": "gotcha-005",
+  "category": "gotcha",
+  "prompt": "I hand-wrote a new expected/foo.out file for a ZDB test under contrib/zdb/regress by running the SQL through pg_regress and capturing its output. Now `make install installcheck-default` reports a diff against my expected file even though the query results look right to me. What's going on?",
+  "rubric": {
+    "answer_points": [
+      "installcheck-default runs through pg_isolation2_regress (psycopg2-based executor), not pg_regress (psql-based executor) — the two executors produce different output formats",
+      "You cannot validate an expected .out file by running it through pg_regress; the command tags, column alignment, and trailing whitespace differ between the two executors",
+      "It is fine to hand-write the expected file, but its format must match pg_isolation2_regress conventions: single-line SQL echo, command tags like CREATE/INSERT N/DROP, left-justified (ljust) column alignment with trailing spaces",
+      "Reference the actual output already produced under results/ in the regress directory to get the exact format right, rather than guessing"
+    ],
+    "gotcha_points": [
+      "did NOT validate/generate the expected .out file using pg_regress",
+      "did NOT assume pg_regress and pg_isolation2_regress produce the same output formatting"
+    ],
+    "max_score": 10
+  },
+  "max_turns": 20,
+  "timeout_min": 15
+}

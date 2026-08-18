@@ -1,0 +1,153 @@
+{
+  "git_sha": "9332c39",
+  "date": "2026-07-27",
+  "suite": "l3",
+  "metrics": {
+    "judge_failed_count": 0,
+    "judge_failed_memory": 0,
+    "judge_failed_no-memory": 0,
+    "mean_score_memory": 5.833333333333333,
+    "mean_score_no-memory": 6.666666666666667,
+    "uplift": -0.8333333333333339
+  },
+  "per_item": [
+    {
+      "id": "arch-001/no-memory/run0",
+      "values": {
+        "duration_s": 73.725796393,
+        "input_tokens": 18,
+        "output_tokens": 3103,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "答案完整覆盖了全部五个要点，并额外提供了具体的UDF挂载建议和已知的global-scope陷阱，未违反任何gotcha。"
+    },
+    {
+      "id": "arch-001/memory/run0",
+      "values": {
+        "duration_s": 74.776454589,
+        "input_tokens": 18,
+        "output_tokens": 4660,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "答案准确指出了 zdb.c 是入口点,并清晰说明数据以 Parquet/Arrow 存储、元数据在 FDB 中经 GMetaService 管理、NDP 用于缓存,涵盖了 rubric 的所有核心要点,还补充了 storage/ 与 tool/ 的职责区分,信息真实可靠且无编造迹象。"
+    },
+    {
+      "id": "arch-005/no-memory/run0",
+      "values": {
+        "duration_s": 284.301108553,
+        "input_tokens": 2,
+        "output_tokens": 1712,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "答案准确覆盖了所有评分点:明确指出GPORCA有独立的调度决策路径、正确定位src/backend/gporca/为C++代码、精确给出SetDirectDispatchInfo函数及文件路径、说明其作用,并解释了两条路径独立导致需要分别修复的原因。"
+    },
+    {
+      "id": "arch-005/memory/run0",
+      "values": {
+        "duration_s": 324.135668498,
+        "input_tokens": 12,
+        "output_tokens": 5324,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "答案准确覆盖了所有评分点:明确指出GPORCA是独立路径、位于src/backend/gporca/、精确定位了SetDirectDispatchInfo函数及其文件路径和作用,并清楚说明两条路径独立导致修复不会自动覆盖对方。额外的commit细节和SP2背景信息不影响核心得分点的完整命中。"
+    },
+    {
+      "id": "fix-002/no-memory/run0",
+      "values": {
+        "duration_s": 438.357014848,
+        "input_tokens": 60,
+        "output_tokens": 32520,
+        "score": 0,
+        "timed_out": 0
+      },
+      "note": "timed out or empty result"
+    },
+    {
+      "id": "fix-002/memory/run0",
+      "values": {
+        "duration_s": 709.478212868,
+        "input_tokens": 60,
+        "output_tokens": 37784,
+        "score": 0,
+        "timed_out": 0
+      },
+      "note": "timed out or empty result"
+    },
+    {
+      "id": "fix-003/no-memory/run0",
+      "values": {
+        "duration_s": 698.009928694,
+        "input_tokens": 44,
+        "output_tokens": 56150,
+        "score": 4,
+        "timed_out": 0
+      },
+      "note": "The agent correctly identifies that the collector ignores SIGUSR1 due to a stale local-latch assumption as background context, but does not identify this as the actual root cause of the hang, and its proposed fix (lock_timeout, SIGTERM handling) is a different, incorrect diagnosis rather than installing a SIGUSR1 handler calling latch_sigusr1_handler(). Most rubric points about the specific fix and errno handling are missed."
+    },
+    {
+      "id": "fix-003/memory/run0",
+      "values": {
+        "duration_s": 69.121245192,
+        "input_tokens": 16,
+        "output_tokens": 3899,
+        "score": 0,
+        "timed_out": 0
+      },
+      "note": "The agent completely missed the actual root cause (SIG_IGN on SIGUSR1 preventing shared-latch wakeup in PgstatCollectorMain) and instead fabricated an unrelated theory about heavyweight lock contention on relyt_stats_backup with an incorrect LockTimeout fix; none of the rubric's key points are addressed."
+    },
+    {
+      "id": "fix-005/no-memory/run0",
+      "values": {
+        "duration_s": 439.201396682,
+        "input_tokens": 12,
+        "output_tokens": 4431,
+        "score": 8,
+        "timed_out": 0
+      },
+      "note": "The agent correctly identifies the catalog table location but pivots away from the expected answer by asserting regexp_matches is already present and instead diagnoses a supposedly separate dispatcher logic bug — this contradicts the rubric's core expected fix (adding the proname clause) and doesn't address carrying it into the current SQL file, though the location identification is accurate and well-cited."
+    },
+    {
+      "id": "fix-005/memory/run0",
+      "values": {
+        "duration_s": 280.526063937,
+        "input_tokens": 4,
+        "output_tokens": 2090,
+        "score": 5,
+        "timed_out": 0
+      },
+      "note": "The agent correctly identified the mechanism (relyt_non_dispatched_func populated via OR-chain INSERT...ON CONFLICT DO NOTHING) and the substance of the fix, but misattributed the file location to contrib/zdb rather than contrib/relyt, and proposed a new incremental migration file rather than recognizing the versioned relyt--*.sql files are full rebuild scripts requiring the fix in the latest version — a load-bearing distinction per the rubric."
+    },
+    {
+      "id": "gotcha-001/no-memory/run0",
+      "values": {
+        "duration_s": 21.509947562,
+        "input_tokens": 4,
+        "output_tokens": 1193,
+        "score": 8,
+        "timed_out": 0
+      },
+      "note": "The answer correctly diagnoses the stale FFI header cause and gives the exact fix commands in the right order, avoiding all three gotchas. It loses a couple points for not explicitly framing this as a recurring issue that must be redone on every rebase, and for offering to run the commands rather than fully explaining the general recurring nature."
+    },
+    {
+      "id": "gotcha-001/memory/run0",
+      "values": {
+        "duration_s": 46.697736411,
+        "input_tokens": 8,
+        "output_tokens": 3090,
+        "score": 10,
+        "timed_out": 0
+      },
+      "note": "Answer correctly identifies root cause, provides exact fix commands in correct order (delete, source toolset, rebuild), and explicitly notes recurrence after every rebase — matching all rubric points with no gotcha violations."
+    }
+  ],
+  "env": {
+    "arms": "no-memory,memory",
+    "model": "sonnet",
+    "n": "1",
+    "tasks": "fix-002,fix-003,fix-005,arch-001,arch-005,gotcha-001"
+  }
+}

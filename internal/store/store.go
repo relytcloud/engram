@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Gentleman-Programming/engram/internal/timeutil"
 	sqlite "modernc.org/sqlite"
@@ -2420,6 +2422,21 @@ func (s *Store) RecentObservations(project, scope string, limit int) ([]Observat
 	return s.queryObservations(query, args...)
 }
 
+// PinnedObservations returns a project's pinned observations in PIN-TIME
+// ASCENDING order (oldest pin first), which is the order FormatContext renders
+// the "### Pinned (core memory)" section in — a stable prefix that only grows at
+// the end as new pins arrive.
+//
+// PIN-TIME PROXY (documented limitation): there is no pin timestamp in the
+// schema. setObservationPinned flips observations.pinned and deliberately leaves
+// updated_at alone (TestPinnedObservationsAndFormatContextPriority pins that
+// behavior — pinning is not a content edit and must not disturb sync/export), so the
+// closest available ordering key is updated_at — the last time the row's content
+// changed, falling back to created_at for rows written before updated_at existed.
+// Consequence: re-pinning an old observation does NOT move it to the end of the
+// section, and editing a pinned observation's content DOES. Ordering is stable
+// and deterministic either way (id breaks ties); a true pinned_at column is the
+// fix if the distinction ever matters.
 func (s *Store) PinnedObservations(project, scope string) ([]Observation, error) {
 	project, _ = NormalizeProject(project)
 
@@ -2439,7 +2456,7 @@ func (s *Store) PinnedObservations(project, scope string) ([]Observation, error)
 		args = append(args, normalizeScope(scope))
 	}
 
-	query += " ORDER BY datetime(o.created_at) DESC, o.id DESC"
+	query += " ORDER BY datetime(COALESCE(NULLIF(o.updated_at, ''), o.created_at)) ASC, o.id ASC"
 	return s.queryObservations(query, args...)
 }
 
@@ -3295,8 +3312,258 @@ SELECT 1 FROM (
 
 // ─── Context Formatting ─────────────────────────────────────────────────────
 
+// Layered mem_context contract (Phase 2 spec R3b). mem_context is called at
+// every session start and after every compaction, so the whole block is hard
+// capped at contextByteCap bytes (~400 tokens at the 4-bytes-per-token
+// approximation). Overflow is resolved by dropping the oldest observation
+// lines first, then the oldest session lines; pinned content is never dropped
+// (capping the pinned block itself is a separate concern).
+//
+// The identical contract is implemented by internal/memorylake's FormatContext
+// so a project's context block looks the same on either backend — keep the two
+// in sync.
+const (
+	contextByteCap         = 1600
+	contextRecentObs       = 3
+	contextRecentSessions  = 5
+	contextSummaryTruncLen = 160
+)
+
+// contextPinnedTruncLen is the pre-existing pinned/observation content cut used
+// by FormatContext before the layered rewrite. The layered layout keeps it for
+// the pinned block only (recent observations now use firstSentence).
+const contextPinnedTruncLen = 300
+
+// contextTitleTruncLen caps a rendered title in a pinned/observation context
+// line. Titles are user/agent supplied and were the last unbounded field in a
+// context line: content is cut at contextPinnedTruncLen / contextSummaryTruncLen
+// runes, but a multi-kilobyte title used to render whole. That matters for the
+// pinned block specifically, because a single pinned line is the one thing
+// neither cap can drop (see capPinnedLines), so an unbounded title could push
+// the whole block past contextByteCap with nothing left to trim.
+//
+// internal/memorylake carries a byte-identical copy — keep the two in sync.
+const contextTitleTruncLen = 120
+
+// truncTitle cuts title to at most contextTitleTruncLen runes, appending "…"
+// when it was longer. Distinct from truncate (which appends a literal "...")
+// so a cut title reads as one glyph of elision inside the bolded run, matching
+// firstSentence's ellipsis.
+//
+// Canonical twin: internal/memorylake.truncTitle. Keep byte-identical.
+func truncTitle(title string) string {
+	runes := []rune(title)
+	if len(runes) <= contextTitleTruncLen {
+		return title
+	}
+	return string(runes[:contextTitleTruncLen]) + "…"
+}
+
+// Pinned core-memory contract (Phase 2 spec R4). The pinned block is the one
+// section the outer contextByteCap never drops, so it needs its own ceiling:
+// without one, a project that pins 50 facts starves sessions/observations out of
+// the block entirely and blows the 400-token budget from the inside.
+//
+//   - pinnedSectionByteCap bounds the WHOLE rendered section (heading + entry
+//     lines + overflow marker + the blank separator writeContextSection adds),
+//     so it is the number a caller can verify by measuring the output.
+//   - Entries render in pin-time ASCENDING order (oldest pin first), which keeps
+//     the section a stable prefix as new pins arrive at the end.
+//   - Overflow drops the OLDEST pins from *rendering* (never from storage) until
+//     the newest ones fit, and appends pinnedCapMarkerFmt naming how many were
+//     withheld plus the way to prune them for good.
+//
+// internal/memorylake carries byte-identical copies of all three (its
+// FormatContext must render the same block) — keep them in sync.
+const (
+	pinnedSectionByteCap = 1024
+	pinnedSectionHeading = "### Pinned (core memory)\n"
+	pinnedCapMarkerFmt   = "(pin cap reached: %d pinned facts not shown — mem_unpin to prune)\n"
+)
+
+// contextFooter closes every context block with the expand-on-demand pointer:
+// the block carries first sentences only, full bodies are one call away.
+const contextFooter = "Full bodies: mem_search / mem_get_observation.\n"
+
+// firstSentence returns content up to the first sentence terminator, capped
+// at contextSummaryTruncLen on a rune boundary. Deterministic — key entities in
+// the opening sentence always survive (Phase 2 spec R3 rule).
+//
+// A '.' only terminates when it is followed by whitespace/end-of-string and is
+// not flanked by digits, so decimals survive:
+// "PostgreSQL 15.3 is required. More." → "PostgreSQL 15.3 is required."
+// The other terminators (!?。！？ and \n) always terminate.
+//
+// Known tradeoff (ACCEPTED): abbreviations whose '.' is followed by a space
+// still terminate — "e.g. use flags. Done." → "e.g." — because the guard is
+// deliberately context-free (digit + whitespace rules only). We do NOT carry an
+// abbreviation dictionary; the summary is a scanning aid, not prose.
+//
+// Canonical twin: internal/mcp.firstSentence (internal/mcp/search_index.go),
+// whose rune cap is spelled searchSummaryMaxRunes (same value, 160).
+// internal/mcp imports internal/store, so internal/store cannot import it back;
+// this duplication mirrors how mcp duplicates eval/metrics.ApproxTokens. Keep
+// the three copies (mcp, store, memorylake) behaviourally identical.
+func firstSentence(content string) string {
+	c := strings.TrimSpace(content)
+	runes := []rune(c)
+	for i, r := range runes {
+		if r == '!' || r == '?' || r == '\n' || r == '。' || r == '！' || r == '？' {
+			c = string(runes[:i+1])
+			break
+		}
+		if r != '.' {
+			continue
+		}
+		// Must be followed by whitespace or end-of-string. This alone keeps
+		// decimals intact ("15.3" — the '3' is not whitespace).
+		if i+1 < len(runes) && !unicode.IsSpace(runes[i+1]) {
+			continue
+		}
+		// Must not be flanked by digits, looking past the whitespace, so a
+		// spaced decimal/enumeration ("15. 3") is not a sentence end either.
+		if i > 0 && unicode.IsDigit(runes[i-1]) && unicode.IsDigit(nextNonSpace(runes[i+1:])) {
+			continue
+		}
+		c = string(runes[:i+1])
+		break
+	}
+	if utf8.RuneCountInString(c) > contextSummaryTruncLen {
+		runes := []rune(c)
+		c = string(runes[:contextSummaryTruncLen]) + "…"
+	}
+	return strings.TrimSpace(c)
+}
+
+// nextNonSpace returns the first non-whitespace rune of runes, or 0 when there
+// is none (0 is not a digit, so callers treat "nothing follows" as not-a-digit).
+func nextNonSpace(runes []rune) rune {
+	for _, r := range runes {
+		if !unicode.IsSpace(r) {
+			return r
+		}
+	}
+	return 0
+}
+
+// capPinnedLines enforces pinnedSectionByteCap over the rendered pinned
+// section. lines arrive in pin-time ASCENDING order (oldest pin first, see
+// PinnedObservations), so overflow is resolved by dropping from the FRONT —
+// oldest pins stop being rendered until the newest ones fit — and a marker line
+// naming the number withheld is appended.
+//
+// Nothing is deleted: dropped pins stay pinned in storage and remain reachable
+// via mem_search / mem_get_observation; the marker points at mem_unpin as the
+// way to prune them for good.
+//
+// Canonical twin: internal/memorylake.capPinnedLines. Keep byte-identical.
+func capPinnedLines(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+	// A lone entry is always rendered — core memory is never emptied — so
+	// nothing can be withheld and there is no marker to emit. Without this
+	// early return, a single line over the cap fell through the loop to the
+	// tail below and produced "0 pinned facts not shown", which is false.
+	if len(lines) == 1 {
+		return lines
+	}
+	for dropped := 0; dropped < len(lines); dropped++ {
+		marker := ""
+		if dropped > 0 {
+			marker = fmt.Sprintf(pinnedCapMarkerFmt, dropped)
+		}
+		shown := lines[dropped:]
+		if pinnedSectionBytes(shown, marker) > pinnedSectionByteCap {
+			continue
+		}
+		if marker == "" {
+			return shown
+		}
+		out := make([]string, 0, len(shown)+1)
+		out = append(out, shown...)
+		return append(out, marker)
+	}
+	// Reached only when even the newest entry alone exceeds the cap (with at
+	// least one older entry behind it, per the len == 1 guard above): core
+	// memory is never emptied, so the newest pin renders over cap rather than
+	// being dropped, and the marker counts the len-1 ≥ 1 pins withheld.
+	return []string{lines[len(lines)-1], fmt.Sprintf(pinnedCapMarkerFmt, len(lines)-1)}
+}
+
+// pinnedSectionBytes is the rendered size of the pinned section: heading +
+// entry lines + the overflow marker (empty when there is none) + the blank
+// separator writeContextSection appends. This is exactly what a caller measures
+// in the output, which is what pinnedSectionByteCap is defined against.
+func pinnedSectionBytes(lines []string, marker string) int {
+	n := len(pinnedSectionHeading) + len(marker) + 1
+	for _, line := range lines {
+		n += len(line)
+	}
+	return n
+}
+
+// renderLayeredContext assembles the layered block. The pinned section is
+// capped first and on its own (capPinnedLines), then contextByteCap is enforced
+// over the whole block by dropping the oldest observation line, then the oldest
+// session line, until it fits. Sessions and observations are newest-first, so
+// "oldest" is the last element. Pinned lines are never dropped by the outer cap:
+// if a block is still over cap once observations and sessions are gone, it is
+// returned as-is.
+func renderLayeredContext(pinnedLines, sessionLines, obsLines []string) string {
+	// Once, before the loop: capPinnedLines appends a marker line, so running
+	// it again on its own output would count that marker as an entry and
+	// report the wrong number withheld.
+	pinnedLines = capPinnedLines(pinnedLines)
+	for {
+		out := joinLayeredContext(pinnedLines, sessionLines, obsLines)
+		if len(out) <= contextByteCap {
+			return out
+		}
+		if n := len(obsLines); n > 0 {
+			obsLines = obsLines[:n-1]
+			continue
+		}
+		if n := len(sessionLines); n > 0 {
+			sessionLines = sessionLines[:n-1]
+			continue
+		}
+		return out
+	}
+}
+
+func joinLayeredContext(pinnedLines, sessionLines, obsLines []string) string {
+	var b strings.Builder
+	b.WriteString("## Memory Context\n\n")
+	writeContextSection(&b, pinnedSectionHeading, pinnedLines)
+	writeContextSection(&b, "### Recent Sessions\n", sessionLines)
+	writeContextSection(&b, "### Recent Observations\n", obsLines)
+	b.WriteString(contextFooter)
+	return b.String()
+}
+
+func writeContextSection(b *strings.Builder, heading string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	b.WriteString(heading)
+	for _, line := range lines {
+		b.WriteString(line)
+	}
+	b.WriteString("\n")
+}
+
+// FormatContext renders the layered context block for a project: pinned
+// observations (pin-time ascending, self-capped at pinnedSectionByteCap), then
+// up to contextRecentSessions one-line session entries, then up to
+// contextRecentObs observation summaries, then the expand-on-demand footer — all
+// within contextByteCap bytes.
+//
+// Recent user prompts are deliberately NOT part of the layered block: they cost
+// more bytes than they buy inside a 400-token budget. They remain available via
+// RecentPrompts / SearchPrompts.
 func (s *Store) FormatContext(project, scope string) (string, error) {
-	sessions, err := s.RecentSessions(project, 5)
+	sessions, err := s.RecentSessions(project, contextRecentSessions)
 	if err != nil {
 		return "", err
 	}
@@ -3311,58 +3578,63 @@ func (s *Store) FormatContext(project, scope string) (string, error) {
 		return "", err
 	}
 
-	prompts, err := s.RecentPrompts(project, 10)
-	if err != nil {
-		return "", err
-	}
-
-	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 && len(prompts) == 0 {
+	if len(sessions) == 0 && len(pinned) == 0 && len(observations) == 0 {
 		return "", nil
 	}
 
-	var b strings.Builder
-	b.WriteString("## Memory from Previous Sessions\n\n")
-
-	if len(sessions) > 0 {
-		b.WriteString("### Recent Sessions\n")
-		for _, sess := range sessions {
-			summary := ""
-			if sess.Summary != nil {
-				summary = fmt.Sprintf(": %s", truncate(*sess.Summary, 200))
-			}
-			fmt.Fprintf(&b, "- **%s** (%s)%s [%d observations]\n",
-				sess.Project, timeutil.FormatLocal(sess.StartedAt), summary, sess.ObservationCount)
-		}
-		b.WriteString("\n")
+	pinnedLines := make([]string, 0, len(pinned))
+	for _, obs := range pinned {
+		pinnedLines = append(pinnedLines, fmt.Sprintf("- [%s] **%s**: %s\n",
+			obs.Type, truncTitle(obs.Title), truncate(obs.Content, contextPinnedTruncLen)))
 	}
 
-	if len(prompts) > 0 {
-		b.WriteString("### Recent User Prompts\n")
-		for _, p := range prompts {
-			fmt.Fprintf(&b, "- %s: %s\n", timeutil.FormatLocal(p.CreatedAt), truncate(p.Content, 200))
-		}
-		b.WriteString("\n")
+	// A blank project filter means RecentSessions returned rows from every
+	// project (the cross-project render used by scope=personal), so each
+	// session line has to say which project it came from. Per-project renders
+	// stay byte-identical to before — the prefix would be pure noise there.
+	crossProject := strings.TrimSpace(project) == ""
+
+	sessionLines := make([]string, 0, len(sessions))
+	for _, sess := range sessions {
+		sessionLines = append(sessionLines, fmt.Sprintf("- %s %s\n",
+			timeutil.FormatLocal(sess.StartedAt), sessionSummaryLine(sess, crossProject)))
 	}
 
-	if len(pinned) > 0 {
-		b.WriteString("### Pinned\n")
-		for _, obs := range pinned {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
-		}
-		b.WriteString("\n")
+	if len(observations) > contextRecentObs {
+		observations = observations[:contextRecentObs]
+	}
+	obsLines := make([]string, 0, len(observations))
+	for _, obs := range observations {
+		obsLines = append(obsLines, fmt.Sprintf("- [%s] **%s**: %s\n",
+			obs.Type, truncTitle(obs.Title), firstSentence(obs.Content)))
 	}
 
-	if len(observations) > 0 {
-		b.WriteString("### Recent Observations\n")
-		for _, obs := range observations {
-			fmt.Fprintf(&b, "- [%s] **%s**: %s\n",
-				obs.Type, obs.Title, truncate(obs.Content, 300))
-		}
-		b.WriteString("\n")
-	}
+	return renderLayeredContext(pinnedLines, sessionLines, obsLines), nil
+}
 
-	return b.String(), nil
+// sessionSummaryLine renders the one-line session tail: the summary's first
+// sentence when there is one, "(active)" for a still-open session, and
+// "(no summary)" for a session that ended without one.
+//
+// crossProject prefixes the tail with "[<project>] " so a cross-project render
+// (blank project filter, e.g. scope=personal) attributes each session to its
+// own project. Per-project renders pass false and emit no prefix.
+//
+// internal/memorylake has no session lines at all (MemoryLake has no session
+// tracking — see its FormatContext), so there is no twin of this helper to keep
+// in byte parity: its block simply omits "### Recent Sessions".
+func sessionSummaryLine(sess SessionSummary, crossProject bool) string {
+	tail := "(no summary)"
+	switch {
+	case sess.Summary != nil && strings.TrimSpace(*sess.Summary) != "":
+		tail = firstSentence(*sess.Summary)
+	case sess.EndedAt == nil:
+		tail = "(active)"
+	}
+	if crossProject && strings.TrimSpace(sess.Project) != "" {
+		return "[" + sess.Project + "] " + tail
+	}
+	return tail
 }
 
 // ─── Export / Import ─────────────────────────────────────────────────────────

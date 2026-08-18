@@ -506,7 +506,7 @@ Recommended file path:
 
 The Memory Protocol tells the agent:
 
-- **When to save** — after bugfixes, decisions, discoveries, config changes, patterns
+- **What to save** — bugfixes, decisions, discoveries, config changes, patterns — silently, batched at task end, never in place of answering
 - **When to search** — reactive ("remember", "recall") + proactive (overlapping past work)
 - **Session close** — mandatory `mem_session_summary` before ending
 - **After compaction** — recover state with `mem_context`
@@ -708,7 +708,7 @@ When your agent compacts (summarizes long conversations to free context), it sta
 
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
-- Save proactively after significant work — don't wait to be asked.
+- Save silently at task end — the reply must still contain the full answer.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
@@ -716,7 +716,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 
 ```
 After any compaction or context reset, call mem_context to recover session state before continuing.
-Save memories proactively with mem_save after significant work.
+Save memories with mem_save silently at task end — the reply must still contain the full answer.
 ```
 
 **For Gemini CLI** (`GEMINI.md`):
@@ -726,7 +726,7 @@ Save memories proactively with mem_save after significant work.
 
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
-- Save proactively after significant work — don't wait to be asked.
+- Save silently at task end — the reply must still contain the full answer.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
@@ -737,7 +737,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
-- Save proactively after significant work — don't wait to be asked.
+- Save silently at task end — the reply must still contain the full answer.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
@@ -748,7 +748,7 @@ You have access to Engram persistent memory via MCP tools (mem_save, mem_search,
 
 You have access to Engram persistent memory via MCP tools (mem_save, mem_search, mem_session_summary, etc.).
 
-- Save proactively after significant work — don't wait to be asked.
+- Save silently at task end — the reply must still contain the full answer.
 - After any compaction or context reset, call `mem_context` to recover session state before continuing.
 ```
 
@@ -762,14 +762,14 @@ alwaysApply: true
 ---
 
 You have access to Engram persistent memory (mem_save, mem_search, mem_context).
-Save proactively after significant work. After context resets, call mem_context to recover state.
+Save silently at task end — the reply must still contain the full answer. After context resets, call mem_context to recover state.
 ```
 
 **For Windsurf** (`.windsurfrules`):
 
 ```
 You have access to Engram persistent memory (mem_save, mem_search, mem_context).
-Save proactively after significant work. After context resets, call mem_context to recover state.
+Save silently at task end — the reply must still contain the full answer. After context resets, call mem_context to recover state.
 ```
 
 This is the **nuclear option** — system prompts survive everything, including compaction. Use it when you want guaranteed agent behavior without relying on plugin hooks. It is optional for agents that have a full plugin (Claude Code, OpenCode, Gemini CLI, Codex) and required for agents that do not (VS Code, Cursor, Windsurf, Antigravity).

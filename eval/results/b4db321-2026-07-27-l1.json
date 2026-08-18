@@ -1,0 +1,508 @@
+{
+  "git_sha": "b4db321",
+  "date": "2026-07-27",
+  "suite": "l1",
+  "metrics": {
+    "avg_distractor_ratio": 0.13271604938271603,
+    "avg_tokens_per_query": 205.59259259259258,
+    "latency_p50_ms": 599,
+    "latency_p95_ms": 1114,
+    "mrr": 0.7376543209876544,
+    "recall@1": 0.6851851851851852,
+    "recall@10": 0.7962962962962963,
+    "recall@5": 0.7962962962962963
+  },
+  "per_item": [
+    {
+      "id": "r-001",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 610,
+        "tokens": 185
+      }
+    },
+    {
+      "id": "r-002",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1011,
+        "tokens": 488
+      }
+    },
+    {
+      "id": "r-003",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1090,
+        "tokens": 359
+      }
+    },
+    {
+      "id": "r-004",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 562,
+        "tokens": 268
+      }
+    },
+    {
+      "id": "r-005",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 532,
+        "tokens": 325
+      }
+    },
+    {
+      "id": "r-006",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 561,
+        "tokens": 205
+      }
+    },
+    {
+      "id": "r-007",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1125,
+        "tokens": 288
+      }
+    },
+    {
+      "id": "r-008",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 545,
+        "tokens": 0
+      }
+    },
+    {
+      "id": "r-009",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1110,
+        "tokens": 67
+      }
+    },
+    {
+      "id": "r-010",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 580,
+        "tokens": 0
+      }
+    },
+    {
+      "id": "r-011",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 566,
+        "tokens": 310
+      }
+    },
+    {
+      "id": "r-012",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 538,
+        "tokens": 125
+      }
+    },
+    {
+      "id": "r-013",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 583,
+        "tokens": 387
+      }
+    },
+    {
+      "id": "r-014",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1101,
+        "tokens": 67
+      }
+    },
+    {
+      "id": "r-015",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 578,
+        "tokens": 77
+      }
+    },
+    {
+      "id": "r-016",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 582,
+        "tokens": 336
+      }
+    },
+    {
+      "id": "r-017",
+      "values": {
+        "distractor_ratio": 0.25,
+        "first_hit_rank": 2,
+        "latency_ms": 532,
+        "tokens": 308
+      }
+    },
+    {
+      "id": "r-018",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 578,
+        "tokens": 256
+      }
+    },
+    {
+      "id": "r-019",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 570,
+        "tokens": 418
+      }
+    },
+    {
+      "id": "r-020",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 568,
+        "tokens": 254
+      }
+    },
+    {
+      "id": "r-021",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 590,
+        "tokens": 668
+      }
+    },
+    {
+      "id": "r-022",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 565,
+        "tokens": 327
+      }
+    },
+    {
+      "id": "r-023",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 996,
+        "tokens": 308
+      }
+    },
+    {
+      "id": "r-024",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 547,
+        "tokens": 578
+      }
+    },
+    {
+      "id": "r-025",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 572,
+        "tokens": 86
+      }
+    },
+    {
+      "id": "r-026",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 1206,
+        "tokens": 140
+      }
+    },
+    {
+      "id": "r-027",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 608,
+        "tokens": 169
+      }
+    },
+    {
+      "id": "r-028",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 596,
+        "tokens": 74
+      }
+    },
+    {
+      "id": "r-029",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 1023,
+        "tokens": 231
+      }
+    },
+    {
+      "id": "r-030",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1086,
+        "tokens": 585
+      }
+    },
+    {
+      "id": "r-031",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 3947,
+        "tokens": 86
+      }
+    },
+    {
+      "id": "r-032",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 1040,
+        "tokens": 0
+      }
+    },
+    {
+      "id": "r-033",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1038,
+        "tokens": 163
+      }
+    },
+    {
+      "id": "r-034",
+      "values": {
+        "distractor_ratio": 0.25,
+        "first_hit_rank": 2,
+        "latency_ms": 1073,
+        "tokens": 308
+      }
+    },
+    {
+      "id": "r-035",
+      "values": {
+        "distractor_ratio": 0.5,
+        "first_hit_rank": 2,
+        "latency_ms": 588,
+        "tokens": 163
+      }
+    },
+    {
+      "id": "r-036",
+      "values": {
+        "distractor_ratio": 0.3333333333333333,
+        "first_hit_rank": 2,
+        "latency_ms": 713,
+        "tokens": 231
+      }
+    },
+    {
+      "id": "r-037",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 1114,
+        "tokens": 231
+      }
+    },
+    {
+      "id": "r-038",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 635,
+        "tokens": 231
+      }
+    },
+    {
+      "id": "r-039",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 623,
+        "tokens": 0
+      }
+    },
+    {
+      "id": "r-040",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 599,
+        "tokens": 0
+      }
+    },
+    {
+      "id": "r-041",
+      "values": {
+        "distractor_ratio": 1,
+        "first_hit_rank": 0,
+        "latency_ms": 1056,
+        "tokens": 145
+      }
+    },
+    {
+      "id": "r-042",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 0,
+        "latency_ms": 598,
+        "tokens": 0
+      }
+    },
+    {
+      "id": "r-043",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 712,
+        "tokens": 86
+      }
+    },
+    {
+      "id": "r-044",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 624,
+        "tokens": 86
+      }
+    },
+    {
+      "id": "r-045",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 648,
+        "tokens": 86
+      }
+    },
+    {
+      "id": "r-046",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 570,
+        "tokens": 86
+      }
+    },
+    {
+      "id": "r-047",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 589,
+        "tokens": 170
+      }
+    },
+    {
+      "id": "r-048",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 587,
+        "tokens": 93
+      }
+    },
+    {
+      "id": "r-049",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 650,
+        "tokens": 233
+      }
+    },
+    {
+      "id": "r-050",
+      "values": {
+        "distractor_ratio": 0.3333333333333333,
+        "first_hit_rank": 2,
+        "latency_ms": 588,
+        "tokens": 226
+      }
+    },
+    {
+      "id": "r-051",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 823,
+        "tokens": 93
+      }
+    },
+    {
+      "id": "r-052",
+      "values": {
+        "distractor_ratio": 0.5,
+        "first_hit_rank": 3,
+        "latency_ms": 757,
+        "tokens": 310
+      }
+    },
+    {
+      "id": "r-053",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 605,
+        "tokens": 93
+      }
+    },
+    {
+      "id": "r-054",
+      "values": {
+        "distractor_ratio": 0,
+        "first_hit_rank": 1,
+        "latency_ms": 584,
+        "tokens": 93
+      }
+    }
+  ],
+  "env": {
+    "backend": "memorylake",
+    "dataset": "eval/datasets/phoenix-retrieval-v1.jsonl",
+    "project": "phoenix"
+  }
+}

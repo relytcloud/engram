@@ -22,7 +22,7 @@ type Config struct {
 // DefaultBaseURL is the MemoryLake V3 API base URL used when neither the
 // ENGRAM_MEMORYLAKE_BASE_URL env var nor a persisted `engram memorylake config`
 // value supplies one.
-const DefaultBaseURL = "https://app.memorylake.ai/openapi/memorylake"
+const DefaultBaseURL = "https://app.memorylake.cn/openapi/memorylake"
 
 // DefaultWorkspace is the MemoryLake workspace memories live under when nothing
 // overrides it.

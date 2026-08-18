@@ -1,0 +1,22 @@
+{
+  "id": "gotcha-001",
+  "category": "gotcha",
+  "prompt": "I just rebased my branch on top of latest main and reran the full Neon build. It fails compiling zdb_deltalake_export.c with `PrimitiveType* undeclared` (or at runtime I instead see `Create write context failed [errno: -1, msg: Schema inconsistent]`). I already ran `git submodule update --init --recursive`. What's the likely cause and how do I fix it?",
+  "rubric": {
+    "answer_points": [
+      "The delta-kernel-rs FFI header (delta_kernel_ffi.h) can be stale even after submodule update, because Rust's incremental build can short-circuit and skip regenerating/copying the header when its target/ cache thinks nothing changed",
+      "Fix: force-delete the installed header and lib, then rebuild: rm contrib/zdb/third_party/install/include/delta_kernel_ffi.h and contrib/zdb/third_party/install/lib/libdelta_kernel_ffi.so",
+      "Must source the gcc-toolset-11 environment (source /opt/rh/gcc-toolset-11/enable) before rebuilding",
+      "Rebuild via (cd contrib/zdb/third_party && ./delta-kernel-rs/relyt/build.sh release install)",
+      "This must be done after every rebase/pull/branch switch, not just once, since the full build's neon_build_extensions.sh does call the build script but can silently skip the header copy"
+    ],
+    "gotcha_points": [
+      "did NOT just re-run the full build again assuming it will pick up the new header automatically",
+      "did NOT assume `git submodule update --init --recursive` alone was sufficient to fix it",
+      "did NOT skip sourcing gcc-toolset-11 before rebuilding delta-kernel-rs"
+    ],
+    "max_score": 10
+  },
+  "max_turns": 25,
+  "timeout_min": 20
+}

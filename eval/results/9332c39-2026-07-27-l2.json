@@ -1,0 +1,18 @@
+{
+  "git_sha": "9332c39",
+  "date": "2026-07-27",
+  "suite": "l2",
+  "metrics": {
+    "avg_search_tokens": 991.4629629629629,
+    "context_tokens": 1715,
+    "injected_tokens_per_session": 9699.388888888889,
+    "static_hook_tokens": 2844,
+    "static_mcp_instr_tokens": 184,
+    "static_skill_tokens": 1982
+  },
+  "env": {
+    "project": "phoenix",
+    "search_calls_assumed": "3.0",
+    "tokenizer": "approx-bytes/4"
+  }
+}

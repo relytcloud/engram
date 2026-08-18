@@ -386,10 +386,11 @@ func TestCmdSetupWriteReadPathParityUnderEnvDataDir(t *testing.T) {
 	if recovered != nil || stderr != "" {
 		t.Fatalf("panic=%v stderr=%q", recovered, stderr)
 	}
-	// version == "dev" in the test binary, so the version floor is never
-	// met — this assertion targets read-path parity, not the floor check.
-	if strings.TrimSpace(stdout) != "full" {
-		t.Fatalf("stdout = %q, want %q (version=dev fails the floor check)", stdout, "full")
+	// version == "dev" in the test binary, and dev builds meet the version
+	// floor, so the persisted slim mode surfaces as-is — this assertion
+	// targets read-path parity, not the floor check.
+	if strings.TrimSpace(stdout) != "slim" {
+		t.Fatalf("stdout = %q, want %q (dev build meets the floor)", stdout, "slim")
 	}
 }
 
@@ -422,7 +423,7 @@ func TestCmdProtocolModeSlimButVersionBelowFloor(t *testing.T) {
 	}
 
 	oldVersion := version
-	version = "1.3.9"
+	version = "0.3.9" // below the 0.4.0 fork floor
 	t.Cleanup(func() { version = oldVersion })
 
 	withArgs(t, "engram", "protocol-mode", "claude-code")
@@ -521,18 +522,26 @@ func TestMeetsProtocolVersionFloor(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"1.4.0", true},
-		{"1.4.1", true},
-		{"1.5.0", true},
+		// Floor is the 0.4.0 fork version.
+		{"0.4.0", true},
+		{"0.4.1", true},
+		{"0.5.0", true},
+		{"1.0.0", true},
 		{"2.0.0", true},
-		{"1.3.9", false},
-		{"1.0.0", false},
-		{"0.9.9", false},
-		{"dev", false},
+		{"0.3.9", false},
+		{"0.0.1", false},
+		{"0.3", false},
+		// A build-from-source binary is by definition current.
+		{"dev", true},
+		// Go >= 1.24 stamps VCS pseudo-versions into local `go build`
+		// binaries; pre-release/build metadata must not defeat the parse.
+		{"0.4.1-0.20260727111757-cf92b3333032+dirty", true},
+		{"0.3.1-0.20260727111757-cf92b3333032+dirty", false},
+		{"0.4.0+dirty", true},
 		{"", false},
 		{"not-a-version", false},
-		{"v1.4.0", true},
-		{"1.4", true},
+		{"v0.4.0", true},
+		{"0.4", true},
 	}
 	for _, tt := range tests {
 		if got := meetsProtocolVersionFloor(tt.in); got != tt.want {

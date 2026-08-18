@@ -1,0 +1,18 @@
+{
+  "id": "arch-004",
+  "category": "architecture-qa",
+  "prompt": "A query does a WHERE <distribution key> = value lookup through a parent table and GPDB decides to send it to just one segment instead of scanning all segments. Where in the codebase does that single-segment ('direct dispatch') decision get made for the classic Postgres-planner path, and roughly how does it decide which segment to target?",
+  "rubric": {
+    "answer_points": [
+      "The logic lives in src/backend/cdb/cdbtargeteddispatch.c",
+      "The key function is GetContentIdsFromPlanForSingleRelation",
+      "It targets a segment by hashing the distribution key value with the table's distribution policy (cdbhash) to compute which content/segment id should receive the query",
+      "This is the Postgres-planner dispatch path, distinct from the GPORCA optimizer's own dispatch-info translation path",
+      "The function checks relation storage type (e.g. RelationIsZDB) when deciding whether direct dispatch is safe for a given relation"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 20,
+  "timeout_min": 15
+}

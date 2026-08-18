@@ -474,6 +474,7 @@ Response:
 | `ENGRAM_HTTP_TOKEN`             | Optional Bearer auth for the local HTTP server. When set, the following routes require `Authorization: Bearer <token>`: `DELETE /sessions/{id}`, `DELETE /observations/{id}`, `DELETE /prompts/{id}`, `GET /export`, `POST /import`, `POST /projects/migrate`. Comparison is constant-time. Token is read at request time (no restart needed). When unset, all routes are open (zero-config default). | (unset — open) |
 | `ENGRAM_TIMEZONE`               | Timezone for timestamp display in the TUI and cloud dashboard. Accepts any IANA zone name (e.g. `America/New_York`, `Europe/Berlin`). Falls back to system local time when unset or invalid.                                                               | system local         |
 | `ENGRAM_AGENT_CLI`              | LLM runner name used by `engram conflicts scan --semantic` and the HTTP `/conflicts/scan` endpoint. Accepted values: `claude`, `opencode`.                                                                                                                | (unset)              |
+| `ENGRAM_MCP_AUDIT_LOG`          | Opt-in audit trail for `engram mcp`. When set to a file path, one `<RFC3339> <tool>` line is appended per `mem_*` tool **call arrival** — it counts attempts, not successful writes, so a call that later errors or is rejected still produces a line. Best-effort: any file/permission failure is silently ignored and never fails the tool call. Primarily intended for the eval harness to measure per-session `mem_*` usage. | (unset — disabled)   |
 | `ENGRAM_BACKEND`                | Global safety valve for the [MemoryLake backend](#memorylake-backend). Set to `sqlite` to force every project onto local SQLite regardless of per-project enablement. Any other value (or unset) defers to the per-project enablement list.             | (unset — per-project) |
 | `ENGRAM_MEMORYLAKE_BASE_URL`    | MemoryLake V3 API base URL. Required to enable the MemoryLake backend for any project.                                                                                                                                                                   | (unset)              |
 | `ENGRAM_MEMORYLAKE_API_KEY`     | MemoryLake API key (`Authorization: Bearer <key>`). Required to enable the MemoryLake backend for any project.                                                                                                                                            | (unset)              |
@@ -826,13 +827,21 @@ Returns success even when cwd is ambiguous — empty `project` + non-empty `avai
 
 Search persistent memory across all sessions. Supports FTS5 full-text search with type/project/scope/limit filters.
 
+Results are returned as a **reference-first index**, not as observation bodies. One line per hit:
+
+```
+1. [decision] auth model — Auth uses JWT with 15m expiry. (id: obs-1f2e…, ~299 tok, score -0.00)
+```
+
+The summary is the hit's first sentence (capped at 160 runes, plus an ellipsis when truncated), `id` is the `sync_id` to pass to `mem_get_observation` for the full body, and `~N tok` is the approximate cost of that expansion (`ceil(bytes/4)`). The budget bounds the whole agent-visible payload: the optional `budget` argument caps the index's approximate token size (default 600), and hits that do not fit are dropped from the text with an explicit `(+K more omitted — raise budget or refine query)` line — never silently. Omitted hits are dropped from the structured `results` array too, so they cost nothing; `results` lists exactly the shown hits (ids/titles/metadata only, no bodies). Raise `budget` or refine the query to see the rest.
+
 Set `all_projects: true` to search across every project instead of the resolved one. This bypasses project detection entirely and ignores the `project` argument, so an agent can recall a decision logged elsewhere without knowing the project key. The response envelope reports `project_source: "all_projects"` and an empty `project` to reflect the cross-project scope.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are searched across all projects (cross-project personal scope).
 
-Each structured search result includes lifecycle metadata: `state` (`active` or `needs_review`) and, when set, `review_after`. Text output also appends `state: needs_review` for stale observations.
+Each structured search result includes lifecycle metadata: `state` (`active` or `needs_review`) and, when set, `review_after`. Lifecycle state, created-at, project, and scope are carried by the structured `results` entries; the text index line itself stays one line per hit.
 
-When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after the title/content block:
+When an observation has judged relations in `memory_relations`, the result entry includes annotation lines immediately after that hit's index line:
 
 ```
 supersedes: #<id> (<title>)       — this memory supersedes another
@@ -889,9 +898,41 @@ Delete an observation by ID. Uses soft-delete by default (`deleted_at`); optiona
 Save user prompts — records what the user asked so future sessions have context about user goals.
 When called in the same MCP process, this also feeds process-local current prompt context used by later `mem_save` calls with `capture_prompt=true`. The same MCP process lifecycle must receive the prompt context before the later save; prompt capture is best-effort and `mem_save` still succeeds when no context is available.
 
+Prompts are **write-only over MCP**: `mem_save_prompt` is the only prompt tool the MCP server registers, so stdio agents (Claude Code, Codex, Gemini, Cursor, Windsurf) can save prompts but cannot read them back. Reading is via `engram serve` HTTP (`GET /prompts/recent`, `GET /prompts/search`) — the OpenCode plugin and Pi extension already run it — or the cloud dashboard's prompt views. This is the intended Wave-1 posture, not a gap.
+
 ### mem_context
 
-Get recent memory context from previous sessions — shows sessions, prompts, and observations, with optional scope filtering for observations.
+Get recent memory context from previous sessions, with optional scope filtering for observations.
+
+The block is layered and budgeted (~400 tokens / 1600 bytes hard cap) so it is cheap to call at every session start and after every compaction:
+
+```
+## Memory Context
+
+### Pinned (core memory)
+- [decision] **title**: <content, cut to 300 runes>          (title cut to 120 runes; oldest pin first, section ≤ 1024 bytes)
+(pin cap reached: N pinned facts not shown — mem_unpin to prune)   (only when the 1024 bytes run out)
+
+### Recent Sessions
+- <started_at> <summary first sentence | (active) | (no summary)>   (max 5)
+
+### Recent Observations
+- [type] **title**: <content first sentence, cut to 160 runes>      (title cut to 120 runes; max 3)
+
+Full bodies: mem_search / mem_get_observation.
+```
+
+Overflow past the cap drops the oldest observation lines first, then the oldest session lines; pinned content is never dropped by that outer cap.
+
+**`### Pinned (core memory)` is capped separately at 1024 bytes** — heading, entry lines, overflow marker and blank separator included. Entries render in **pin-time ascending order** (oldest pin first), so the section is a stable prefix that grows at the end as new pins arrive. When the 1024 bytes are exhausted, the **oldest** pins stop being *rendered* (they stay pinned and searchable) and a trailing `(pin cap reached: N pinned facts not shown — mem_unpin to prune)` line names how many were withheld. Over-pinning therefore evicts your own earlier pins from the block; `mem_unpin` is the prune. In practice, with the 300-rune content cut on each line, only about 2-3 pinned facts render before the 1024 bytes run out.
+
+Two edge cases of that cap are fixed by contract. **A single pinned entry is never dropped and never carries a marker**: if the newest pin alone exceeds 1024 bytes it renders over cap (core memory is never emptied), and since nothing was withheld no `(pin cap reached: …)` line is emitted — the marker's count is always ≥ 1. And **titles are cut to 120 runes** (with `…`) in both the pinned and recent-observation lines: content was already bounded, so an unbounded title was the one remaining way for a pinned line — the one line neither cap may drop — to carry the whole block past the 1600-byte budget.
+
+Pin time is a documented **proxy**, not a stored timestamp: neither backend records when a pin happened (`mem_pin` only flips `observations.pinned` / the MemoryLake `pinned` metadata key and deliberately leaves `updated_at` untouched on SQLite), so the section orders by `updated_at`, falling back to `created_at`. Consequence: re-pinning an old memory does not move it to the end of the section, while editing a pinned memory's content does. Ordering is deterministic either way (id breaks ties).
+
+Sections with no rows are omitted entirely, and an empty project returns an empty string. In a cross-project render (blank project filter — e.g. `scope: personal` with no `project` override) each session line is prefixed with its project: `- <started_at> [<project>] <summary>`. The MemoryLake backend renders the identical layout minus `### Recent Sessions` (it has no session tracking).
+
+Recent user prompts are **not** part of this block (they cost more than they buy inside the budget). The intended Wave-1 posture is that **prompts are write-only for stdio agents**: Claude Code, Codex, Gemini, Cursor, and Windsurf reach Engram over stdio MCP, which exposes `mem_save_prompt` but no prompt-read tool. Saved prompts are readable only through the `engram serve` HTTP API (`GET /prompts/recent`, `GET /prompts/search`) — used by the OpenCode plugin and the Pi extension, which already run `engram serve` — and through the cloud dashboard. Prompts still feed `mem_save --capture_prompt` within the same MCP process, so stdio agents get their value indirectly rather than by reading them back.
 
 Scope values accepted by the `scope` parameter: `project` (default), `personal`, `global`. When `scope: personal` is passed without an explicit `project` override, the project filter is cleared and personal observations are returned across all projects (cross-project personal scope).
 
@@ -988,9 +1029,9 @@ Behavior:
 
 The Memory Protocol teaches agents **when** and **how** to use Engram's MCP tools. Without it, the agent has the tools but no behavioral guidance. Add this to your agent's prompt file (see [Agent Setup](docs/AGENT-SETUP.md) for per-agent locations).
 
-### WHEN TO SAVE (mandatory)
+### SAVING — silent, batched, never instead of answering
 
-Call `mem_save` IMMEDIATELY after any of these:
+Save decisions, bug root causes, conventions, gotchas, and user preferences:
 
 - Bug fix completed
 - Architecture or design decision made
@@ -998,6 +1039,12 @@ Call `mem_save` IMMEDIATELY after any of these:
 - Configuration change or environment setup
 - Pattern established (naming, structure, convention)
 - User preference or constraint learned
+
+Saving never replaces answering. The agent's final reply must contain the complete
+answer itself — memory serves future sessions, never this reply. Agents must never
+narrate saves ("I've saved this to memory"), and should batch saves at task end
+rather than interrupting the work to save each item as it happens. Searching is
+once, up front: one `mem_search` at task start; on a miss, proceed normally.
 
 Format for `mem_save`:
 
@@ -1020,7 +1067,7 @@ Format for `mem_save`:
 - If unsure about the key, call `mem_suggest_topic_key` first and then reuse it
 - Use `mem_update` when you have an exact observation ID to correct
 
-### WHEN TO SEARCH MEMORY
+### SEARCHING — once, up front
 
 When the user asks to recall something — any variation of "remember", "recall", "what did we do", "how did we solve", "recordar", "acordate", or references to past work:
 
@@ -1028,7 +1075,7 @@ When the user asks to recall something — any variation of "remember", "recall"
 2. If not found, call `mem_search` with relevant keywords (FTS5 full-text search)
 3. If you find a match, use `mem_get_observation` for full untruncated content
 
-Also search memory PROACTIVELY when:
+Search once at task start — on a miss, proceed normally rather than re-running the same query. Also search at task start when:
 
 - Starting work on something that might have been done before
 - The user mentions a topic you have no context on — check if past sessions covered it
@@ -1558,7 +1605,7 @@ Connection settings resolve in precedence order **env var > saved `engram memory
 
 | Variable                                | Required to enable | Description                                                                                          | Default            |
 | ---------------------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------ |
-| `ENGRAM_MEMORYLAKE_BASE_URL`              | no                   | MemoryLake V3 API base URL. Overrides the saved config; falls back to the built-in default when unset everywhere.   | `https://app.memorylake.ai/openapi/memorylake` |
+| `ENGRAM_MEMORYLAKE_BASE_URL`              | no                   | MemoryLake V3 API base URL. Overrides the saved config; falls back to the built-in default when unset everywhere.   | `https://app.memorylake.cn/openapi/memorylake` |
 | `ENGRAM_MEMORYLAKE_API_KEY`               | yes (env or config)  | MemoryLake API key, sent as `Authorization: Bearer <key>`. Set it here or via `engram memorylake config --api-key`. | (unset)             |
 | `ENGRAM_MEMORYLAKE_WORKSPACE`             | no                   | Workspace custom_id or `ws-...` id memories are stored under.                                                       | `engram`            |
 | `ENGRAM_MEMORYLAKE_ACTOR`                 | no                   | Actor custom_id for writes/reads from this machine; distinguishes contributors when a project is shared.            | (unset — hostname)  |
@@ -1576,9 +1623,10 @@ engram memorylake disable --project <name>                # move this project ba
 engram memorylake status                                  # list every known project and its current backend
 ```
 
-- `config` persists connection settings into `~/.engram/memorylake.json` (`connection`, file mode `0600` since it may hold the API key) and prints the resulting **effective** config; with no setter flags it just prints the effective config. Resolution precedence at runtime is **env var > this saved config > built-in default**, applied per field by `memorylake.LoadConfig` — so env vars still override the file for CI/one-off use, and the file overrides the defaults. When `--url` is never supplied (neither env nor saved), the base URL defaults to `https://app.memorylake.ai/openapi/memorylake`; workspace defaults to `engram`. The API key is masked in the printed output. `--clear` wipes the saved connection block (env vars/defaults then apply). This is the recommended alternative to exporting the `ENGRAM_MEMORYLAKE_*` env vars in every shell.
+- `config` persists connection settings into `~/.engram/memorylake.json` (`connection`, file mode `0600` since it may hold the API key) and prints the resulting **effective** config; with no setter flags it just prints the effective config. Resolution precedence at runtime is **env var > this saved config > built-in default**, applied per field by `memorylake.LoadConfig` — so env vars still override the file for CI/one-off use, and the file overrides the defaults. When `--url` is never supplied (neither env nor saved), the base URL defaults to `https://app.memorylake.cn/openapi/memorylake`; workspace defaults to `engram`. The API key is masked in the printed output. `--clear` wipes the saved connection block (env vars/defaults then apply). This is the recommended alternative to exporting the `ENGRAM_MEMORYLAKE_*` env vars in every shell.
 - `enable` records the project in `~/.engram/memorylake.json` (`enabled_projects`). The first `mem_*` call for that project afterward resolves (and caches) the MemoryLake workspace/project id, auto-creating the MemoryLake project under the `engram` workspace if it doesn't already exist.
 - `disable` removes the project from that list; the project's `mem_*` calls immediately go back to SQLite. Any memories already written to MemoryLake are left in place (not deleted).
+- **`enable`/`disable` take effect in already-running sessions.** A long-lived `engram mcp` (or `engram serve`) process does not pin the enablement snapshot it loaded at startup: the routing selector stats `~/.engram/memorylake.json` on each call (mtime+size fingerprint) and re-reads it when it changed on disk, so a project enabled or disabled from another terminal is picked up on the next `mem_*` call — no agent-session restart needed. Only the enablement list hot-reloads; connection settings (`connection` block / env vars) are still read once at process start.
 - `status` prints every project engram knows about (from local SQLite plus the enablement list) and which backend each currently uses.
 - **First-enable auto-migration.** On the first `enable` for a project, engram automatically migrates that project's existing **non-deleted** SQLite observations into MemoryLake. It resolves/creates the MemoryLake project, reads the local observations, and writes each **verbatim** through MemoryLake's direct fact-add endpoint (`POST …/memories/facts`, which stores each text as-is with a real fact id, bypassing the asynchronous mem0 extraction/decision pipeline) — so migrated memories are stored faithfully and are immediately queryable, and the observation **title is preserved** (prepended to the content). SQLite stays the source of truth — **nothing is deleted locally**. The direct endpoint does not deduplicate, so migration makes itself **idempotent** by first listing the project's existing facts and skipping any observation whose text is already present; re-running writes only genuinely new memories. `--no-migrate` skips migration; `--migrate` forces an (idempotent) re-sync even on a re-enable. If MemoryLake is not configured yet (no API key) or a network error occurs, the project **stays enabled** and engram prints a warning to re-run `engram memorylake enable --project <name> --migrate` once it's fixed — enabling never fails just because migration couldn't run. (Note: this direct verbatim write is migration-only; live `mem_save` on an enabled project still goes through the conversation-append + async mem0 extraction path described below.)
 
@@ -1591,7 +1639,8 @@ engram memorylake status                                  # list every known pro
 
 ### Known limitations
 
-- **Only `engram mcp` routes to MemoryLake; other interfaces still use SQLite.** Per-project MemoryLake routing is wired only through the MCP server (`engram mcp`, the interface stdio agents like Claude Code / Gemini / Codex use). The CLI (`engram save` / `engram search`), the TUI (`engram tui`), and the local HTTP API (`engram serve`, used by the OpenCode plugin and Pi extension) do **not** consult the enablement list — they always talk to local SQLite, even for a project that has been enabled for MemoryLake. As a result, the same enabled project is split-brained across interfaces: memories saved via MCP land in MemoryLake and are invisible to `engram search`/TUI/HTTP, and vice versa. This is a current limitation; use the MCP path exclusively for an enabled project until the other interfaces are routed too.
+- **The TUI does not route to MemoryLake; it always uses SQLite.** Per-project MemoryLake routing is wired through the MCP server (`engram mcp`), the CLI (`engram save` / `engram search` — routing on `--project`, else the cwd-detected project), and the local HTTP API (`engram serve`) via a shared selector (`buildRoutingSelector` in `cmd/engram/routing.go`), so those three interfaces route enabled projects identically. The TUI (`engram tui`) does **not** consult the enablement list — it always talks to local SQLite, so memories saved to a MemoryLake-backed project are invisible in the TUI (and TUI-visible SQLite rows for that project are not what MCP/CLI/HTTP read). Any routing/construction failure (server unreachable, bad API key, stale project id) falls back to SQLite for that call with a stderr warning rather than failing the operation.
+- **The cached MemoryLake project id is tenant-specific.** On first use of an enabled project, Engram resolves/creates the MemoryLake project and caches its id (`proj_id`) in `~/.engram/memorylake.json`. That id belongs to the tenant determined by the API key/base URL — after switching `ENGRAM_MEMORYLAKE_BASE_URL` (or the API key) to a different tenant, saves fail with `NOT_FOUND (404): Project not found`. Fix: clear the affected `proj_id` values (set them to `""`) in `~/.engram/memorylake.json`; the next call re-creates the project on the new tenant and backfills the id. Memories on the old tenant are not migrated.
 - **`mem_save` is a synchronous, verbatim direct write.** MemoryLake-backed saves post the observation straight to the direct fact-add endpoint (`POST …/memories/facts`, shipped 2026-07-23), which stores the text **verbatim** as a new fact and returns its **real fact id** — synchronously, bypassing the conversation-append + asynchronous mem0 extraction pipeline. So `mem_save`'s response `sync_id` **is** the materialized fact id and resolves via `mem_get_observation` immediately, and the observation **title is preserved** (prepended to the content). PassiveCapture saves and the best-effort session-end summary take the same direct-write path (a summary is memory-like, so it is stored as a first-class verbatim fact). Prompts (`mem_save_prompt`) still go through the conversation-append path — a prompt is not a memory, and because the fact-add endpoint carries no metadata, writing prompts as facts would make them indistinguishable from real memories in `mem_search`.
 - **No server-side dedup, `topic_key` upsert, or conflict decision on the live write.** The direct fact-add endpoint stores each text as a new fact with **no** similarity check and **no** ADD/UPDATE/FORGET decision — so saving similar content twice creates two facts, and `topic_key` no longer produces an in-place upsert on a MemoryLake-backed project (every `mem_save` is a new fact). Engram's own local topic_key/hash upsert was retired for MemoryLake under the Option A thin adapter and is **not** reintroduced by the direct-write path; `mem_save` on a MemoryLake project does not return `judgment_required`/`candidates` (that loop is SQLite-only). `mem_judge`/`mem_compare` still work by reading MemoryLake's conflict-detection API. (Migration on first `enable` dedups against existing facts before writing, but live saves do not.)
 - **Content is preserved verbatim.** Because the write is a direct fact-add (not a conversation message fed through mem0 extraction), `mem_get_observation` / search results return exactly the text Engram stored — no LLM paraphrase/merge, no `engram_raw` shadow copy needed.
@@ -1670,6 +1719,10 @@ timeout killing it from outside.
   machine and lands in MemoryLake the moment the turn ends. There is no local
   mirror of what was sent, and there is no way to retract it afterward.
 - **Flipping the switch requires restarting the agent — in either direction.**
+  Note this differs from `memorylake enable` / `disable`, which ARE hot-reloaded
+  and take effect on a running session: the routing selector re-reads the
+  enablement file when it changes on disk, but only swaps in the project list —
+  it does not discard an already-constructed backend.
   `cmd/engram/routing.go` caches one MemoryLake backend per project for the
   process lifetime, and the prompt-append suppression flag is set once, when
   that backend is first constructed. If you run `engram memorylake

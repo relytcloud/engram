@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -446,5 +448,159 @@ func TestNewRoutingSelector_SameProjectConcurrentFirstCallsResolveOnce(t *testin
 		if results[i] != mcp.MemoryBackend(first) {
 			t.Fatalf("result %d: expected the identical cached backend instance, got %T (%p vs %p)", i, results[i], results[i], first)
 		}
+	}
+}
+
+// mlStubServer returns an httptest server that satisfies the MemoryLake
+// calls memorylake.NewBackend makes for a project whose ProjID is already
+// resolved (actor registration against workspace ws-1), mirroring
+// TestNewRoutingSelector_EnabledWithProjIDRoutesToMemoryLake.
+func mlStubServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Regression for "enable during a live session has no effect": `engram
+// memorylake enable --project X` runs in another process and rewrites
+// ~/.engram/memorylake.json while an `engram mcp` process is already serving
+// a session. The selector must pick the change up on the next call instead
+// of pinning the snapshot loaded at process start.
+func TestNewRoutingSelector_PicksUpExternalEnableWithoutRestart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	srv := mlStubServer(t)
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "ws-1", TimeoutMS: 5000}
+	sqlite := &stubBackend{name: "sqlite"}
+
+	// Simulate `engram mcp` starting before any project is enabled: the
+	// enablement file does not exist yet.
+	enab, err := memorylake.LoadEnablement(memorylake.DefaultEnablementPath())
+	if err != nil {
+		t.Fatalf("LoadEnablement: %v", err)
+	}
+	sel := NewRoutingSelector(sqlite, cfg, enab)
+
+	if got := sel("myproj"); got != mcp.MemoryBackend(sqlite) {
+		t.Fatalf("expected sqlite before enable, got %T", got)
+	}
+
+	// Simulate `engram memorylake enable --project myproj` from another
+	// process: rewrite the enablement file on disk.
+	external := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
+		"myproj": {ProjID: "proj-42"},
+	}}
+	if err := external.Save(memorylake.DefaultEnablementPath()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got := sel("myproj")
+	if _, ok := got.(*memorylake.MemoryLakeBackend); !ok {
+		t.Fatalf("expected MemoryLake backend after external enable, got %T", got)
+	}
+}
+
+// The symmetric half: `engram memorylake disable --project X` during a live
+// session must route the project back to sqlite on the next call.
+func TestNewRoutingSelector_PicksUpExternalDisableWithoutRestart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	srv := mlStubServer(t)
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "ws-1", TimeoutMS: 5000}
+	sqlite := &stubBackend{name: "sqlite"}
+
+	initial := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
+		"myproj": {ProjID: "proj-42"},
+	}}
+	if err := initial.Save(memorylake.DefaultEnablementPath()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	enab, err := memorylake.LoadEnablement(memorylake.DefaultEnablementPath())
+	if err != nil {
+		t.Fatalf("LoadEnablement: %v", err)
+	}
+	sel := NewRoutingSelector(sqlite, cfg, enab)
+
+	if _, ok := sel("myproj").(*memorylake.MemoryLakeBackend); !ok {
+		t.Fatalf("expected MemoryLake backend while enabled")
+	}
+
+	// Simulate `engram memorylake disable --project myproj` from another
+	// process: rewrite the file without the project.
+	external := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{}}
+	if err := external.Save(memorylake.DefaultEnablementPath()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if got := sel("myproj"); got != mcp.MemoryBackend(sqlite) {
+		t.Fatalf("expected sqlite after external disable, got %T", got)
+	}
+}
+
+// The enablement path must be captured when the selector is constructed, not
+// re-evaluated at save time. A late in-flight resolution (e.g. a goroutine
+// finishing after a test restored $HOME, or any process-level HOME change)
+// must never write the backfilled proj_id to whatever ~/.engram/memorylake.json
+// resolves to at that moment — that is how test fixtures once destroyed a
+// user's real connection config.
+func TestNewRoutingSelector_BackfillSavesToConstructionTimePath(t *testing.T) {
+	homeA := t.TempDir()
+	homeB := t.TempDir()
+	t.Setenv("HOME", homeA)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"items": []map[string]any{{"id": "ws-1", "name": "engram", "custom_id": "engram"}},
+			}})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{}}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/projects":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "proj-new"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	sqlite := &stubBackend{name: "sqlite"}
+	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
+		"myproj": {ProjID: ""},
+	}}
+	sel := NewRoutingSelector(sqlite, cfg, enab)
+
+	// HOME moves after construction (as when t.Setenv restores the real HOME
+	// while a resolution goroutine is still in flight).
+	t.Setenv("HOME", homeB)
+
+	if _, ok := sel("myproj").(*memorylake.MemoryLakeBackend); !ok {
+		t.Fatalf("expected MemoryLake backend after resolution")
+	}
+
+	saved, err := memorylake.LoadEnablement(filepath.Join(homeA, ".engram", "memorylake.json"))
+	if err != nil {
+		t.Fatalf("LoadEnablement(homeA): %v", err)
+	}
+	if saved.EnabledProjects["myproj"].ProjID != "proj-new" {
+		t.Fatalf("expected backfill saved under construction-time HOME, got %q", saved.EnabledProjects["myproj"].ProjID)
+	}
+	if _, err := os.Stat(filepath.Join(homeB, ".engram", "memorylake.json")); !os.IsNotExist(err) {
+		t.Fatalf("backfill must not write to the post-construction HOME (stat err=%v)", err)
 	}
 }

@@ -32,7 +32,7 @@ Three things differ from upstream. If you have used upstream engram before, thes
 | Area | Upstream (`Gentleman-Programming`) | This fork (`relytcloud`) |
 | --- | --- | --- |
 | **Storage** | Local SQLite only | Local SQLite **+ optional per-project MemoryLake backend** (`engram memorylake …`) |
-| **Install** | `brew install gentleman-programming/tap/engram` | **GitHub Release archives** (no Homebrew tap) — download or build from source |
+| **Install** | `brew install gentleman-programming/tap/engram` | `curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh \| bash` (binary + plugin; no Homebrew tap) |
 | **Claude Code / Codex marketplace** | `claude plugin marketplace add Gentleman-Programming/engram` | `claude plugin marketplace add relytcloud/engram` — wired into `engram setup claude-code` |
 
 Details: [Install](#install) · [Connect Your Agent](#connect-your-agent) · [Storage Backends](#storage-backends).
@@ -76,19 +76,48 @@ Full ownership map and flows → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 
 ## Install
 
+**One command** (macOS / Linux, amd64 / arm64) — installs the latest binary AND wires the Claude Code plugin:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh | bash
+```
+
+What it does: discovers the **latest release automatically**, verifies the sha256 checksum, installs to `~/.local/bin/engram`, then runs `engram setup claude-code` (plugin marketplace + plugin + MCP config). **Upgrading = re-run the same command** — it refreshes both the binary and the plugin assets.
+
+Options go after `bash -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/relytcloud/engram/main/install.sh \
+  | bash -s -- --dir /usr/local/bin --no-plugin
+```
+
+| Flag | Meaning |
+|---|---|
+| `--version X.Y.Z` | pin a release instead of the latest |
+| `--dir <path>` | install directory (default `~/.local/bin`) |
+| `--no-plugin` | binary only, skip Claude Code wiring |
+| `--force` | reinstall even if already at the target version |
+| `--dry-run` | show what would happen, change nothing |
+| `--protocol slim` | enable the compact memory protocol during setup |
+
+### Manual install
+
 Engram ships prebuilt, statically-linked binaries on the **[Releases page](https://github.com/relytcloud/engram/releases)** for **macOS / Linux / Windows × amd64 / arm64**. No Homebrew, no Node, no Python, no Docker — **one binary, one SQLite file**.
 
 Pick your `os_arch` from the release assets (`uname -sm` tells you which):
 
 ```bash
-VER=0.2.0      # latest tag on the Releases page
+# resolve the latest tag automatically (or set VER=X.Y.Z from the Releases page)
+VER=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+  https://github.com/relytcloud/engram/releases/latest | sed 's|.*/tag/v||')
 
 # macOS Apple Silicon shown; swap darwin_arm64 for darwin_amd64 / linux_amd64 / linux_arm64
 curl -fsSL -o engram.tar.gz \
   "https://github.com/relytcloud/engram/releases/download/v${VER}/engram_${VER}_darwin_arm64.tar.gz"
 tar -xzf engram.tar.gz engram
+mkdir -p ~/.local/bin
 install -m 0755 engram ~/.local/bin/engram      # make sure ~/.local/bin is on your PATH
-engram version                                   # → 0.2.0
+engram version
 ```
 
 > macOS binaries are ad-hoc signed (not notarized). If Gatekeeper blocks the first run:
@@ -172,7 +201,7 @@ Engram routes **per project**. By default every project uses local **SQLite** �
 
 ```bash
 # 1) Configure the connection once (persisted to ~/.engram/memorylake.json, mode 0600).
-#    --url defaults to https://app.memorylake.ai/openapi/memorylake when omitted.
+#    --url defaults to https://app.memorylake.cn/openapi/memorylake when omitted.
 engram memorylake config --api-key sk-your-key
 engram memorylake config                 # print effective config (api key masked)
 #    Precedence at runtime: env var > saved config > built-in default.
@@ -199,13 +228,22 @@ in `DOCS.md`.
 
 ## Cloud (Opt-In Replication)
 
-Cloud is optional and always project-scoped (`--project` required; `engram sync --cloud --all` is blocked). Local SQLite stays authoritative; cloud is replication / shared access only.
+Cloud is optional and always project-scoped (`--project` required; `engram sync --cloud --all` is blocked). Local SQLite stays authoritative; cloud is replication/shared access only.
 
 ```bash
 docker compose -f docker-compose.cloud.yml up -d
 engram cloud config --server http://127.0.0.1:18080
 engram cloud enroll smoke-project
 engram sync --cloud --project smoke-project
+```
+
+Upgrading a project whose legacy cloud state predates the current sync contract follows the guided flow `doctor -> repair -> bootstrap -> status/rollback` (local SQLite remains source of truth throughout):
+
+```bash
+engram cloud upgrade doctor --project my-project     # diagnose legacy state
+engram cloud upgrade repair --project my-project     # fix repairable mutations
+engram cloud upgrade bootstrap --project my-project  # re-baseline cloud from local
+engram cloud upgrade status --project my-project     # verify (rollback available)
 ```
 
 Authenticated mode, upgrade flow, dashboard, and env details → [Engram Cloud docs](docs/engram-cloud/README.md) · [DOCS.md — Cloud CLI](DOCS.md#cloud-cli-opt-in).

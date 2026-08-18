@@ -21,11 +21,16 @@ Use this skill when:
 
 ## Save Rules
 
-Call `mem_save` immediately after:
+Save decisions, bug root causes, conventions, gotchas, and user preferences:
 - decision
 - bugfix
 - pattern/discovery
 - config/preference changes
+
+Saving never replaces answering. Your final reply must contain the complete
+answer itself — memory serves future sessions, never this reply. Never narrate
+saves ("I've saved this to memory"). Batch saves at task end instead of
+interrupting the work to save each item as it happens.
 
 Use structured content:
 - What
@@ -39,6 +44,8 @@ Use stable `topic_key` for evolving topics.
 
 ## Search Rules
 
+- Once, up front: one `mem_search` at task start ("have we seen this before?").
+  On a miss, proceed normally — do not search repeatedly for the same thing.
 - On recall requests: `mem_context` first, then `mem_search`.
 - Before similar work: run proactive `mem_search`.
 - On first message: if user references the project, a feature, or a problem, call `mem_search` with their keywords before responding.

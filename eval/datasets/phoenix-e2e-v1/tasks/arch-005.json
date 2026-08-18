@@ -1,0 +1,18 @@
+{
+  "id": "arch-005",
+  "category": "architecture-qa",
+  "prompt": "When GPORCA (rather than the classic Postgres planner) is chosen as the optimizer, does it reuse the same direct-dispatch decision code, or does it have its own path? Where does GPORCA itself live in the tree, and where would I look for its equivalent of the direct-dispatch logic?",
+  "rubric": {
+    "answer_points": [
+      "GPORCA is a separate, independent dispatch decision path from the classic planner's cdbtargeteddispatch.c logic",
+      "GPORCA lives under src/backend/gporca/ and is written in C++",
+      "The relevant translation logic is CTranslatorExprToDXLUtils::SetDirectDispatchInfo in src/backend/gporca/libgpopt/src/translate/CTranslatorExprToDXLUtils.cpp",
+      "That function is what decides whether direct dispatch info gets attached to the DXL plan when GPORCA is used",
+      "Because the two paths are independent, a fix applied only to the planner path does not automatically cover the GPORCA path (and vice versa)"
+    ],
+    "gotcha_points": [],
+    "max_score": 10
+  },
+  "max_turns": 20,
+  "timeout_min": 15
+}

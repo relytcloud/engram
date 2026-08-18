@@ -65,6 +65,15 @@ var _ mcp.MemoryBackend = (*memorylake.MemoryLakeBackend)(nil)
 //     nil). A fallback to sqlite is left uncached so a transient failure is
 //     retried on the next call for that project — and the retry, too, is
 //     confined to that project's lock and never blocks others.
+//
+// The enablement list is hot-reloaded: `engram memorylake enable/disable`
+// runs in a separate process and rewrites the enablement file while a
+// long-lived `engram mcp` (one per agent session) keeps serving. Pinning the
+// snapshot loaded at process start would silently route a freshly-enabled
+// project to sqlite until the session restarts. Each call therefore stats
+// the file (mtime+size fingerprint, no I/O beyond that when unchanged) and
+// re-reads it only when it changed on disk. Only EnabledProjects is swapped
+// in — the connection config (cfg) stays as loaded at startup.
 func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *memorylake.Enablement) mcp.BackendSelector {
 	type projEntry struct {
 		mu      sync.Mutex        // serializes resolution for THIS project only
@@ -73,6 +82,12 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 
 	var gmu sync.Mutex
 	entries := map[string]*projEntry{}
+	enabPath := memorylake.DefaultEnablementPath()
+	// Fingerprint of the file backing the enab snapshot we hold. Read/written
+	// only under gmu (after construction). enab itself may be an in-memory
+	// baseline that never came from the file (missing/unreadable file), which
+	// the "" fingerprint represents.
+	lastFP := enablementFingerprint(enabPath)
 
 	return func(project string) mcp.MemoryBackend {
 		if os.Getenv("ENGRAM_BACKEND") == "sqlite" {
@@ -87,6 +102,17 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 		// that resolveMemoryLakeBackend backfills, so every read/write of it is
 		// serialized by gmu — but gmu is released before any network I/O.
 		gmu.Lock()
+		if fp := enablementFingerprint(enabPath); fp != lastFP {
+			if fresh, err := loadMemorylakeEnablement(enabPath); err == nil {
+				enab.EnabledProjects = fresh.EnabledProjects
+				lastFP = fp
+			} else {
+				// Keep the previous snapshot and leave lastFP stale so the
+				// next call retries — e.g. a half-written file during a
+				// concurrent `enable` becomes readable a moment later.
+				fmt.Fprintf(os.Stderr, "[engram] memorylake: failed to reload enablement list (keeping previous): %v\n", err)
+			}
+		}
 		entry, ok := enab.IsEnabled(project)
 		if !ok {
 			gmu.Unlock()
@@ -111,7 +137,7 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 			return pe.backend
 		}
 
-		backend, ok := resolveMemoryLakeBackend(project, entry, cfg, enab, &gmu, sqlite)
+		backend, ok := resolveMemoryLakeBackend(project, entry, cfg, enab, enabPath, &gmu, sqlite)
 		if ok {
 			// Only cache a genuine MemoryLake backend. A fallback to sqlite is
 			// left uncached so a transient failure is retried on the next call.
@@ -136,7 +162,7 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 // section that mutates and persists the shared enab.EnabledProjects map — and
 // released again — so backfilling one project's resolved id can never race
 // with, or stall, another project's routing.
-func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, gmu *sync.Mutex, sqlite mcp.MemoryBackend) (mcp.MemoryBackend, bool) {
+func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg memorylake.Config, enab *memorylake.Enablement, enabPath string, gmu *sync.Mutex, sqlite mcp.MemoryBackend) (mcp.MemoryBackend, bool) {
 	ws := cfg.Workspace
 	projID := entry.ProjID
 
@@ -173,7 +199,11 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 		// Best-effort: a failed save must not block the current request —
 		// resolution will simply be retried (and the file re-saved) next
 		// time this project's cache entry is evicted (e.g. process restart).
-		saveErr := enab.Save(memorylake.DefaultEnablementPath())
+		// enabPath was captured at selector construction: re-evaluating
+		// DefaultEnablementPath() here would follow a $HOME that changed
+		// mid-flight (a test's restored HOME, an env mutation) and backfill
+		// into the wrong — possibly the user's real — enablement file.
+		saveErr := enab.Save(enabPath)
 		gmu.Unlock()
 		if saveErr != nil {
 			fmt.Fprintf(os.Stderr, "[engram] memorylake: failed to persist resolved project id for %q (continuing): %v\n", project, saveErr)
@@ -191,6 +221,18 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 	// it a second time here would duplicate it in the conversation.
 	backend.SetSkipPromptAppend(entry.SyncConversations)
 	return backend, true
+}
+
+// enablementFingerprint returns a cheap change-detection token for the
+// enablement file: mtime+size, or "" when the file cannot be stat'ed
+// (typically: does not exist yet). Size is included because coarse-mtime
+// filesystems can miss a same-second rewrite.
+func enablementFingerprint(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d|%d", fi.ModTime().UnixNano(), fi.Size())
 }
 
 func warnMemoryLakeFallback(project, step string, err error) {
