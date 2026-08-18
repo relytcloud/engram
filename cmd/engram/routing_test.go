@@ -14,6 +14,7 @@ import (
 
 	"github.com/Gentleman-Programming/engram/internal/mcp"
 	"github.com/Gentleman-Programming/engram/internal/memorylake"
+	"github.com/Gentleman-Programming/engram/internal/store"
 )
 
 // stubBackend is a minimal mcp.MemoryBackend used to check identity of the
@@ -23,6 +24,23 @@ import (
 type stubBackend struct {
 	mcp.MemoryBackend
 	name string
+}
+
+// newRoutingTestStore builds a throwaway sqlite store for the fallback backend
+// these selector tests hand to buildRoutingSelector.
+func newRoutingTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	cfg, err := store.DefaultConfig()
+	if err != nil {
+		t.Fatalf("DefaultConfig: %v", err)
+	}
+	cfg.DataDir = t.TempDir()
+	s, err := store.New(cfg)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
 }
 
 func TestNewRoutingSelector_EnvOverrideForcesSQLite(t *testing.T) {
@@ -602,5 +620,102 @@ func TestNewRoutingSelector_BackfillSavesToConstructionTimePath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(homeB, ".engram", "memorylake.json")); !os.IsNotExist(err) {
 		t.Fatalf("backfill must not write to the post-construction HOME (stat err=%v)", err)
+	}
+}
+
+// TestNewRoutingSelector_ConversationSyncToggleAppliesWithoutRestart is the
+// point of the whole change: a `memorylake conversations enable` performed by
+// another process, while this selector already holds a constructed and cached
+// backend, must take effect on the very next resolve.
+//
+// It asserts through observable behaviour rather than by reading the flag: with
+// suppression off a prompt reaches the network, with it on the same call makes
+// no request at all. Reading the private field would pass even if the prompt
+// path ignored it.
+func TestNewRoutingSelector_ConversationSyncToggleAppliesWithoutRestart(t *testing.T) {
+	var msgPosts int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "conv-1"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			atomic.AddInt32(&msgPosts, 1)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "msg-1"}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	setupMemoryLakeEnv(t, srv.URL, "acme", "proj-1")
+	enabPath := memorylake.DefaultEnablementPath()
+
+	sel := buildRoutingSelector(mcp.NewSQLiteBackend(newRoutingTestStore(t)))
+
+	// First resolve constructs and caches the backend. Suppression is off, so a
+	// prompt is really appended.
+	b1 := sel("acme")
+	if _, err := b1.AddPrompt(store.AddPromptParams{SessionID: "s1", Project: "acme", Content: "before toggle"}); err != nil {
+		t.Fatalf("AddPrompt before toggle: %v", err)
+	}
+	if got := atomic.LoadInt32(&msgPosts); got != 1 {
+		t.Fatalf("msgPosts=%d, want 1 before the toggle", got)
+	}
+
+	// Another process flips the switch on. Bump mtime so the fingerprint the
+	// selector keys off actually changes (a same-second write with an identical
+	// size would otherwise be invisible).
+	enab, err := memorylake.LoadEnablement(enabPath)
+	if err != nil {
+		t.Fatalf("LoadEnablement: %v", err)
+	}
+	if err := enab.SetConversationSync("acme", true); err != nil {
+		t.Fatalf("SetConversationSync: %v", err)
+	}
+	if err := enab.Save(enabPath); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(enabPath, future, future); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	// Same selector, no restart, no reconstruction: the append must now be
+	// suppressed.
+	b2 := sel("acme")
+	if _, err := b2.AddPrompt(store.AddPromptParams{SessionID: "s1", Project: "acme", Content: "after toggle"}); err != nil {
+		t.Fatalf("AddPrompt after toggle: %v", err)
+	}
+	if got := atomic.LoadInt32(&msgPosts); got != 1 {
+		t.Fatalf("msgPosts=%d, want still 1 — the toggle must apply without a restart", got)
+	}
+
+	// And the disable direction, which strands a session the other way if it
+	// does not take effect.
+	enab2, err := memorylake.LoadEnablement(enabPath)
+	if err != nil {
+		t.Fatalf("LoadEnablement (2): %v", err)
+	}
+	if err := enab2.SetConversationSync("acme", false); err != nil {
+		t.Fatalf("SetConversationSync(off): %v", err)
+	}
+	if err := enab2.Save(enabPath); err != nil {
+		t.Fatalf("Save (2): %v", err)
+	}
+	later := future.Add(2 * time.Second)
+	if err := os.Chtimes(enabPath, later, later); err != nil {
+		t.Fatalf("Chtimes (2): %v", err)
+	}
+
+	b3 := sel("acme")
+	if _, err := b3.AddPrompt(store.AddPromptParams{SessionID: "s1", Project: "acme", Content: "after disable"}); err != nil {
+		t.Fatalf("AddPrompt after disable: %v", err)
+	}
+	if got := atomic.LoadInt32(&msgPosts); got != 2 {
+		t.Fatalf("msgPosts=%d, want 2 — disabling must resume standalone prompt appends", got)
 	}
 }

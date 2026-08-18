@@ -134,6 +134,21 @@ func NewRoutingSelector(sqlite mcp.MemoryBackend, cfg memorylake.Config, enab *m
 		defer pe.mu.Unlock()
 
 		if pe.backend != nil {
+			// The enablement list hot-reloads above, so `entry` is current even
+			// when the backend is not. Re-derive the one thing on the backend
+			// that comes from the entry, so `memorylake conversations
+			// enable|disable` in another process takes effect on the very next
+			// call instead of at the next process start. A stale flag is not a
+			// cosmetic problem: left on, prompts are appended standalone AND
+			// inside the merged turn, duplicating every user message in the
+			// conversation; left off after a disable, the session's prompts
+			// stop reaching MemoryLake with nothing replacing them.
+			//
+			// Deliberately not discarding and rebuilding the backend — that
+			// would cost a workspace resolve plus an actor ensure (two round
+			// trips), and this flag is the only part of it derived from the
+			// entry.
+			syncConversationFlag(pe.backend, entry)
 			return pe.backend
 		}
 
@@ -219,7 +234,7 @@ func resolveMemoryLakeBackend(project string, entry memorylake.ProjectEntry, cfg
 	// With per-turn conversation sync on, the Stop hook's `engram turn` already
 	// writes the user's prompt as part of the merged turn message — appending
 	// it a second time here would duplicate it in the conversation.
-	backend.SetSkipPromptAppend(entry.SyncConversations)
+	syncConversationFlag(backend, entry)
 	return backend, true
 }
 
@@ -233,6 +248,21 @@ func enablementFingerprint(path string) string {
 		return ""
 	}
 	return fmt.Sprintf("%d|%d", fi.ModTime().UnixNano(), fi.Size())
+}
+
+// syncConversationFlag pushes the entry's per-turn conversation-sync setting
+// onto a resolved MemoryLake backend. Split out so the construction path and
+// the cache-hit path cannot drift: the flag has to be re-derived on every
+// resolve for a toggle to take effect without restarting the process holding
+// the backend (see NewRoutingSelector's cache-hit branch).
+//
+// The type assertion is the honest expression of the situation — the selector
+// returns mcp.MemoryBackend, and only the MemoryLake implementation has a
+// prompt-append path to suppress. A sqlite backend is a no-op here.
+func syncConversationFlag(backend mcp.MemoryBackend, entry memorylake.ProjectEntry) {
+	if ml, ok := backend.(*memorylake.MemoryLakeBackend); ok {
+		ml.SetSkipPromptAppend(entry.SyncConversations)
+	}
 }
 
 func warnMemoryLakeFallback(project, step string, err error) {

@@ -2,8 +2,10 @@ package memorylake
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -216,4 +218,81 @@ func TestBackend_SkipPromptAppend_DefaultsOff(t *testing.T) {
 	if atomic.LoadInt32(&posts) != 1 {
 		t.Fatalf("posts=%d, want 1 — suppression must default to off", posts)
 	}
+}
+
+// TestBackend_SkipPromptAppend_TogglesOnALiveBackend is the hot-reload
+// contract: the routing layer flips this flag on a backend that is already
+// constructed and already serving, so a toggle must take effect on the very
+// next call rather than at the next process start. Without it, enabling
+// per-turn sync leaves prompts being appended twice (once standalone, once
+// inside the merged turn) until the user kills engram serve.
+func TestBackend_SkipPromptAppend_TogglesOnALiveBackend(t *testing.T) {
+	var posts int32
+	srv := promptMessageServer(t, &posts)
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	p := func(content string) store.AddPromptParams {
+		return store.AddPromptParams{SessionID: "sess-1", Project: "proj", Content: content}
+	}
+
+	// Off: a real append happens.
+	if _, err := b.AddPrompt(p("first")); err != nil {
+		t.Fatalf("AddPrompt (suppression off): %v", err)
+	}
+	if got := atomic.LoadInt32(&posts); got != 1 {
+		t.Fatalf("posts=%d, want 1 while suppression is off", got)
+	}
+
+	// Flip it on mid-life — no reconstruction.
+	b.SetSkipPromptAppend(true)
+	if _, err := b.AddPrompt(p("second")); err != nil {
+		t.Fatalf("AddPrompt (suppression on): %v", err)
+	}
+	if got := atomic.LoadInt32(&posts); got != 1 {
+		t.Fatalf("posts=%d, want still 1 — the toggle must take effect immediately", got)
+	}
+
+	// And back off again, which is the disable direction.
+	b.SetSkipPromptAppend(false)
+	if _, err := b.AddPrompt(p("third")); err != nil {
+		t.Fatalf("AddPrompt (suppression off again): %v", err)
+	}
+	if got := atomic.LoadInt32(&posts); got != 2 {
+		t.Fatalf("posts=%d, want 2 — turning suppression back off must resume appends", got)
+	}
+}
+
+// TestBackend_SkipPromptAppend_ConcurrentToggleAndRead must be run under -race.
+// The routing selector now writes this flag on every resolve while handlers
+// read it concurrently, so the field cannot be a plain bool.
+func TestBackend_SkipPromptAppend_ConcurrentToggleAndRead(t *testing.T) {
+	var posts int32
+	srv := promptMessageServer(t, &posts)
+	defer srv.Close()
+	b := newTestBackend(t, srv.URL)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := 0; n < 50; n++ {
+				b.SetSkipPromptAppend(n%2 == 0)
+			}
+		}(i)
+	}
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := 0; n < 50; n++ {
+				_, _ = b.AddPrompt(store.AddPromptParams{
+					SessionID: "sess-race", Project: "proj",
+					Content:   fmt.Sprintf("content-%d-%d", i, n),
+				})
+			}
+		}(i)
+	}
+	wg.Wait()
 }

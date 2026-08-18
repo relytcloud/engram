@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -101,9 +102,16 @@ type MemoryLakeBackend struct {
 	// Suppressing it costs nothing locally because prompts are write-only on
 	// this backend — no read path reads them back (FormatContext, Stats and
 	// Timeline all have no prompt section; see CreateSession/AddPrompt's doc
-	// comments). Not guarded by a mutex: it is set once by the routing layer
-	// immediately after construction, before the backend reaches any handler.
-	skipPromptAppend bool
+	// comments).
+	//
+	// Atomic rather than a plain bool because the routing layer writes it on
+	// every resolve, not once at construction: `engram memorylake conversations
+	// enable|disable` runs in a separate process and rewrites the enablement
+	// file while a long-lived `engram serve` / `engram mcp` keeps serving, and
+	// the selector syncs this flag from the reloaded entry so the toggle takes
+	// effect without a restart (see cmd/engram/routing.go). Handlers read it
+	// concurrently on the prompt path, so a plain bool is a data race.
+	skipPromptAppend atomic.Bool
 }
 
 // NewBackend constructs a MemoryLakeBackend for the given workspace reference
@@ -148,9 +156,12 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 
 // SetSkipPromptAppend toggles prompt-append suppression — see the
 // skipPromptAppend field comment for why per-turn conversation sync needs it.
-// Call it right after NewBackend, before the backend is handed to any handler.
+// Safe to call at any point in the backend's life, including while handlers are
+// serving concurrently: the routing layer calls it on every resolve so a
+// `conversations enable|disable` in another process takes effect without a
+// restart.
 func (b *MemoryLakeBackend) SetSkipPromptAppend(v bool) {
-	b.skipPromptAppend = v
+	b.skipPromptAppend.Store(v)
 }
 
 // ─── Observation CRUD (Tier A: core) ────────────────────────────────────────
