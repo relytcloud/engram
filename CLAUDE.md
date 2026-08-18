@@ -28,6 +28,7 @@ CI (`.github/workflows/ci.yml`) runs `go test ./...`, the e2e job, and an `insta
 
 ## Contribution Rules (enforced by CI)
 
+- **Sync with `main` before branching.** Run `git fetch origin main` and check `git rev-list --count HEAD..origin/main`. A branch cut from a stale snapshot lands as a `CONFLICTING` PR, and GitHub skips CI on those — so the failure is silent, not loud.
 - **Issue-first workflow.** PRs require a linked issue with the `status:approved` label (`Closes #N`) and exactly one `type:*` label. PRs without an approved issue are auto-blocked.
 - **Conventional commits.** `feat(scope):`, `fix(scope):`, etc. Types map to labels (`feat`→`type:feature`, `fix`→`type:bug`, …). Use `!` / `BREAKING CHANGE:` for breaking changes.
 - **Do NOT add `Co-Authored-By` trailers to commits** (repo-specific rule).
