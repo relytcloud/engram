@@ -17,6 +17,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fail BEFORE publishing: a tag whose plugin manifests still carry the
+      # previous version ships a release that cannot reach installed users.
+      # `claude plugin update` compares version strings, so it would report
+      # "already at the latest version" and exit 0 while the new hooks and
+      # skills never leave the marketplace clone.
+      - name: Check plugin version matches the tag
+        run: ./tools/check-plugin-version.sh "${{ github.ref_name }}"
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:

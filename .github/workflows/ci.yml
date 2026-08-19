@@ -39,3 +39,16 @@ jobs:
 
       - name: Run e2e tests
         run: go test -tags e2e ./internal/server/...
+
+  plugin-version:
+    name: Plugin Version Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # A partial bump is the common failure: `claude plugin update` keys off the
+      # marketplace entry alone, so a stale plugin.json goes unnoticed until
+      # someone reads the installed manifest.
+      - name: Check plugin manifests agree on a version
+        run: ./tools/check-plugin-version.sh
