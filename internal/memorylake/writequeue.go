@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
@@ -30,28 +31,73 @@ import (
 // MemoryLake resolves the duplicate custom_id to the message it already has
 // instead of creating a second one.
 //
+// Appending is not just "POST to the conversation": a message has to extend
+// the conversation's current head by naming it as parent_message_id, and
+// MemoryLake rejects an append that names the wrong parent (or names none once
+// a head exists) with a 409. Ensuring the conversation therefore also reads its
+// head, and a 409 is recovered from by re-reading the head and retrying — see
+// maxAppendHeadRetries.
+//
 // AppendObservation returns the MemoryLake message id.
 func (c *Client) AppendObservation(ws, projID, convCustomID, actorID string, p store.AddObservationParams) (string, error) {
-	convID, err := c.ensureConversation(ws, projID, convCustomID, actorID)
+	conv, err := c.ensureConversation(ws, projID, convCustomID, actorID)
 	if err != nil {
 		return "", err
 	}
 
-	var msg struct {
-		ID string `json:"id"`
+	head := conv.CurrentMessageID
+	for attempt := 0; ; attempt++ {
+		var msg struct {
+			ID string `json:"id"`
+		}
+		body := map[string]any{
+			"custom_id": contentHash(p.Content),
+			"actor_id":  actorID,
+			"content": []map[string]any{
+				{"block_type": "TEXT", "text": p.Content},
+			},
+		}
+		// Appends must extend the conversation's current head, so the head we
+		// just read goes back as parent_message_id. It is omitted only for the
+		// very first entry of a conversation, which has no head to extend —
+		// sending a parent there is itself rejected.
+		if head != "" {
+			body["parent_message_id"] = head
+		}
+
+		err := c.doJSON("POST", "/api/v3/conversations/"+conv.ID+"/messages", body, &msg)
+		if err == nil {
+			return msg.ID, nil
+		}
+
+		apiErr, ok := err.(*APIError)
+		if !ok || apiErr.HTTP != http.StatusConflict || attempt >= maxAppendHeadRetries {
+			return "", err
+		}
+
+		// Head drift: engram writes one session's conversation from up to three
+		// separate processes (`engram serve` for prompts, `engram mcp` for
+		// observations, `engram turn` for turns), so another writer can extend
+		// the conversation between our read and this append. MemoryLake answers
+		// that with a 409 and the documented recovery is to re-read the head and
+		// extend that instead. Re-reading also covers the case where the head we
+		// started from was unknown (empty) but the conversation did have one.
+		refreshed, gErr := c.getConversationByCustomID(ws, convCustomID)
+		if gErr != nil || refreshed.CurrentMessageID == "" || refreshed.CurrentMessageID == head {
+			// Nothing new to extend — report the original append failure rather
+			// than masking it with a lookup error.
+			return "", err
+		}
+		head = refreshed.CurrentMessageID
 	}
-	body := map[string]any{
-		"custom_id": contentHash(p.Content),
-		"actor_id":  actorID,
-		"content": []map[string]any{
-			{"block_type": "TEXT", "text": p.Content},
-		},
-	}
-	if err := c.doJSON("POST", "/api/v3/conversations/"+convID+"/messages", body, &msg); err != nil {
-		return "", err
-	}
-	return msg.ID, nil
 }
+
+// maxAppendHeadRetries bounds how many times AppendObservation re-reads the
+// conversation head and retries after a 409. One retry absorbs a single
+// concurrent writer, which is the realistic case for a per-session
+// conversation; a caller losing the race repeatedly gets the error instead of
+// looping against a server that keeps moving the head.
+const maxAppendHeadRetries = 1
 
 // AddFacts writes each string in facts verbatim into project projID via
 // MemoryLake's direct fact-add endpoint (POST .../memories/facts, shipped
@@ -78,14 +124,16 @@ func (c *Client) AddFacts(ws, projID string, facts []string) ([]Fact, error) {
 
 // ensureConversation creates the MemoryLake conversation identified by
 // custom_id within workspace ws, scoped to actorID and granted read-write
-// access to project projID. MemoryLake treats POST .../conversations as
-// idempotent on custom_id — calling this repeatedly with the same customID
-// returns the same conversation id rather than creating duplicates, so no
-// separate "does it already exist" lookup is needed here.
-func (c *Client) ensureConversation(ws, projID, customID, actorID string) (string, error) {
-	var conv struct {
-		ID string `json:"id"`
-	}
+// access to project projID, and returns it along with its current head (see
+// conversationRef).
+//
+// POST .../conversations is NOT idempotent on custom_id — it rejects a
+// duplicate rather than returning the existing row — so the conflict is
+// recovered from explicitly below. That recovery is also what supplies the
+// head: a freshly created conversation has none, while an existing one
+// generally does, and an append has to name it.
+func (c *Client) ensureConversation(ws, projID, customID, actorID string) (conversationRef, error) {
+	var conv conversationRef
 	body := map[string]any{
 		"custom_id":      customID,
 		"kind":           "DIRECT",
@@ -99,22 +147,42 @@ func (c *Client) ensureConversation(ws, projID, customID, actorID string) (strin
 		// mem_save after the first within a session. Recover by fetching the
 		// existing conversation by custom_id.
 		if apiErr, ok := err.(*APIError); !ok || apiErr.Code != "CUSTOM_ID_CONFLICT" {
-			return "", err
+			return conversationRef{}, err
 		}
-		var existing struct {
-			ID string `json:"id"`
-		}
-		getPath := "/api/v3/workspaces/" + ws + "/memories/conversations/" +
-			url.PathEscape(customID) + "?by_custom_id=true"
-		if gErr := c.doJSON("GET", getPath, nil, &existing); gErr != nil {
-			return "", gErr
+		existing, gErr := c.getConversationByCustomID(ws, customID)
+		if gErr != nil {
+			return conversationRef{}, gErr
 		}
 		if existing.ID == "" {
-			return "", err
+			return conversationRef{}, err
 		}
-		return existing.ID, nil
+		return existing, nil
 	}
-	return conv.ID, nil
+	return conv, nil
+}
+
+// conversationRef is the subset of MemoryLake's conversation object this
+// package reads. CurrentMessageID is the conversation's head — the id of its
+// latest message, which an append has to name as its parent_message_id. It is
+// empty for a conversation that has no messages yet, and it is the reason a
+// plain "ensure the conversation exists" is not enough to append to one.
+type conversationRef struct {
+	ID               string `json:"id"`
+	CurrentMessageID string `json:"current_message_id"`
+}
+
+// getConversationByCustomID resolves a conversation by its caller-defined
+// custom_id (the engram session id), returning its id and current head.
+// Used both to recover from ensureConversation's create conflict and to
+// re-read a head that moved under a concurrent writer.
+func (c *Client) getConversationByCustomID(ws, customID string) (conversationRef, error) {
+	var conv conversationRef
+	path := "/api/v3/workspaces/" + ws + "/memories/conversations/" +
+		url.PathEscape(customID) + "?by_custom_id=true"
+	if err := c.doJSON("GET", path, nil, &conv); err != nil {
+		return conversationRef{}, err
+	}
+	return conv, nil
 }
 
 // contentHash derives a stable idempotency key from s: the first 16 hex
