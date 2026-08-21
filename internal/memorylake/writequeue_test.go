@@ -173,3 +173,157 @@ func TestPatchFactMetadata_OverwritesMetadata(t *testing.T) {
 		t.Fatalf("patchFactMetadata must only send metadata, not fact: %v", gotBody)
 	}
 }
+
+// TestAppendObservation_SendsHeadAsParentMessageID covers the normal case for
+// every append after a session's first: the conversation already exists, so
+// ensureConversation recovers via GET, and the head it reports must be sent
+// back as parent_message_id. Without it MemoryLake rejects the append with a
+// 409 ("already has a head entry"), which is what silently capped every
+// conversation at one message.
+func TestAppendObservation_SendsHeadAsParentMessageID(t *testing.T) {
+	var lastMsgBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success":    false,
+				"error_code": "CUSTOM_ID_CONFLICT",
+				"message":    "conversation with this custom_id already exists",
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations/session-abc":
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"id": "conv-1", "current_message_id": "msg-7"},
+			})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			json.NewDecoder(r.Body).Decode(&lastMsgBody)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"id": "msg-8"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
+	msgID, err := c.AppendObservation("ws-1", "proj-1", "session-abc", "actor-1",
+		store.AddObservationParams{Content: "second turn"})
+	if err != nil {
+		t.Fatalf("AppendObservation: %v", err)
+	}
+	if msgID != "msg-8" {
+		t.Fatalf("msgID=%q, want msg-8", msgID)
+	}
+	if lastMsgBody["parent_message_id"] != "msg-7" {
+		t.Fatalf("parent_message_id=%v, want msg-7", lastMsgBody["parent_message_id"])
+	}
+}
+
+// TestAppendObservation_OmitsParentMessageIDForFirstMessage pins the other half
+// of the contract: parent_message_id must be omitted for the very first entry
+// of a conversation. Sending an empty or bogus parent there is itself a 409
+// ("not the current head"), so a fresh conversation must not carry the field
+// at all.
+func TestAppendObservation_OmitsParentMessageIDForFirstMessage(t *testing.T) {
+	var lastMsgBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			// Fresh conversation: created here, so it has no head yet.
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"id": "conv-1"},
+			})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			json.NewDecoder(r.Body).Decode(&lastMsgBody)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"id": "msg-1"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
+	if _, err := c.AppendObservation("ws-1", "proj-1", "session-abc", "actor-1",
+		store.AddObservationParams{Content: "first turn"}); err != nil {
+		t.Fatalf("AppendObservation: %v", err)
+	}
+	if _, ok := lastMsgBody["parent_message_id"]; ok {
+		t.Fatalf("parent_message_id must be absent for the first message, got %v",
+			lastMsgBody["parent_message_id"])
+	}
+}
+
+// TestAppendObservation_RetriesWithRefreshedHeadOn409 covers head drift: a
+// concurrent writer (engram serve, engram mcp and engram turn are separate
+// processes writing the same session's conversation) can advance the head
+// between our read and our append. MemoryLake answers that with a 409, and the
+// documented recovery is to re-read the head and extend it instead.
+func TestAppendObservation_RetriesWithRefreshedHeadOn409(t *testing.T) {
+	var gets, msgPosts int32
+	var parents []any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": false, "error_code": "CUSTOM_ID_CONFLICT", "message": "exists",
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations/session-abc":
+			// First read reports msg-7; by the time we append, another writer
+			// has moved the head to msg-9.
+			head := "msg-7"
+			if atomic.AddInt32(&gets, 1) > 1 {
+				head = "msg-9"
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"id": "conv-1", "current_message_id": head},
+			})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			parents = append(parents, body["parent_message_id"])
+			if atomic.AddInt32(&msgPosts, 1) == 1 {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]any{
+					"success": false, "error_code": "CUSTOM_ID_CONFLICT",
+					"message": "`parent_message_id` 'msg-7' is not the current head",
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    map[string]any{"id": "msg-10"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
+	msgID, err := c.AppendObservation("ws-1", "proj-1", "session-abc", "actor-1",
+		store.AddObservationParams{Content: "concurrent turn"})
+	if err != nil {
+		t.Fatalf("AppendObservation: %v", err)
+	}
+	if msgID != "msg-10" {
+		t.Fatalf("msgID=%q, want msg-10", msgID)
+	}
+	if got := atomic.LoadInt32(&msgPosts); got != 2 {
+		t.Fatalf("msgPosts=%d, want 2 (one 409, one retry)", got)
+	}
+	if len(parents) != 2 || parents[0] != "msg-7" || parents[1] != "msg-9" {
+		t.Fatalf("parent_message_id sequence=%v, want [msg-7 msg-9]", parents)
+	}
+}

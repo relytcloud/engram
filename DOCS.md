@@ -1731,6 +1731,11 @@ timeout killing it from outside.
   the user presses ESC.
 - **Failures are dropped, not retried.** A turn lost to a network outage is
   gone; the failure is recorded in `~/.engram/logs/turn.log` and nowhere else.
+  The one exception is a rejected append: MemoryLake requires a message to
+  extend its conversation's current head, so if a concurrent writer moves that
+  head first, engram re-reads it and retries the append once before giving up.
+  Note that because only failures are logged, an absent `turn.log` cannot tell
+  you whether every turn succeeded or whether the hook never ran at all.
 - **Every message is stored with role `USER`.** MemoryLake derives a message's
   role from its actor's type and only HUMAN actors can be created through the
   API, so the speaker is carried in the message text instead.
