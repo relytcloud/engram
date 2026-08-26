@@ -120,6 +120,10 @@ func (c *Client) EnsureProject(ws, name string) (string, error) {
 type actorItem struct {
 	ID       string `json:"id"`
 	CustomID string `json:"custom_id"`
+	// DisplayName is unused by listAllActors (which only needs to map a
+	// custom_id back to an id) and carried for DefaultActor, where it is the
+	// human-readable name to create the actor under.
+	DisplayName string `json:"display_name"`
 }
 
 // listAllActors returns every actor MemoryLake has recorded, following
@@ -134,6 +138,24 @@ func (c *Client) listAllActors() ([]actorItem, error) {
 		}
 		return path
 	})
+}
+
+// DefaultActor returns the actor MemoryLake associates with the API key this
+// client authenticates as — "who owns this key", answered by the server
+// instead of guessed locally.
+//
+// This is what lets an unconfigured engram attribute its conversations to a
+// person rather than to whichever machine happened to run the agent: a
+// hostname actor is never findable under that person's account. Callers treat
+// an error (a deployment predating the endpoint) or an empty custom_id as
+// "unknown" and fall back to a local identity, so this is a preference, not a
+// requirement.
+func (c *Client) DefaultActor() (actorItem, error) {
+	var a actorItem
+	if err := c.doJSON("GET", "/api/v3/defaults/my-actor", nil, &a); err != nil {
+		return actorItem{}, err
+	}
+	return a, nil
 }
 
 // EnsureActor creates a HUMAN actor identified by customID (e.g. a

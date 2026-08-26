@@ -43,6 +43,13 @@ func newRoutingTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+// routingTestActor pins the MemoryLake actor for the routing tests below.
+// They exercise backend selection, not identity resolution: with no actor set
+// NewBackend consults /defaults/my-actor to find the API key's owner, which
+// every fake server here would then have to serve. Pinning it keeps these
+// tests about routing and insulated from how the actor is resolved.
+const routingTestActor = "test-machine"
+
 func TestNewRoutingSelector_EnvOverrideForcesSQLite(t *testing.T) {
 	t.Setenv("ENGRAM_BACKEND", "sqlite")
 
@@ -84,7 +91,7 @@ func TestNewRoutingSelector_EnabledWithProjIDRoutesToMemoryLake(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "ws-1", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "ws-1", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
 		"myproj": {ProjID: "proj-42"},
@@ -127,7 +134,7 @@ func TestNewRoutingSelector_EnabledEmptyProjIDResolvesAndSaves(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "engram", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
 		"myproj": {ProjID: ""},
@@ -163,7 +170,7 @@ func TestNewRoutingSelector_ResolutionFailureFallsBackToSQLite(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "engram", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
 		"myproj": {ProjID: ""},
@@ -216,7 +223,7 @@ func TestNewRoutingSelector_TransientFailureIsNotCachedAndRetries(t *testing.T) 
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "engram", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
 		"myproj": {ProjID: ""},
@@ -279,7 +286,7 @@ func TestNewRoutingSelector_ConcurrentEnabledUnresolvedProjectsNoDataRace(t *tes
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "engram", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 
 	const numProjects = 20
@@ -359,7 +366,7 @@ func TestNewRoutingSelector_SlowProjectDoesNotBlockOthers(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "engram", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
 		"slow-proj": {ProjID: ""},
@@ -435,7 +442,7 @@ func TestNewRoutingSelector_SameProjectConcurrentFirstCallsResolveOnce(t *testin
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "engram", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
 		"solo": {ProjID: ""},
@@ -498,7 +505,7 @@ func TestNewRoutingSelector_PicksUpExternalEnableWithoutRestart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	srv := mlStubServer(t)
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "ws-1", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "ws-1", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 
 	// Simulate `engram mcp` starting before any project is enabled: the
@@ -534,7 +541,7 @@ func TestNewRoutingSelector_PicksUpExternalDisableWithoutRestart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	srv := mlStubServer(t)
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "ws-1", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "ws-1", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 
 	initial := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
@@ -596,7 +603,7 @@ func TestNewRoutingSelector_BackfillSavesToConstructionTimePath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Workspace: "engram", TimeoutMS: 5000}
+	cfg := memorylake.Config{BaseURL: srv.URL, APIKey: "sk-test", Actor: routingTestActor, Workspace: "engram", TimeoutMS: 5000}
 	sqlite := &stubBackend{name: "sqlite"}
 	enab := &memorylake.Enablement{EnabledProjects: map[string]memorylake.ProjectEntry{
 		"myproj": {ProjID: ""},

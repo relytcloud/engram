@@ -45,6 +45,9 @@ func TestCmdTurnUnenabledProjectMakesNoNetworkCall(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 
 	transcript := writeTurnTranscript(t, "sess-1")
 	withArgs(t, "engram", "turn", "--session", "sess-1", "--transcript", transcript, "--cwd", t.TempDir())
@@ -62,6 +65,9 @@ func TestCmdTurnRespectsSqliteSafetyValve(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 
 	// Fully enabled — only the safety valve should stop it.
 	seedTurnEnablement(t, "acme", true)
@@ -107,6 +113,9 @@ func TestCmdTurnMissingTranscriptFileExitsZero(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 
 	withArgs(t, "engram", "turn",
 		"--session", "sess-1",
@@ -168,6 +177,9 @@ func TestCmdTurnAppendsTurnForEnabledProject(t *testing.T) {
 
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 	// A "ws-" prefixed workspace short-circuits ResolveWorkspaceID, so the
 	// test server does not need a workspace list endpoint.
 	t.Setenv("ENGRAM_MEMORYLAKE_WORKSPACE", "ws-1")
@@ -207,6 +219,9 @@ func TestCmdTurnEnabledBackendButConversationSyncOffMakesNoCall(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 
 	transcript := writeTurnTranscript(t, "sess-1")
 	withArgs(t, "engram", "turn", "--session", "sess-1", "--transcript", transcript, "--cwd", turnProjectDir(t, "acme"))
@@ -226,6 +241,9 @@ func TestCmdTurnNoProjectEnabledSkipsDetectProject(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 
 	var called bool
 	oldDetectProject := detectProject
@@ -278,6 +296,9 @@ func TestCmdTurnIncompleteTurnExitsZeroWithoutUploadOrLog(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 
 	p := filepath.Join(t.TempDir(), "transcript.jsonl")
 	line := `{"type":"user","sessionId":"sess-1","message":{"role":"user","content":"fix the uploader"}}` + "\n"
@@ -317,6 +338,9 @@ func TestCmdTurnEnabledEntryWithEmptyProjIDMakesNoCall(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srv.URL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
+	// Pin the actor so NewBackend does not consult /defaults/my-actor here;
+	// these tests cover turn capture, not identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 
 	transcript := writeTurnTranscript(t, "sess-1")
 	withArgs(t, "engram", "turn", "--session", "sess-1", "--transcript", transcript, "--cwd", turnProjectDir(t, "acme"))

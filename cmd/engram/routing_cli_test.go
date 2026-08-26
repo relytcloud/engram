@@ -25,6 +25,11 @@ func setupMemoryLakeEnv(t *testing.T, srvURL, project, projID string) {
 	t.Setenv("ENGRAM_MEMORYLAKE_BASE_URL", srvURL)
 	t.Setenv("ENGRAM_MEMORYLAKE_API_KEY", "sk-test")
 	t.Setenv("ENGRAM_MEMORYLAKE_WORKSPACE", "ws-1")
+	// Pin the actor: unset, NewBackend would consult /defaults/my-actor to find
+	// the API key's owner, and every fake server built on this helper would have
+	// to serve that endpoint. These tests are about routing and CLI wiring, not
+	// identity resolution.
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "test-machine")
 	t.Setenv("ENGRAM_MEMORYLAKE_TIMEOUT_MS", "5000")
 	t.Setenv("ENGRAM_MEMORYLAKE_EXTRACT_POLL_MS", "5")
 	t.Setenv("ENGRAM_MEMORYLAKE_EXTRACT_MAX_WAIT_MS", "2000")
