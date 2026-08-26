@@ -327,3 +327,83 @@ func TestAppendObservation_RetriesWithRefreshedHeadOn409(t *testing.T) {
 		t.Fatalf("parent_message_id sequence=%v, want [msg-7 msg-9]", parents)
 	}
 }
+
+// TestAppendObservation_AppendsAsAnExistingParticipant guards a real upgrade
+// hazard: MemoryLake rejects an append whose actor is not a participant of the
+// conversation ("INVALID_ARGUMENT (400): Actor '…' is not a participant of this
+// conversation"). A conversation created under a previous identity — a session
+// that started before the actor moved from the machine hostname to the API
+// key's owner — must keep accepting turns, so the append goes out as the
+// participant the conversation already has rather than failing for the rest of
+// that session's life.
+func TestAppendObservation_AppendsAsAnExistingParticipant(t *testing.T) {
+	var lastMsgBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": false, "error_code": "CUSTOM_ID_CONFLICT", "message": "exists",
+			})
+		case r.Method == "GET" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations/session-abc":
+			// Created under the old, hostname-derived actor.
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id":                 "conv-1",
+				"actor_ids":          []string{"actor-hostname"},
+				"current_message_id": "msg-7",
+			}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			json.NewDecoder(r.Body).Decode(&lastMsgBody)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true, "data": map[string]any{"id": "msg-8"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
+	// actor-me is the freshly resolved identity, and is NOT a participant.
+	if _, err := c.AppendObservation("ws-1", "proj-1", "session-abc", "actor-me",
+		store.AddObservationParams{Content: "a turn on an older conversation"}); err != nil {
+		t.Fatalf("AppendObservation: %v", err)
+	}
+	if lastMsgBody["actor_id"] != "actor-hostname" {
+		t.Fatalf("actor_id=%v, want actor-hostname (the conversation's participant)", lastMsgBody["actor_id"])
+	}
+}
+
+// TestAppendObservation_KeepsOwnActorWhenItIsAParticipant is the other side:
+// when the resolved actor does participate, it stays the sender — the
+// participant fallback must not override a perfectly good identity.
+func TestAppendObservation_KeepsOwnActorWhenItIsAParticipant(t *testing.T) {
+	var lastMsgBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/memories/conversations":
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"id": "conv-1", "actor_ids": []string{"actor-other", "actor-me"},
+			}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/conversations/conv-1/messages":
+			json.NewDecoder(r.Body).Decode(&lastMsgBody)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": true, "data": map[string]any{"id": "msg-1"},
+			})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000})
+	if _, err := c.AppendObservation("ws-1", "proj-1", "session-abc", "actor-me",
+		store.AddObservationParams{Content: "hello"}); err != nil {
+		t.Fatalf("AppendObservation: %v", err)
+	}
+	if lastMsgBody["actor_id"] != "actor-me" {
+		t.Fatalf("actor_id=%v, want actor-me", lastMsgBody["actor_id"])
+	}
+}

@@ -46,13 +46,14 @@ func (c *Client) AppendObservation(ws, projID, convCustomID, actorID string, p s
 	}
 
 	head := conv.CurrentMessageID
+	sender := senderFor(conv, actorID)
 	for attempt := 0; ; attempt++ {
 		var msg struct {
 			ID string `json:"id"`
 		}
 		body := map[string]any{
 			"custom_id": contentHash(p.Content),
-			"actor_id":  actorID,
+			"actor_id":  sender,
 			"content": []map[string]any{
 				{"block_type": "TEXT", "text": p.Content},
 			},
@@ -169,6 +170,39 @@ func (c *Client) ensureConversation(ws, projID, customID, actorID string) (conve
 type conversationRef struct {
 	ID               string `json:"id"`
 	CurrentMessageID string `json:"current_message_id"`
+	// ActorIDs are the conversation's participants. MemoryLake refuses an
+	// append whose actor is not one of them, so this is what decides who a
+	// message can be sent as — see senderFor.
+	ActorIDs []string `json:"actor_ids"`
+}
+
+// senderFor picks the actor to append as: our own resolved identity when the
+// conversation already counts it as a participant, otherwise a participant it
+// does have.
+//
+// This is what keeps a conversation created under a previous identity usable.
+// A session that began while the actor was still derived from the machine
+// hostname has that hostname actor as its only participant; once the actor
+// resolves to the API key's owner instead, every further append to that same
+// conversation would be rejected with
+//
+//	INVALID_ARGUMENT (400): Actor '…' is not a participant of this conversation
+//
+// and, because per-turn sync never retries, every remaining turn of that
+// session would be lost. Extending the conversation as the participant it
+// already has costs nothing — the server stamps its own per-conversation
+// participant handle on the stored message regardless — and new conversations
+// are unaffected, since those are created with our own actor.
+func senderFor(conv conversationRef, actorID string) string {
+	if len(conv.ActorIDs) == 0 {
+		return actorID
+	}
+	for _, a := range conv.ActorIDs {
+		if a == actorID {
+			return actorID
+		}
+	}
+	return conv.ActorIDs[0]
 }
 
 // getConversationByCustomID resolves a conversation by its caller-defined
