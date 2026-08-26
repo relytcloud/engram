@@ -116,8 +116,9 @@ type MemoryLakeBackend struct {
 
 // NewBackend constructs a MemoryLakeBackend for the given workspace reference
 // (custom_id, name, or "ws-" id) and already-resolved MemoryLake project id. It
-// resolves the workspace id and ensures a HUMAN actor exists (keyed by
-// cfg.Actor, falling back to the machine hostname).
+// resolves the workspace id and ensures a HUMAN actor exists, keyed by
+// cfg.Actor if set, else by the API key's own owner (see DefaultActor), else
+// by the machine hostname.
 func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 	client := NewClient(cfg)
 
@@ -126,15 +127,34 @@ func NewBackend(cfg Config, ws, projID string) (*MemoryLakeBackend, error) {
 		return nil, err
 	}
 
-	actorCustomID := cfg.Actor
+	// Actor identity, most specific source first. An explicitly configured
+	// actor always decides — someone who set one on purpose must not have it
+	// replaced — so the lookup below is only reached when nothing is set.
+	actorCustomID, actorDisplayName := cfg.Actor, cfg.Actor
 	if actorCustomID == "" {
+		// Ask MemoryLake who this API key belongs to. Attributing an agent's
+		// conversations to that person is what makes them findable under their
+		// account; a hostname actor never is, and it leaves one orphaned actor
+		// per machine behind.
+		if me, mErr := client.DefaultActor(); mErr == nil && me.CustomID != "" {
+			actorCustomID, actorDisplayName = me.CustomID, me.DisplayName
+		}
+	}
+	if actorCustomID == "" {
+		// No key owner to be had — a deployment without the endpoint, or a
+		// failed lookup. Fall back to the machine rather than failing
+		// construction, which is exactly what engram did before.
 		if h, herr := os.Hostname(); herr == nil && h != "" {
 			actorCustomID = h
 		} else {
 			actorCustomID = "engram"
 		}
+		actorDisplayName = actorCustomID
 	}
-	actorID, err := client.EnsureActor(wsID, actorCustomID, actorCustomID)
+	if actorDisplayName == "" {
+		actorDisplayName = actorCustomID
+	}
+	actorID, err := client.EnsureActor(wsID, actorCustomID, actorDisplayName)
 	if err != nil {
 		return nil, err
 	}

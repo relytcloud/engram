@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1265,5 +1266,123 @@ func assertBackendContextSectionOrder(t *testing.T, out string) {
 	}
 	if strings.Contains(out, "### Recent Sessions") {
 		t.Fatalf("MemoryLake backend has no sessions to render:\n%s", out)
+	}
+}
+
+// myActorServer stands in for MemoryLake while exercising NewBackend's actor
+// resolution. It records the custom_id/display_name the backend tried to
+// create an actor with, and serves /defaults/my-actor per the caller's wish:
+// found, absent (404), or present-but-empty.
+func myActorServer(t *testing.T, mode string, seen *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v3/defaults/my-actor":
+			switch mode {
+			case "found":
+				json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+					"id":           "actor-me",
+					"custom_id":    "user::abc123",
+					"actor_type":   "HUMAN",
+					"display_name": "someone@example.com",
+				}})
+			case "empty":
+				json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{}})
+			default: // "missing" — an older deployment without the endpoint
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]any{
+					"success": false, "error_code": "NOT_FOUND", "message": "no such endpoint",
+				})
+			}
+		case r.Method == "POST" && r.URL.Path == "/api/v3/actors":
+			json.NewDecoder(r.Body).Decode(seen)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+}
+
+// TestNewBackend_ActorFromMyActorEndpoint is the point of the change: with no
+// actor configured, the backend asks MemoryLake who the API key belongs to
+// instead of inventing a per-machine identity. The display name comes from the
+// endpoint too, so the actor reads as a person rather than as "user::<uuid>".
+func TestNewBackend_ActorFromMyActorEndpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var seen map[string]any
+	srv := myActorServer(t, "found", &seen)
+	defer srv.Close()
+
+	b, err := NewBackend(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000}, "ws-1", "proj-42")
+	if err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	if b.actorID != "actor-x" {
+		t.Fatalf("actorID=%q, want actor-x", b.actorID)
+	}
+	if seen["custom_id"] != "user::abc123" {
+		t.Fatalf("actor custom_id=%v, want user::abc123 (from /defaults/my-actor)", seen["custom_id"])
+	}
+	if seen["display_name"] != "someone@example.com" {
+		t.Fatalf("actor display_name=%v, want someone@example.com", seen["display_name"])
+	}
+}
+
+// TestNewBackend_ConfiguredActorWinsOverMyActor pins the precedence: an
+// explicit ENGRAM_MEMORYLAKE_ACTOR / config value still decides, and the
+// endpoint is not consulted at all — someone who set an actor on purpose must
+// not have it silently replaced.
+func TestNewBackend_ConfiguredActorWinsOverMyActor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var seen map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/v3/defaults/my-actor":
+			t.Fatalf("/defaults/my-actor must not be called when an actor is configured")
+		case r.Method == "POST" && r.URL.Path == "/api/v3/actors":
+			json.NewDecoder(r.Body).Decode(&seen)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": "actor-x"}})
+		case r.Method == "POST" && r.URL.Path == "/api/v3/workspaces/ws-1/actors":
+			json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000, Actor: "cli-machine"}
+	if _, err := NewBackend(cfg, "ws-1", "proj-42"); err != nil {
+		t.Fatalf("NewBackend: %v", err)
+	}
+	if seen["custom_id"] != "cli-machine" {
+		t.Fatalf("actor custom_id=%v, want cli-machine", seen["custom_id"])
+	}
+}
+
+// TestNewBackend_FallsBackToHostnameWhenMyActorUnavailable keeps the change
+// safe against a deployment that has no /defaults/my-actor (or answers it with
+// nothing): resolution must land on the hostname exactly as it did before,
+// rather than failing backend construction.
+func TestNewBackend_FallsBackToHostnameWhenMyActorUnavailable(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skip("hostname unavailable on this machine")
+	}
+	for _, mode := range []string{"missing", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			var seen map[string]any
+			srv := myActorServer(t, mode, &seen)
+			defer srv.Close()
+
+			if _, err := NewBackend(Config{BaseURL: srv.URL, APIKey: "sk-test", TimeoutMS: 5000}, "ws-1", "proj-42"); err != nil {
+				t.Fatalf("NewBackend: %v", err)
+			}
+			if seen["custom_id"] != host {
+				t.Fatalf("actor custom_id=%v, want the hostname %q", seen["custom_id"], host)
+			}
+		})
 	}
 }
