@@ -2502,7 +2502,12 @@ func cmdMemorylakeConfig(cfg store.Config) {
 	fmt.Printf("  workspace: %s\n", eff.Workspace)
 	actor := eff.Actor
 	if actor == "" {
-		actor = "(unset — defaults to this machine's hostname)"
+		// Deliberately describes the resolution rather than performing it:
+		// this command is a local read of where config comes from, and
+		// resolving the actor for real would mean a MemoryLake round trip that
+		// makes it slow or failing offline. `engram doctor` is the place for
+		// live checks.
+		actor = "(unset — resolved from the API key's owner, else this machine's hostname)"
 	}
 	fmt.Printf("  actor:     %s\n", actor)
 	fmt.Printf("  api_key:   %s\n", maskSecret(eff.APIKey))
