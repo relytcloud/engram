@@ -4385,3 +4385,48 @@ func TestMeetsProtocolVersionFloorForkVersions(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdMemorylakeConfig_UnsetActorDescribesRealResolution pins what the
+// command tells the user when no actor is configured. Saying it "defaults to
+// this machine's hostname" was true only before the actor started resolving
+// from the API key's owner; leaving it in place tells people they must set an
+// actor to be attributed to themselves, which is exactly what they no longer
+// have to do. The hostname is the last-resort fallback, not the default.
+func TestCmdMemorylakeConfig_UnsetActorDescribesRealResolution(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "")
+	oldArgs := os.Args
+	os.Args = []string{"engram", "memorylake", "config"}
+	defer func() { os.Args = oldArgs }()
+
+	stdout, _ := captureOutput(t, func() { cmdMemorylakeConfig(store.Config{}) })
+
+	if strings.Contains(stdout, "defaults to this machine's hostname") {
+		t.Fatalf("actor line still claims the hostname is the default:\n%s", stdout)
+	}
+	// The two sources that actually decide, in order.
+	for _, want := range []string{"API key", "hostname"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("actor line does not mention %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestCmdMemorylakeConfig_SetActorIsShownVerbatim guards the other branch: a
+// configured actor is printed as-is, with no resolution commentary attached.
+func TestCmdMemorylakeConfig_SetActorIsShownVerbatim(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ENGRAM_MEMORYLAKE_ACTOR", "user::abc123")
+	oldArgs := os.Args
+	os.Args = []string{"engram", "memorylake", "config"}
+	defer func() { os.Args = oldArgs }()
+
+	stdout, _ := captureOutput(t, func() { cmdMemorylakeConfig(store.Config{}) })
+
+	if !strings.Contains(stdout, "actor:     user::abc123") {
+		t.Fatalf("configured actor not shown verbatim:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "hostname") {
+		t.Fatalf("resolution commentary leaked into a configured actor line:\n%s", stdout)
+	}
+}
